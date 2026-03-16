@@ -1,0 +1,52 @@
+# === 阿斯拉量化系統 - 後端依賴 ===
+
+# Web 框架
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+python-multipart>=0.0.12
+websockets>=13.0,<16.0
+
+# 數據處理
+pandas>=2.2.0
+numpy>=1.26.0
+
+# 技術指標計算
+pandas-ta>=0.3.14b1
+
+# 統計計算（因子分析）
+scipy>=1.11.0
+
+# 加密貨幣交易所 API
+ccxt>=4.4.0
+
+# LLM 供應商 SDK
+openai>=1.50.0
+anthropic>=0.37.0
+google-genai>=1.0.0
+httpx>=0.27.0
+
+# 加密 (API Key 存儲)
+cryptography>=43.0.0
+
+# 環境變數管理
+python-dotenv>=1.0.1
+
+# 時區
+pytz>=2024.1
+
+# 資料驗證
+pydantic>=2.9.0
+pydantic-settings>=2.5.0
+
+# 日誌
+loguru>=0.7.0
+
+# 測試
+pytest>=8.3.0
+pytest-asyncio>=0.24.0
+
+# 語意嵌入（本地模型，語意快取用）
+sentence-transformers>=4.0.0
+
+# PDF 生成（知識報告匯出）
+fpdf2>=2.8.0

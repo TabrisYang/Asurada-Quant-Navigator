@@ -1,0 +1,775 @@
+# 阿斯拉量化系統 — 完整系統 Prompt 與架構規格書
+
+> **最後更新：2026-03-09** — 與實際程式碼同步
+
+## 系統定位
+
+你是「阿斯拉量化系統」的 AI 分析助手。這是一個加密貨幣量化分析平台，使用者可以透過自然語言與你互動，在 K 線圖上進行專業級的技術分析。你的角色類似於一個「會說話的 TradingView」，但比 TradingView 更智慧——使用者不需要學習 Pine Script，只需用自然語言描述需求，你就能在圖表上呈現結果。
+
+---
+
+## 核心能力範圍（Level 1 + Level 2）
+
+### Level 1：圖表分析（核心功能）
+- 切換幣種、時間週期、日期範圍
+- 新增/移除/調整 30 項量化指標及其參數
+- 條件查詢（例如「RSI < 25 的時間段」「MACD 黃金交叉的日期」）
+- 在圖表上批量繪製標記（支撐壓力線、趨勢線、高亮區間、文字標籤），支援分組管理
+- 一鍵繪製完整技術形態（諧波、三角形、旗型等），只需提供轉折點
+- 指標的知識問答和專業備註（Pro Tips）
+- 解讀五源投票機制中的異常數據
+
+### Level 2：智慧分析（進階功能）
+- 根據當前圖表自動生成文字分析報告
+- 根據使用者問題推薦多維度指標組合
+- 歷史類比（找出相似的技術形態）
+- 用自然語言描述策略 → 生成回測配置 → 顯示績效
+- 多策略比較（夏普比率、最大回撤、利潤因子）
+- 回測策略多元化（自動使用 5 種不同策略模板進行比較）
+- 參數最佳化建議
+- 多條件組合查詢
+- 30 層機構交易分析框架（使用者自訂，AI 參考但不侷限）
+
+### 安全邊界（LLM 不可做的事）
+- ❌ 讀取或修改系統檔案
+- ❌ 執行任意程式碼
+- ❌ 存取使用者的 API Key 明文
+- ❌ 對外發送非預定義的網路請求
+- ❌ 下單或執行任何實際交易操作
+
+---
+
+## 系統架構
+
+```
+┌───────────────────────────────────────────────────┐
+│                  前端 (React)                       │
+│  ┌──────────┐ ┌──────────┐ ┌──────────────────┐  │
+│  │ 對話介面  │ │ K線圖表  │ │ 指標面板(可調參數) │  │
+│  │ +快捷問題 │ │ +AI標記  │ │ +策略庫設定      │  │
+│  │ +進度狀態 │ │ +可調副圖│ │ +PDF匯出        │  │
+│  └──────────┘ └──────────┘ └──────────────────┘  │
+└───────────────────────────────────────────────────┘
+                        ↕
+┌───────────────────────────────────────────────────┐
+│                 後端 (FastAPI)                      │
+│                                                    │
+│  ┌──────────────────────────────────────────┐     │
+│  │  LLM 層                                   │     │
+│  │  多供應商適配器 (GPT/Gemini/Claude/Ollama) │     │
+│  │  + Function Calling (10 個函式)           │     │
+│  │  + 三輪互動 (分析→繪圖→文字)             │     │
+│  │  + 使用者策略注入 + 知識蒸餾注入          │     │
+│  └──────────────────────────────────────────┘     │
+│                        ↕                           │
+│  ┌──────────────┐  ┌──────────────────────┐      │
+│  │ 指標計算引擎  │  │ 回測引擎              │      │
+│  │ (30項指標)    │  │ NumPy 向量化          │      │
+│  │ + Registry   │  │ Sharpe/MDD/PF/勝率    │      │
+│  └──────────────┘  └──────────────────────┘      │
+│                        ↕                           │
+│  ┌──────────────────────────────────────────┐     │
+│  │  數據層                                    │     │
+│  │  CryptoDataEngine (OHLCV + 五源投票)       │     │
+│  │  + ExternalDataFetcher (費率/情緒)         │     │
+│  │  + SQLite 快取 (分析/知識/用量/碎片/語意)  │     │
+│  │  + 使用者策略庫 (JSON)                     │     │
+│  └──────────────────────────────────────────┘     │
+└───────────────────────────────────────────────────┘
+```
+
+---
+
+## 數據層規格
+
+### CryptoDataEngine（現有系統整合）
+
+核心數據引擎，從多個交易所抓取 OHLCV 數據。
+
+**支援交易所**：
+- Binance（預設，價格優先）
+- Bybit
+- OKX
+- Coinbase（自動映射 USDT → USD）
+- Kraken（可選）
+
+**五源投票機制**：
+- 5源：取排序第3值
+- 4源：取第2、3平均
+- 3源：取第2值
+- 2源：取平均
+- 1源：直接採用
+- 異常閾值：0.5%
+- 最終價格：優先 Binance，異常時用中位數
+
+**數據欄位**：
+- timestamp（台北時區 UTC+8）
+- open, high, low, close, volume
+- median_price, final_price
+- anomaly_detected, anomaly_sources, data_sources_count
+
+**支援時間週期**：15m, 1h, 4h, 1d, 1w
+
+**CSV 存儲**：`data/ohlcv/{BASE}_{QUOTE}_{TIMEFRAME}.csv`
+
+**時區規則**：
+- API 請求：UTC
+- 存儲/顯示：台北時區 (UTC+8)
+- 格式：YYYY-MM-DD HH:MM:SS
+- 前端 K 線圖：`toChartTime()` 以 UTC 方式解析台北時間字串，確保圖表時間軸與 CSV 一致
+- 日期選擇器：`datetime-local` 搭配 `lang="zh-TW"` 強制 24 小時制
+
+**預設交易對**：
+BTC/USDT, ETH/USDT, SOL/USDT, XRP/USDT, DOGE/USDT,
+ADA/USDT, AVAX/USDT, LINK/USDT, DOT/USDT, MATIC/USDT
+
+### ExternalDataFetcher（免費 API 優先）
+
+| 數據 | 免費來源 | 備註 |
+|------|---------|------|
+| 資金費率 | Binance/Bybit API | 每8小時更新 |
+| 恐懼貪婪指數 | Alternative.me API | 每日更新 |
+| Google 趨勢 | pytrends (非官方) | 有限流 |
+| CVD | Binance Trades API | 需自行聚合 |
+| POC | Binance Klines 計算 | Volume Profile |
+| IV | Deribit API | 有 Rate Limit |
+| 交易所淨流入/出 | CoinMetrics 社群版 / Blockchain.com | 有延遲 |
+| MVRV | CoinMetrics 社群版 | 有延遲 |
+
+---
+
+## 量化指標庫（30 項已實作）
+
+### A 類：OHLCV 可計算（23 項）— 本地即時計算
+
+#### 1. 均線系統 (SMA/EMA)
+- 類別：動能與趨勢
+- 參數：period（預設20, 範圍5-200, int）、ma_type（SMA/EMA）
+- 顯示：overlay（疊加K線）
+- 暖機期：period 根K線
+- Pro Tip：黃金交叉常有延遲，建議搭配斜率使用
+
+#### 2. ADX (趨勢強度)
+- 類別：動能與趨勢
+- 參數：period（預設14, 範圍5-50, int）、threshold（預設25, 範圍15-40, float）
+- 顯示：sub_chart
+- 暖機期：2 × period 根K線
+- Pro Tip：ADX低時避免趨勢策略，否則會被雙向洗盤
+
+#### 3. RSI (相對強弱指標)
+- 類別：均值回歸
+- 參數：period（預設14, 範圍2-100, int）、overbought（預設70, 範圍50-95, float）、oversold（預設30, 範圍5-50, float）
+- 顯示：sub_chart
+- 暖機期：period 根K線
+- Pro Tip：加密貨幣波動大，RSI常會鈍化（在80以上待很久）
+
+#### 4. 乖離率 (Bias)
+- 類別：均值回歸
+- 參數：period（預設20, 範圍5-120, int）、ma_type（SMA/EMA）
+- 顯示：sub_chart
+- 暖機期：period 根K線
+- Pro Tip：用來抓BTC短線暴跌反彈（抄底）非常有效
+
+#### 5. 布林帶 (Bollinger Bands)
+- 類別：波動率
+- 參數：period（預設20, 範圍5-200, int）、std_dev（預設2.0, 範圍0.5-4.0, float）
+- 顯示：overlay
+- 暖機期：period 根K線
+- Pro Tip：Squeeze（擠壓）狀態是量化交易員最愛的爆發訊號
+
+#### 6. ATR (真實波幅)
+- 類別：波動率
+- 參數：period（預設14, 範圍5-50, int）
+- 顯示：sub_chart
+- 暖機期：period 根K線
+- Pro Tip：主要用於設定止損（如止損設在2倍ATR處）
+
+#### 7. 爆量突破 (Relative Volume)
+- 類別：成交量
+- 參數：period（預設20, 範圍5-60, int）、threshold（預設2.0, 範圍1.5-5.0, float）
+- 顯示：sub_chart
+- 暖機期：period 根K線
+- Pro Tip：價格突破但沒爆量，通常是假突破（誘多/誘空）
+
+#### 8. OBV (能量潮)
+- 類別：成交量
+- 參數：無（觀察背離）
+- 顯示：sub_chart
+- 暖機期：1 根K線
+- Pro Tip：OBV先創新高而價格沒動，通常代表即將補漲
+
+#### 9. 日內時段效應
+- 類別：時間週期
+- 參數：session_type（亞洲/歐洲/美國）
+- 顯示：overlay（背景色標記）
+- 暖機期：0
+- Pro Tip：BTC常在美股開盤前後半小時出現當日最大波動
+
+#### 10. 追蹤止損 (Trailing Stop)
+- 類別：風險控管
+- 參數：atr_multiplier（預設3.0, 範圍1.0-5.0, float）、atr_period（預設14, 範圍5-50, int）
+- 顯示：overlay
+- 暖機期：atr_period 根K線
+- Pro Tip：能保住獲利，讓利潤在趨勢中奔跑
+
+#### 11. ROC (變動率)
+- 類別：動能
+- 參數：period（預設14, 範圍5-60, int）
+- 顯示：sub_chart
+- 暖機期：period 根K線
+- Pro Tip：尋找ROC曲線斜率陡峭上升的區段
+
+#### 12. MACD (含柱狀體斜率)
+- 類別：動能
+- 參數：fast_period（預設12, 範圍5-30, int）、slow_period（預設26, 範圍15-60, int）、signal_period（預設9, 範圍5-20, int）
+- 顯示：sub_chart
+- 暖機期：slow_period + signal_period 根K線
+- Pro Tip：觀察柱狀體是否由負轉正且連續三根放大
+
+#### 13. 唐奇安通道 (Donchian Channel)
+- 類別：動能
+- 參數：period（預設20, 範圍10-55, int）
+- 顯示：overlay
+- 暖機期：period 根K線
+- Pro Tip：突破上軌買入，跌破下軌賣出
+
+#### 14. Keltner Channels
+- 類別：波動率
+- 參數：ema_period（預設20, 範圍10-50, int）、atr_multiplier（預設2.0, 範圍1.0-3.0, float）、atr_period（預設14, 範圍5-50, int）
+- 顯示：overlay
+- 暖機期：max(ema_period, atr_period) 根K線
+- Pro Tip：突破通道通常是真突破，比布林帶更貼合趨勢
+
+#### 15. 波動性切換 (Volatility Switch)
+- 類別：波動率
+- 參數：short_period（預設10, 範圍5-30, int）、long_period（預設50, 範圍20-200, int）、threshold（預設0.5, 範圍0.1-1.0, float）
+- 顯示：sub_chart
+- 暖機期：long_period 根K線
+- Pro Tip：低於閾值代表波動性噴發即將來臨
+
+#### 16. 凱利公式 (Kelly Criterion)
+- 類別：部位管理
+- 參數：win_rate（預設0.55, 範圍0.1-0.9, float）、payoff_ratio（預設2.0, 範圍0.5-10.0, float）、fraction（預設0.5, 範圍0.1-1.0, float）
+- 顯示：info_panel
+- Pro Tip：實戰通常使用半凱利或更保守比例
+
+#### 17. 波動率平衡 (Volatility Targeting)
+- 類別：部位管理
+- 參數：target_vol（預設0.15, 範圍0.05-0.50, float）、lookback（預設20, 範圍10-60, int）
+- 顯示：sub_chart
+- Pro Tip：讓帳戶曲線走得更平穩
+
+#### 18. 最大回撤 (Max Drawdown)
+- 類別：風險控管
+- 參數：window（預設0=全部, 範圍0-365, int）
+- 顯示：sub_chart
+- Pro Tip：一旦MDD超過預期，代表市場環境已改變
+
+#### 19. VWAP (成交量加權均價)
+- 類別：動能與趨勢
+- 顯示：overlay
+- Pro Tip：機構交易員的重要成本參考線
+
+#### 20. 一目均衡表 (Ichimoku)
+- 類別：動能與趨勢
+- 顯示：overlay
+- Pro Tip：雲層厚度反映支撐/壓力強度
+
+#### 21. 拋物線轉向 (Parabolic SAR)
+- 類別：動能與趨勢
+- 顯示：overlay
+- Pro Tip：趨勢明確時跟蹤止損的好工具
+
+#### 22. 超級趨勢 (Supertrend)
+- 類別：動能與趨勢
+- 顯示：overlay
+- Pro Tip：綠轉紅或紅轉綠是重要的趨勢轉換信號
+
+#### 23. 隨機相對強弱 (StochRSI)
+- 類別：均值回歸
+- 顯示：sub_chart
+- Pro Tip：比 RSI 更敏感，適合短線交易
+
+#### 24. Market Structure（市場結構）
+- 類別：型態辨識
+- 分析 Swing High/Low → HH/HL/LH/LL 標記 + 結構線
+- 顯示：overlay（marker + 連線）
+
+#### 25. Harmonic Patterns（諧波型態）
+- 類別：型態辨識
+- Zigzag 偵測 + Fibonacci 比例驗證
+- 支援 Gartley/Bat/Butterfly/Crab/Shark
+- 顯示：overlay（marker）
+
+### B 類：需外部 API（5 項）— 免費來源優先
+
+#### 26. 恐懼與貪婪指數
+- 數據源：Alternative.me API（免費）
+- 顯示：sub_chart
+
+#### 27. 資金費率 (Funding Rate)
+- 數據源：Binance API（免費）
+- 顯示：sub_chart
+
+#### 28. CVD (累計買賣盤差)
+- 數據源：K 線近似計算（免費）
+- 顯示：sub_chart
+
+#### 29. POC (籌碼控制點)
+- 數據源：Binance Klines 計算（免費）
+- 顯示：overlay
+
+#### 30. HV (歷史波動率)
+- 年化百分比計算
+- 顯示：sub_chart
+
+### C 類：回測評估指標
+
+| 指標 | 用途 | 優良標準 |
+|------|------|---------|
+| Sharpe Ratio | 風險調整報酬 | > 1.5 |
+| Profit Factor | 盈虧比 | 1.5 ~ 2.5 |
+| Max Drawdown | 最大回撤 | < 20% |
+| Win Rate | 勝率 | > 50%（配合盈虧比） |
+
+---
+
+## LLM 整合規格
+
+### 支援的 LLM 供應商
+
+| 供應商 | SDK | Function Calling 格式 |
+|--------|-----|----------------------|
+| OpenAI (GPT-4/4o) | openai SDK | tools |
+| Google Gemini | google-genai SDK | function_declarations |
+| Anthropic Claude | anthropic SDK | tool_use |
+| 本地 Ollama | REST API | 自訂格式 |
+
+### API Key 管理
+- 使用者自行輸入 API Key
+- 後端使用 Fernet 對稱加密存儲（記憶體內，不落磁碟明文）
+- 前端使用 sessionStorage（關閉瀏覽器自動失效）
+- 傳輸使用 session token 機制（不直接傳送明文 Key）
+- 支援「偵測模型」功能（自動探測可用模型列表）
+- Session 過期自動偵測（後端重啟後前端自動清除舊 session）
+- 本地 Ollama 無需 Key
+
+### Function Calling 定義（10 個函式）
+
+#### Level 1：圖表操作
+
+**query_chart_data** — 切換/取得 K 線數據
+```json
+{
+  "symbol": "BTC/USDT",
+  "timeframe": "1d",
+  "start_date": "2025-01-01",
+  "end_date": "2026-03-09"
+}
+```
+
+**manage_indicator** — 新增/移除/調整技術指標
+```json
+{
+  "action": "add|remove|update",
+  "indicator_id": "rsi|macd|bb|ema|sma|adx|...",
+  "parameters": {"period": 21}
+}
+```
+
+**find_conditions** — 條件查詢
+```json
+{
+  "conditions": [
+    {"indicator": "rsi", "operator": "<", "value": 30}
+  ],
+  "logical_operator": "AND|OR"
+}
+```
+
+**annotate_chart** — 批量繪圖（支援分組管理）
+```json
+{
+  "group_name": "支撐壓力位",
+  "annotations": [
+    {"annotation_type": "horizontal_line", "price": 95000, "text": "壓力", "color": "#f85149"},
+    {"annotation_type": "horizontal_line", "price": 88000, "text": "支撐", "color": "#3fb950"}
+  ]
+}
+```
+- 支援類型：highlight_range, vertical_line, horizontal_line, text_label, trend_line
+- trend_line 需提供 start_time + price（起點）和 end_time + end_price（終點）
+- **group_name 必填**：使用者可在圖表右上角面板開關/刪除每組標記
+
+**draw_pattern** — 一鍵繪製技術形態
+```json
+{
+  "pattern_name": "Gartley",
+  "points": [
+    {"label": "X", "time": "2025-01-01 00:00:00", "price": 100000},
+    {"label": "A", "time": "2025-01-05 00:00:00", "price": 105000},
+    {"label": "B", "time": "2025-01-10 00:00:00", "price": 102000},
+    {"label": "C", "time": "2025-01-15 00:00:00", "price": 104000},
+    {"label": "D", "time": "2025-01-20 00:00:00", "price": 101000}
+  ],
+  "bullish": true,
+  "color": "#f0b90b"
+}
+```
+- 系統自動連線各點 + 標注標籤
+- 支援諧波（Gartley/Bat/Butterfly/Crab/Shark）、三角形、旗型、頭肩頂等
+
+#### Level 2：智慧分析
+
+**generate_analysis** — 生成技術分析報告
+```json
+{ "focus": "趨勢|支撐壓力|波動率" }
+```
+
+**suggest_indicators** — 推薦指標組合
+```json
+{ "analysis_goal": "趨勢判斷|超買超賣|波動率" }
+```
+
+**run_backtest** — 策略回測
+```json
+{
+  "entry_conditions": [{"indicator": "rsi", "operator": "<", "value": 30}],
+  "exit_conditions": [{"indicator": "rsi", "operator": ">", "value": 70}],
+  "direction": "long",
+  "stop_loss_pct": 3.0,
+  "take_profit_pct": 6.0,
+  "initial_capital": 10000
+}
+```
+
+**compare_strategies** — 多策略比較（2-5 個策略同時回測）
+```json
+{
+  "strategies": [
+    {"name": "RSI 均值回歸", "entry_conditions": [...], "exit_conditions": [...]},
+    {"name": "趨勢跟蹤", "entry_conditions": [...], "exit_conditions": [...]}
+  ]
+}
+```
+
+### 三輪 LLM 互動流程
+
+```
+使用者提問
+    ↓
+第一輪：LLM 解析意圖 → 產生 Function Calls（query_chart_data, manage_indicator, find_conditions 等）
+    ↓
+後端執行 Function Calls → 結果回傳
+    ↓
+第二輪：LLM 根據執行結果分析 → 產生文字回覆 + 繪圖指令（annotate_chart, draw_pattern, manage_indicator）
+    ↓
+後端執行繪圖指令 → SSE 推送到前端
+    ↓
+（如果第二輪只有 function calls 沒有文字 → 觸發第三輪）
+第三輪（純文字）：強制 LLM 生成文字分析回覆（force_text=True，不允許 tool calls）
+```
+
+### 使用者策略注入
+
+每次 LLM 對話時，自動注入以下 context（按順序）：
+1. **使用者自訂分析策略**（如 30 層機構交易框架，參考但不限制）
+2. **蒸餾知識**（從歷史對話壓縮的精華 + 使用者分析風格）
+3. **RAG 知識碎片**（語意匹配的歷史分析結論，L3.5 融合）
+4. **歷史對話記錄**（最近 N 輪）
+5. **當前使用者訊息**
+
+### SSE 串流事件類型
+
+| 事件 | 說明 |
+|------|------|
+| `thinking` | LLM 開始思考 |
+| `status` | 進度狀態（「正在分析…」「正在執行圖表操作…」「正在整理分析結果… (N秒)」） |
+| `function` | Function Call 執行中 |
+| `token` | 文字串流（逐 token） |
+| `chart` | 圖表更新（指標/標記/數據切換） |
+| `usage` | Token 用量統計 |
+| `error` | 錯誤訊息 |
+| `done` | 串流結束 |
+
+### SYSTEM_PROMPT 核心指引
+
+- **多維度交叉分析框架**：6 個維度（趨勢方向、動量超買超賣、量能驗證、波動率關鍵價位、市場情緒、風險管理），每個維度至少用 2 個指標交叉驗證
+- **智慧繪圖策略**：精選原則（每次最多 3~5 組標記）、優先順序、顏色規範、主動繪圖行為
+- **批量繪圖範例**：annotate_chart 用 annotations 陣列一次繪多條線
+- **draw_pattern 範例**：諧波型態只需 5 個點即可自動連線
+- **回測策略多元化**：5 種策略模板（趨勢跟蹤/均值回歸/量價突破/動量反轉/波動率收斂突破），未指定時自動比較至少 3 種
+- **指標必須同步添加**：文字提到的指標必須同時呼叫 manage_indicator 添加到圖表
+- **知識萃取**：每次分析後自動附加 `---KEY_INSIGHTS---` 結構化知識碎片
+
+### LLM 安全防護
+
+1. **輸入過濾**：送入 LLM 前檢查是否包含注入攻擊語句
+2. **輸出驗證**：確認回傳的 JSON 結構合法，只包含白名單內的函式呼叫
+3. **Function 白名單**：LLM 只能呼叫上述 10 個預定義函式
+4. **Token 控制**：
+   - 不將原始 OHLCV 數據送入 LLM（只傳 20 根 K 線摘要）
+   - LLM 只負責意圖解析，計算交給後端
+   - 對話歷史超過閾值時自動摘要壓縮
+   - 顯示預估 Token 消耗和費用
+5. **超時保護**：60s 統一超時 + asyncio.wait_for 雙重保護
+6. **除零防護**：ADX/RSI 等指標安全除法
+
+---
+
+## 使用者互動模式
+
+### 雙軌操作（完全等價，雙向同步）
+
+**方式 A：LLM 對話**
+- 輸入自然語言 → LLM 解析 → 自動更新圖表和參數
+- LLM 改的參數會同步到 UI 面板
+- 可自訂快捷問題（常用問題一鍵發送，localStorage 存儲）
+- 進度狀態即時回饋（「正在分析…」+ 耗時計時器）
+
+**方式 B：手動 UI 面板**
+- 指標清單（30項，分類別摺疊）
+- 每個指標旁開關（控制顯示/隱藏）
+- 參數滑桿 + 數字輸入框 + Tooltip 說明
+- 一鍵恢復預設值 / 一鍵清除全部指標
+- 手動改的參數會同步到 LLM 上下文
+
+**集中式狀態管理**：所有參數變更無論來源，都走同一個 state update。
+
+---
+
+## API 端點設計
+
+```
+# 對話（SSE Streaming）
+POST   /api/chat/stream             # LLM 串流對話
+POST   /api/chat/                   # LLM 非串流對話
+GET    /api/chat/history             # 歷史對話列表
+GET    /api/chat/history/{id}        # 特定對話內容
+GET    /api/chat/distill/status      # 知識蒸餾狀態
+POST   /api/chat/distill/preview     # 蒸餾預覽
+POST   /api/chat/distill/confirm     # 確認蒸餾
+GET    /api/chat/distill/knowledge   # 已蒸餾知識
+
+# 圖表
+GET    /api/chart/data               # 取得 K 線數據
+GET    /api/chart/available/list     # 可用交易對
+
+# 指標
+GET    /api/indicators/list          # 取得可用指標清單（30 個）
+POST   /api/indicators/calculate     # 計算指標
+POST   /api/indicators/search        # 條件搜尋
+
+# 設定
+POST   /api/config/llm               # 設定 LLM + API Key（回傳 session token）
+POST   /api/config/llm/test          # 測試 LLM 連線
+POST   /api/config/llm/models        # 偵測可用模型
+GET    /api/config/llm/providers     # 可用供應商列表
+GET    /api/config/llm/session/{id}  # 查詢 session 狀態
+DELETE /api/config/llm/session/{id}  # 撤銷 session
+POST   /api/config/usage/summary     # 累計 Token 用量
+POST   /api/config/usage/daily       # 每日用量明細
+GET    /api/config/strategies         # 列出自訂分析策略
+POST   /api/config/strategies         # 新增策略
+PUT    /api/config/strategies/{id}    # 更新策略
+DELETE /api/config/strategies/{id}    # 刪除策略
+
+# 數據同步
+GET    /api/data/sync-status         # 同步狀態
+POST   /api/data/sync                # 觸發數據同步
+GET    /api/data/sync-task/{id}      # 同步任務進度
+GET    /api/data/available-exchanges # 可用交易所
+GET    /api/data/available-symbols   # 可用交易對
+
+# 匯出
+GET    /api/export/knowledge-pdf     # 匯出 AI 分析報告 PDF（LLM 生成結構化報告）
+
+# 健康檢查
+GET    /api/health                   # 系統健康狀態
+```
+
+---
+
+## 前端圖表規格
+
+### 技術選型
+- TradingView Lightweight Charts v5（核心 K 線圖）
+- React 18 + TypeScript
+- Zustand（狀態管理）
+- Tailwind CSS（樣式）
+
+### 圖表功能
+- K 線主圖 + 多個子圖（可拖曳調整高度，最小 60px，最大 400px）
+- 指標 overlay 疊加
+- 時間區間高亮標記
+- 滑鼠懸停顯示詳細數值（Crosshair + OHLCV + overlay 指標值 + 副圖指標值）
+- 時間範圍拖曳選擇
+- 響應式設計
+- 副圖右上角 ✕ 關閉按鈕（直接移除指標）
+- AI 標記分組管理面板（可收合，預設收合為小按鈕，展開後可開關/刪除每組標記）
+- 動態價格精度（根據幣種價格等級自動調整小數位）
+- 主圖/副圖時間軸精確同步（統一 Y 軸寬度 + ref 即時同步 + crosshair 跨圖同步）
+
+### 指標顯示分類
+- **Overlay**：疊在K線上（均線、布林帶、Keltner、唐奇安、追蹤止損、VWAP、Ichimoku、PSAR、Supertrend、Market Structure、Harmonic）
+- **Sub Chart**：獨立子圖（RSI、MACD、ATR、OBV、ROC、ADX、Bias、StochRSI、Rel_Vol、Vol_Switch、Max_Drawdown、HV、CVD、Fear_Greed、Funding 等）
+- **Info Panel**：資訊面板（凱利公式、回測結果）
+
+---
+
+## 設定面板
+
+### 分頁結構
+
+1. **LLM 設定**：選供應商 → 輸入 API Key → 偵測模型 → 選模型 → 測試連線 → 儲存
+2. **分析策略庫**：管理使用者自訂分析方法論（新增/編輯/刪除/啟停用），AI 助手會參考已啟用策略但不受限制
+3. **匯出/匯入**：JSON 設定匯出匯入 + AI 分析報告 PDF 匯出（LLM 生成結構化報告，fpdf2 渲染，支援 CJK）
+
+---
+
+## 安全性規格
+
+### Prompt Injection 防護
+- 輸入過濾層（檢查注入攻擊語句）
+- LLM 輸出驗證（結構合法性）
+- Function Calling 白名單（10 個函式）
+- 不允許執行任意程式碼
+
+### API Key 安全
+- 後端 Fernet 加密（記憶體內，不落磁碟明文）
+- 前端 sessionStorage（關閉瀏覽器自動清除）
+- Session Token 機制（HTTP 傳輸不暴露明文 Key）
+- 用量追蹤使用 SHA-256 Hash（不可逆）
+- Session 過期自動偵測（`SESSION_EXPIRED` 信號 + 前端自動清除）
+- 偵測模型 + 連線測試功能
+
+---
+
+## 效能優化
+
+### 快取策略（五層攔截 + RAG 知識融合，越用越省 token 且越用越聰明）
+- L1：知識快取（14 筆常見 TA 問答，關鍵字匹配，零 token 消耗）
+- L2：分析快取（SQLite，相同問題 hash + 相同數據指紋 → 直接回傳，近期 6h / 歷史 30d TTL）
+- L3：語意快取（高置信度 ≥0.92 直接返回，零 token 消耗）
+  - 模型：`paraphrase-multilingual-MiniLM-L12-v2`（支援中英混合，384 維向量）
+  - 每次 LLM 新回答自動存入向量庫，擴大覆蓋範圍
+  - 重複問題自動去重（相似度 > 0.95 不重複存入）
+- L3.5：知識融合（中度相似 0.75~0.92 → RAG 注入歷史知識碎片到 LLM prompt，低 token 消耗）
+  - 知識碎片自動從 LLM 回答中提取（`---KEY_INSIGHTS---` 結構化輸出）
+  - 碎片類型：support_resistance / trend / pattern / indicator / strategy / volume / sentiment
+  - 每個幣種最多 200 筆碎片，90 天 TTL，自動淘汰低命中率碎片
+  - 14 筆種子知識（BTC/ETH 通用 + 策略經驗）永不過期，首次使用即可受益
+  - 幣種交叉比對：問題中提到的幣種 ≠ 圖表幣種時，跳過快取避免誤判
+- L4：LLM 呼叫（以上全部未命中才走 API，消耗 token）
+- 額外：知識蒸餾（舊對話壓縮為精華知識，注入 LLM context 使 AI 更懂你）
+- 額外：使用者策略注入（自訂分析框架注入 LLM context，參考但不限制）
+- 額外：CSV 本地存儲（歷史 OHLCV 數據，存放在 `data/ohlcv/`）
+
+### 指標暖機處理
+- 每個指標定義 warmup_periods
+- 查詢時自動往前多抓 max(warmup_periods) 的數據
+- 前端不顯示暖機期數據
+
+### 回應速度
+- LLM Streaming 回應（SSE Server-Sent Events，邊生成邊顯示）
+- 圖表載入動畫（spinner）
+- 大量歷史數據異步處理 + 進度回報
+- Three-Round LLM 交互（Function Call 執行 → 繪圖指令 → 強制文字回覆）
+- 60s 統一超時 + asyncio.wait_for 雙重保護
+
+### 資料持久化
+- **對話歷史**：SQLite `data/db/chat_history.db`（保留 60 天）
+- **Token 用量**：SQLite `data/db/usage.db`（SHA-256 Hash 追蹤，保留 180 天）
+- **知識蒸餾**：SQLite `data/db/knowledge.db`（壓縮後的分析記憶 + 使用者風格）
+- **分析快取**：SQLite `data/db/analysis_cache.db`（數據指紋自動失效）
+- **語意快取**：SQLite `data/db/semantic_cache.db`（嵌入向量 + 問答，越用越準）
+- **知識碎片**：SQLite `data/db/knowledge_fragments.db`（RAG 碎片 + 向量 + 種子知識）
+- **使用者策略**：JSON `data/db/user_strategies.json`（自訂分析方法論，持久化）
+- **OHLCV 數據**：CSV `data/ohlcv/`（與資料庫隔離，避免誤刪）
+
+---
+
+## 錯誤處理
+
+| 情境 | 處理方式 |
+|------|---------|
+| LLM API 超時/失敗 | 友善錯誤提示，建議重試或換模型（60s 超時保護） |
+| 交易所 API 全掛 | 使用本地快取，標註「數據可能非最新」|
+| 指標計算 NaN/Inf | 安全除法過濾異常值，不讓圖表崩潰 |
+| API Key 無效 | 即時檢測，引導重新設定 |
+| Session 過期 | 自動偵測 SESSION_EXPIRED，前端清除舊 session 引導重新輸入 |
+| 前端渲染失敗 | ErrorBoundary 全覆蓋捕獲，顯示錯誤訊息 + 重試按鈕，不影響其他區域 |
+| 數據不足（暖機期）| 提示需要更多歷史數據 |
+| OpenAI 401 權限不足 | 特殊錯誤處理，友善提示 |
+| Gemini 429 配額用盡 | 動態模型切換建議 |
+
+---
+
+## 使用者設定持久化
+
+- sessionStorage 存儲 LLM 設定（API Key 加密 session token，關閉瀏覽器自動失效）
+- Zustand 集中式狀態管理（圖表狀態、指標、對話、LLM 設定）
+- 對話歷史後端 SQLite 持久化（可透過「📋 歷史」按鈕回顧/還原）
+- Token 用量後端持久化（可透過「📊 用量」面板查看累計消耗）
+- 知識蒸餾（可透過「🧠 整理」按鈕觸發，壓縮舊對話為精華知識）
+- 自訂快捷問題（localStorage 存儲，可新增/修改/刪除常用問題）
+- 自訂分析策略（JSON 持久化，可多條策略分別啟停用）
+
+---
+
+## 已完成功能清單
+
+1. ✅ 專案骨架 + 環境設定（.command 一鍵啟動）
+2. ✅ 數據層：CryptoDataEngine 整合（五源投票、斷點續傳、增量更新）
+3. ✅ 30 項技術指標計算引擎（含 A 類 OHLCV + B 類外部數據 + Market Structure + Harmonic + CVD + POC + HV）
+4. ✅ LLM 多供應商適配器（OpenAI / Gemini / Claude / Ollama + Function Calling + 動態模型探測）
+5. ✅ 後端 API 層（FastAPI + SSE Streaming + 三輪互動）
+6. ✅ 前端 K 線圖渲染（lightweight-charts v5 + 主圖/副圖/overlay + 動態價格精度）
+7. ✅ 前端 LLM 對話 + 指標疊加 + 參數面板（雙軌同步）
+8. ✅ AI 助手圖表操控（切換幣種/時間週期、新增指標、圖表標記）
+9. ✅ 安全防護（Fernet 加密、Session Token、Session 過期偵測、Prompt Injection 過濾）
+10. ✅ 對話歷史持久化 + Token 用量追蹤 + 知識蒸餾
+11. ✅ 五層快取 + RAG 知識融合（L1 知識 → L2 分析 → L3 語意 → L3.5 碎片融合 → L4 LLM）
+12. ✅ ErrorBoundary 前端全覆蓋崩潰保護
+13. ✅ 資料目錄隔離（DB vs OHLCV 分離 + 自動遷移）
+14. ✅ K 線圖時區修正（台北時間一致顯示）+ 日期時間選擇器精確到時分（24 小時制）
+15. ✅ 主圖/副圖時間軸精確對齊（統一 Y 軸寬度 + ref 即時同步 + crosshair 跨圖同步）
+16. ✅ 趨勢線（斜線）繪製支援 + 批量繪圖 + 分組管理
+17. ✅ Market Structure 市場結構指標（Swing High/Low + HH/HL/LH/LL 標記 + 結構線）
+18. ✅ 自動知識融合 RAG（LLM 回答自動提取 KEY_INSIGHTS → 向量化碎片 → 新問題注入歷史經驗）
+19. ✅ 快取幣種交叉比對（問題提到的幣種 ≠ 圖表幣種時跳過快取）
+20. ✅ 14 筆種子知識預載（BTC/ETH 通用指標經驗 + 通用交易策略）
+21. ✅ 回測引擎實作（NumPy 向量化 + 保守滑點 0.05% + 手續費 0.1% + 止損止盈 + IS/OOS 分割 + 完整績效統計）
+22. ✅ 多策略比較（compare_strategies function call，同時回測 2-5 個策略，Sharpe 排名）
+23. ✅ 智慧繪圖策略（精選原則、顏色規範、諧波繪圖指南、主動繪圖行為）
+24. ✅ 諧波型態偵測指標（Zigzag + Fibonacci 比例驗證 + Gartley/Bat/Butterfly/Crab/Shark）
+25. ✅ LLM 適配器超時保護（60s 統一超時 + asyncio.wait_for 雙重保護）
+26. ✅ 技術指標除零防護（ADX/RSI 安全除法 + Registry 空數據防護）
+27. ✅ 回測引擎修正（跳空缺口處理 + 進場資金記錄 + 止損止盈取真實價格）
+28. ✅ 前端效能優化（API 統一錯誤攔截 + ChartView useMemo/memo + Store 精細訂閱）
+29. ✅ 對話資源管理（final_text 50KB 上限 + TimeoutError 捕獲 + finally 清理）
+30. ✅ 外部數據完善（CVD 累計量差 + POC 成交量密集區 + HV 歷史波動率）
+31. ✅ 匯出/匯入設定（JSON 格式，含圖表設定 + 指標組合 + 標記）
+32. ✅ 基礎測試框架（pytest 23 個測試，覆蓋指標計算 + 回測引擎）
+33. ✅ 進度狀態即時回饋（SSE status 事件 + 前端動態進度列 + 耗時計時器）
+34. ✅ 動態價格精度（根據幣種價格等級自動調整小數位數）
+35. ✅ 十字線數值顯示（主圖 OHLCV + overlay 指標值 + 副圖指標值，DOM 直接操作避免重渲染）
+36. ✅ 自訂快捷問題（可新增/修改/刪除常用問題，localStorage 持久化）
+37. ✅ AI 分析報告 PDF 匯出（LLM 生成結構化報告 → fpdf2 渲染 → CJK 字型支援）
+38. ✅ OpenAI 三輪互動修復（第二輪只有 function calls 時觸發第三輪純文字生成）
+39. ✅ Session 過期自動偵測（SESSION_EXPIRED 信號 + 前端自動清除引導重新輸入）
+40. ✅ 多維度交叉分析框架（6 維度交叉驗證 + 信心等級判斷）
+41. ✅ draw_pattern 型態繪圖函式（一鍵繪製諧波/三角形/旗型等，自動連線+標注）
+42. ✅ annotate_chart 批量繪圖 + 分組管理（group_name + annotations 陣列）
+43. ✅ AI 標記管理面板（可收合/展開，分組開關/刪除，類 TradingView）
+44. ✅ 副圖可拖曳調整高度（drag handle，60-400px）
+45. ✅ 副圖 ✕ 關閉按鈕（直接在圖表上移除指標）
+46. ✅ 使用者自訂分析策略庫（CRUD API + 前端管理 UI + 注入 LLM context）
+47. ✅ 回測策略多元化指引（5 種策略模板 + 自動比較至少 3 種）
+48. ✅ 預設 30 層機構交易分析框架（首次啟動自動載入）
+
+### 待開發功能
+
+- ⬜ CI/CD 流程建立
+- ⬜ 鏈上數據整合（地址分析、大戶持倉等）
+- ⬜ Google 趨勢整合

@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# 環境
+.env
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# 數據
+data/ohlcv/
+data/db/
+
+# 快取
+*.pyc
+.pytest_cache/
+.mypy_cache/
+
+# 日誌
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
