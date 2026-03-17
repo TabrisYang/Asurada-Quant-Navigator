@@ -37,6 +37,38 @@ def _safe_list(series: pd.Series) -> list:
     return [None if pd.isna(v) else round(float(v), 6) for v in series]
 
 
+def _vectorized_divergence(price: pd.Series, indicator: pd.Series, lookback: int) -> pd.Series:
+    """向量化背離偵測（共用於 RSI 背離、MACD 背離等）。
+
+    底背離(+1)：價格在近期低位，但指標值高於近期最低值（動能未跟隨下探）。
+    頂背離(-1)：價格在近期高位，但指標值低於近期最高值（動能未跟隨上衝）。
+    """
+    roll_price_min = price.rolling(window=lookback, min_periods=lookback).min()
+    roll_price_max = price.rolling(window=lookback, min_periods=lookback).max()
+    roll_ind_min = indicator.rolling(window=lookback, min_periods=lookback).min()
+    roll_ind_max = indicator.rolling(window=lookback, min_periods=lookback).max()
+
+    price_range = roll_price_max - roll_price_min
+    safe_range = price_range.replace(0, np.nan)
+
+    # 價格在近期低位（低於 15 分位）
+    price_low_pctile = (price - roll_price_min) / safe_range
+    # 價格在近期高位（高於 85 分位）
+    price_high_pctile = price_low_pctile
+
+    # 指標沒有跟隨創新低/新高（5% 容差）
+    ind_above_min = indicator > roll_ind_min * 1.05
+    ind_below_max = indicator < roll_ind_max * 0.95
+
+    valid = indicator.notna() & roll_ind_min.notna()
+
+    divergence = pd.Series(0.0, index=price.index)
+    divergence[valid & (price_low_pctile <= 0.15) & ind_above_min] = 1.0
+    divergence[valid & (price_high_pctile >= 0.85) & ind_below_max] = -1.0
+
+    return divergence
+
+
 # =============================================
 # 1. SMA 移動平均
 # =============================================
@@ -1341,3 +1373,426 @@ def calc_high(df: pd.DataFrame, params: dict) -> dict[str, list]:
 )
 def calc_low(df: pd.DataFrame, params: dict) -> dict[str, list]:
     return {"Low": _safe_list(df["low"])}
+
+
+# =============================================
+# 先行訊號偵測指標
+# =============================================
+
+@registry.register(
+    id="vol_squeeze",
+    name="波動壓縮",
+    category="先行訊號",
+    description="布林帶寬度 (BB Width) 相對近 N 期的分位，低值代表波動壓縮，預示即將突破",
+    parameters={
+        "bb_period": {"default": 20, "min": 10, "max": 50, "type": "int"},
+        "lookback": {"default": 120, "min": 40, "max": 300, "type": "int"},
+    },
+    display_mode="sub_chart",
+    warmup_func=lambda p: max(p.get("bb_period", 20), p.get("lookback", 120)),
+    pro_tip="分位低於 10% 為強壓縮，通常預示大幅波動即將來臨",
+)
+def calc_vol_squeeze(df: pd.DataFrame, params: dict) -> dict[str, list]:
+    period = int(params.get("bb_period", 20))
+    lookback = int(params.get("lookback", 120))
+    close = df["close"]
+
+    sma = close.rolling(window=period).mean()
+    std = close.rolling(window=period).std()
+    safe_sma = sma.replace(0, np.nan)
+    bb_width = (2 * std / safe_sma) * 100
+
+    # 計算滾動分位：目前 BB Width 在近 lookback 期中的百分位
+    squeeze_pctile = bb_width.rolling(window=lookback).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100
+        if len(x) >= lookback else np.nan,
+        raw=False,
+    )
+
+    # 壓縮信號：0=無, 1=壓縮中(分位<20%), 2=強壓縮(分位<10%)
+    signal = pd.Series(0.0, index=df.index)
+    signal[squeeze_pctile < 20] = 1.0
+    signal[squeeze_pctile < 10] = 2.0
+
+    return {
+        "BB_Width_Pctile": _safe_list(squeeze_pctile),
+        "Squeeze_Signal": _safe_list(signal),
+    }
+
+
+@registry.register(
+    id="rsi_divergence",
+    name="RSI 背離",
+    category="先行訊號",
+    description="偵測價格與 RSI 的底背離（看多）和頂背離（看空），是趨勢反轉的早期信號",
+    parameters={
+        "rsi_period": {"default": 14, "min": 7, "max": 30, "type": "int"},
+        "lookback": {"default": 30, "min": 10, "max": 60, "type": "int"},
+    },
+    display_mode="sub_chart",
+    warmup_func=lambda p: p.get("rsi_period", 14) + p.get("lookback", 30),
+    pro_tip="+1=底背離(看多信號), -1=頂背離(看空信號), 0=無背離",
+)
+def calc_rsi_divergence(df: pd.DataFrame, params: dict) -> dict[str, list]:
+    rsi_period = int(params.get("rsi_period", 14))
+    lookback = int(params.get("lookback", 30))
+    close = df["close"]
+
+    delta = close.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+    avg_gain = gain.ewm(alpha=1.0 / rsi_period, min_periods=rsi_period).mean()
+    avg_loss = loss.ewm(alpha=1.0 / rsi_period, min_periods=rsi_period).mean()
+    safe_loss = avg_loss.replace(0, np.nan)
+    rs = avg_gain / safe_loss
+    rsi = 100 - (100 / (1 + rs))
+
+    divergence = _vectorized_divergence(close, rsi, lookback)
+    return {"RSI_Div": _safe_list(divergence)}
+
+
+@registry.register(
+    id="vol_divergence",
+    name="成交量背離",
+    category="先行訊號",
+    description="偵測價格方向與 OBV 方向不一致的情況，預示趨勢可能反轉",
+    parameters={
+        "period": {"default": 20, "min": 10, "max": 50, "type": "int"},
+    },
+    display_mode="sub_chart",
+    warmup_func=lambda p: p.get("period", 20) + 5,
+    pro_tip="+1=量價背離看多(價格跌但 OBV 升), -1=量價背離看空(價格漲但 OBV 跌), 0=正常",
+)
+def calc_vol_divergence(df: pd.DataFrame, params: dict) -> dict[str, list]:
+    period = int(params.get("period", 20))
+    close = df["close"]
+    volume = df["volume"]
+
+    obv = (np.sign(close.diff()) * volume).fillna(0).cumsum()
+
+    price_slope = close.rolling(window=period).apply(
+        lambda x: np.polyfit(range(len(x)), x, 1)[0] if len(x) >= period else np.nan,
+        raw=False,
+    )
+    obv_slope = obv.rolling(window=period).apply(
+        lambda x: np.polyfit(range(len(x)), x, 1)[0] if len(x) >= period else np.nan,
+        raw=False,
+    )
+
+    # 標準化斜率方向
+    price_dir = np.sign(price_slope)
+    obv_dir = np.sign(obv_slope)
+
+    divergence = pd.Series(0.0, index=df.index)
+    # 價格下跌但 OBV 上升 → 底部背離（看多）
+    divergence[(price_dir < 0) & (obv_dir > 0)] = 1.0
+    # 價格上漲但 OBV 下跌 → 頂部背離（看空）
+    divergence[(price_dir > 0) & (obv_dir < 0)] = -1.0
+
+    return {
+        "Vol_Div": _safe_list(divergence),
+    }
+
+
+@registry.register(
+    id="macd_divergence",
+    name="MACD 背離",
+    category="先行訊號",
+    description="偵測價格與 MACD 柱狀圖的底背離（看多）和頂背離（看空），與 RSI 背離形成雙重確認",
+    parameters={
+        "fast": {"default": 12, "min": 5, "max": 20, "type": "int"},
+        "slow": {"default": 26, "min": 15, "max": 40, "type": "int"},
+        "signal": {"default": 9, "min": 5, "max": 15, "type": "int"},
+        "lookback": {"default": 30, "min": 10, "max": 60, "type": "int"},
+    },
+    display_mode="sub_chart",
+    warmup_func=lambda p: p.get("slow", 26) + p.get("lookback", 30),
+    pro_tip="+1=底背離(看多信號), -1=頂背離(看空信號), 0=無背離",
+)
+def calc_macd_divergence(df: pd.DataFrame, params: dict) -> dict[str, list]:
+    fast = int(params.get("fast", 12))
+    slow = int(params.get("slow", 26))
+    sig = int(params.get("signal", 9))
+    lookback = int(params.get("lookback", 30))
+    close = df["close"]
+
+    ema_fast = _ema(close, fast)
+    ema_slow = _ema(close, slow)
+    macd_line = ema_fast - ema_slow
+    signal_line = _ema(macd_line, sig)
+    histogram = macd_line - signal_line
+
+    divergence = _vectorized_divergence(close, histogram, lookback)
+    return {"MACD_Div": _safe_list(divergence)}
+
+
+@registry.register(
+    id="leading_composite",
+    name="綜合先行訊號",
+    category="先行訊號",
+    description="合併波動壓縮、RSI 背離、MACD 背離、成交量背離四種先行訊號，產生三級警示",
+    parameters={
+        "bb_period": {"default": 20, "min": 10, "max": 50, "type": "int"},
+        "rsi_period": {"default": 14, "min": 7, "max": 30, "type": "int"},
+        "lookback": {"default": 30, "min": 10, "max": 60, "type": "int"},
+    },
+    display_mode="sub_chart",
+    warmup_func=lambda p: max(p.get("bb_period", 20), p.get("rsi_period", 14)) + p.get("lookback", 30) + 120,
+    pro_tip="1=注意(單一訊號), 2=警示(雙重確認), 3=強烈警示(三重以上)。正值看多，負值看空。",
+)
+def calc_leading_composite(df: pd.DataFrame, params: dict) -> dict[str, list]:
+    bb_period = int(params.get("bb_period", 20))
+    rsi_period = int(params.get("rsi_period", 14))
+    lookback = int(params.get("lookback", 30))
+    close = df["close"]
+    n = len(df)
+
+    # 1. 波動壓縮（布林帶寬度分位 <20%）
+    sma = close.rolling(window=bb_period).mean()
+    std = close.rolling(window=bb_period).std()
+    safe_sma = sma.replace(0, np.nan)
+    bb_width = (2 * std / safe_sma) * 100
+    squeeze_pctile = bb_width.rolling(window=120, min_periods=60).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1], raw=False,
+    )
+    is_squeeze = (squeeze_pctile < 0.20).astype(float)
+
+    # 2. RSI 背離
+    delta = close.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+    avg_gain = gain.ewm(alpha=1.0 / rsi_period, min_periods=rsi_period).mean()
+    avg_loss = loss.ewm(alpha=1.0 / rsi_period, min_periods=rsi_period).mean()
+    safe_loss = avg_loss.replace(0, np.nan)
+    rs = avg_gain / safe_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_div = _vectorized_divergence(close, rsi, lookback)
+
+    # 3. MACD 背離
+    ema12 = _ema(close, 12)
+    ema26 = _ema(close, 26)
+    macd_hist = ema12 - ema26 - _ema(ema12 - ema26, 9)
+    macd_div = _vectorized_divergence(close, macd_hist, lookback)
+
+    # 4. 成交量背離（簡化版：OBV slope vs price slope）
+    volume = df["volume"]
+    obv = (np.sign(close.diff()) * volume).fillna(0).cumsum()
+    price_slope = close.rolling(window=lookback).apply(
+        lambda x: np.polyfit(range(len(x)), x, 1)[0] if len(x) >= lookback else np.nan, raw=False,
+    )
+    obv_slope = obv.rolling(window=lookback).apply(
+        lambda x: np.polyfit(range(len(x)), x, 1)[0] if len(x) >= lookback else np.nan, raw=False,
+    )
+    vol_div = pd.Series(0.0, index=df.index)
+    vol_div[(np.sign(price_slope) < 0) & (np.sign(obv_slope) > 0)] = 1.0
+    vol_div[(np.sign(price_slope) > 0) & (np.sign(obv_slope) < 0)] = -1.0
+
+    # 合併：計算看多/看空分別有幾個訊號觸發
+    bullish_count = (
+        is_squeeze
+        + (rsi_div == 1).astype(float)
+        + (macd_div == 1).astype(float)
+        + (vol_div == 1).astype(float)
+    )
+    bearish_count = (
+        is_squeeze
+        + (rsi_div == -1).astype(float)
+        + (macd_div == -1).astype(float)
+        + (vol_div == -1).astype(float)
+    )
+
+    # 產生綜合信號：正值看多，負值看空，絕對值=警示級別
+    composite = pd.Series(0.0, index=df.index)
+    composite[bullish_count >= 1] = bullish_count[bullish_count >= 1]
+    composite[bearish_count >= 1] = -bearish_count[bearish_count >= 1]
+    # 看多看空同時觸發時取較強的
+    both = (bullish_count >= 1) & (bearish_count >= 1)
+    composite[both] = np.where(
+        bullish_count[both] >= bearish_count[both],
+        bullish_count[both], -bearish_count[both],
+    )
+
+    # 上限 ±3
+    composite = composite.clip(-3, 3)
+
+    return {
+        "Leading_Signal": _safe_list(composite),
+        "Bullish_Count": _safe_list(bullish_count),
+        "Bearish_Count": _safe_list(bearish_count),
+    }
+
+
+# =============================================
+# 多時間框架結構轉變 (MSS) 偵測
+# =============================================
+
+_ALL_TIMEFRAMES = ["15m", "1h", "4h", "1d", "1w"]
+_TF_MINUTES = {"15m": 15, "1h": 60, "4h": 240, "1d": 1440, "1w": 10080}
+
+
+def _detect_structure(close: pd.Series, high: pd.Series, low: pd.Series,
+                      pct_threshold: float = 0.03) -> pd.Series:
+    """用 Zigzag 邏輯偵測市場結構（HH/HL/LH/LL）。
+
+    回傳值：+1=多頭結構(HH+HL), -1=空頭結構(LH+LL), 0=不確定。
+    使用百分比閾值過濾小波動。
+    """
+    n = len(close)
+    structure = pd.Series(0.0, index=close.index)
+    if n < 10:
+        return structure
+
+    # Zigzag 轉折點偵測
+    pivots_high = []
+    pivots_low = []
+
+    window = max(5, int(n * 0.02))  # 動態窗口
+    window = min(window, 30)
+
+    roll_max = high.rolling(window=window, center=True, min_periods=3).max()
+    roll_min = low.rolling(window=window, center=True, min_periods=3).min()
+
+    is_pivot_high = (high == roll_max) & (high > close.shift(1) * (1 + pct_threshold * 0.3))
+    is_pivot_low = (low == roll_min) & (low < close.shift(1) * (1 - pct_threshold * 0.3))
+
+    for i in range(window, n - window // 2):
+        if is_pivot_high.iloc[i]:
+            pivots_high.append((i, float(high.iloc[i])))
+        if is_pivot_low.iloc[i]:
+            pivots_low.append((i, float(low.iloc[i])))
+
+    if len(pivots_high) < 2 or len(pivots_low) < 2:
+        return structure
+
+    # 取最近的轉折點判斷結構
+    last_highs = pivots_high[-3:] if len(pivots_high) >= 3 else pivots_high[-2:]
+    last_lows = pivots_low[-3:] if len(pivots_low) >= 3 else pivots_low[-2:]
+
+    hh = last_highs[-1][1] > last_highs[-2][1]  # Higher High
+    ll = last_lows[-1][1] < last_lows[-2][1]     # Lower Low
+    hl = last_lows[-1][1] > last_lows[-2][1]     # Higher Low
+    lh = last_highs[-1][1] < last_highs[-2][1]   # Lower High
+
+    # 填入最近 N 根的結構判斷
+    fill_start = max(last_highs[-1][0], last_lows[-1][0])
+    if hh and hl:
+        structure.iloc[fill_start:] = 1.0   # 多頭
+    elif ll and lh:
+        structure.iloc[fill_start:] = -1.0  # 空頭
+    elif hh and not hl:
+        structure.iloc[fill_start:] = 0.5   # 偏多但不確定
+    elif ll and not lh:
+        structure.iloc[fill_start:] = -0.5  # 偏空但不確定
+
+    return structure
+
+
+@registry.register(
+    id="mtf_mss",
+    name="多時間框架結構 (MSS)",
+    category="先行訊號",
+    description="跨所有時間級別（15m/1h/4h/1d/1w）偵測市場結構並交叉比對。當小級別結構反轉但大級別未反轉時，產生先行警示。",
+    parameters={
+        "pct_threshold": {"default": 3.0, "min": 1.0, "max": 10.0, "type": "float", "step": 0.5},
+    },
+    display_mode="sub_chart",
+    warmup_func=lambda p: 50,
+    pro_tip="Current_TF=當前級別結構。Alignment=多時間框架一致性(-5~+5)。MSS_Signal=當小級別反轉但大級別未反轉時觸發。",
+)
+def calc_mtf_mss(df: pd.DataFrame, params: dict) -> dict[str, list]:
+    pct_threshold = float(params.get("pct_threshold", 3.0)) / 100.0
+    n = len(df)
+
+    # 當前時間級別的結構
+    current_structure = _detect_structure(df["close"], df["high"], df["low"], pct_threshold)
+
+    # 嘗試載入其他時間級別的數據做交叉比對
+    try:
+        from app.data.fetchers.crypto_engine import crypto_engine
+
+        symbol = params.get("_symbol", "BTC/USDT")
+        current_tf = params.get("_timeframe", "4h")
+
+        # fallback: 從 df 的時間間隔推測
+        if current_tf not in _TF_MINUTES and n >= 2:
+            timestamps = pd.to_datetime(df["timestamp"] if "timestamp" in df.columns else df.index)
+            if len(timestamps) >= 2:
+                diff_minutes = (timestamps.iloc[-1] - timestamps.iloc[-2]).total_seconds() / 60
+                for tf, mins in sorted(_TF_MINUTES.items(), key=lambda x: x[1]):
+                    if abs(diff_minutes - mins) < mins * 0.3:
+                        current_tf = tf
+                        break
+
+        # 載入其他級別數據並計算結構
+        tf_structures: dict[str, float] = {}
+        for tf in _ALL_TIMEFRAMES:
+            if tf == current_tf:
+                val = float(current_structure.iloc[-1]) if not pd.isna(current_structure.iloc[-1]) else 0.0
+                tf_structures[tf] = val
+                continue
+            try:
+                tf_df = crypto_engine.load_local_data(symbol, tf)
+                if tf_df.empty or len(tf_df) < 30:
+                    continue
+                tf_df = tf_df.tail(300)
+                s = _detect_structure(tf_df["close"], tf_df["high"], tf_df["low"], pct_threshold)
+                val = float(s.iloc[-1]) if not pd.isna(s.iloc[-1]) else 0.0
+                tf_structures[tf] = val
+            except Exception:
+                pass
+
+        # 計算多時間框架一致性分數 (-5 ~ +5)
+        alignment = sum(tf_structures.values())
+
+        # MSS 信號：小級別反轉但大級別未反轉
+        mss_signal = pd.Series(0.0, index=df.index)
+        current_tf_idx = _ALL_TIMEFRAMES.index(current_tf) if current_tf in _ALL_TIMEFRAMES else 2
+        current_val = tf_structures.get(current_tf, 0)
+
+        # 找大級別的結構共識
+        larger_tfs = [tf for tf in _ALL_TIMEFRAMES[current_tf_idx + 1:] if tf in tf_structures]
+        if larger_tfs:
+            larger_consensus = sum(tf_structures[tf] for tf in larger_tfs) / len(larger_tfs)
+
+            # 小級別轉空但大級別仍多 → 先行看空警示
+            if current_val < -0.3 and larger_consensus > 0.3:
+                mss_signal.iloc[-1] = -1.0
+            # 小級別轉多但大級別仍空 → 先行看多警示
+            elif current_val > 0.3 and larger_consensus < -0.3:
+                mss_signal.iloc[-1] = 1.0
+
+        # 向前填充 MSS 信號（最近 5 根都標記）
+        if float(mss_signal.iloc[-1]) != 0.0:
+            fill_count = min(5, n)
+            mss_signal.iloc[-fill_count:] = mss_signal.iloc[-1]
+
+        # 將一致性分數填充到整個序列（給 LLM 參考）
+        alignment_series = pd.Series(alignment, index=df.index)
+
+        # 構建各級別結構標籤
+        tf_label_map = {}
+        for tf, val in tf_structures.items():
+            if val > 0.5:
+                tf_label_map[tf] = "bullish"
+            elif val < -0.5:
+                tf_label_map[tf] = "bearish"
+            elif val > 0:
+                tf_label_map[tf] = "lean_bullish"
+            elif val < 0:
+                tf_label_map[tf] = "lean_bearish"
+            else:
+                tf_label_map[tf] = "neutral"
+
+        return {
+            "Current_TF_Structure": _safe_list(current_structure),
+            "MTF_Alignment": _safe_list(alignment_series),
+            "MSS_Signal": _safe_list(mss_signal),
+        }
+
+    except Exception:
+        # 如果無法載入其他級別，只返回當前級別結構
+        return {
+            "Current_TF_Structure": _safe_list(current_structure),
+            "MTF_Alignment": _safe_list(pd.Series(0.0, index=df.index)),
+            "MSS_Signal": _safe_list(pd.Series(0.0, index=df.index)),
+        }

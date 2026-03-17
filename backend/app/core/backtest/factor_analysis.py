@@ -24,6 +24,8 @@ SCANNABLE_INDICATORS: list[str] = [
     "rsi", "macd", "adx", "bb", "obv", "atr", "bias", "roc",
     "rel_vol", "stochrsi", "sma", "ema", "vwap", "vol_switch",
     "donchian", "keltner", "supertrend", "cvd", "hv", "psar", "poc",
+    "vol_squeeze", "rsi_divergence", "vol_divergence", "macd_divergence",
+    "leading_composite", "mtf_mss",
 ]
 
 # ─── 近期窗口映射（根據 K 線級別） ──────────────────
@@ -199,6 +201,136 @@ def compute_derived_factors(df: pd.DataFrame) -> dict[str, np.ndarray]:
         hv_l = _to_array(list(hv_long.values())[0])
         hv_l[hv_l == 0] = np.nan
         derived["hv_ratio"] = hv_s / hv_l
+
+    # ── 多參數版本指標 ────────────────────────
+    # RSI 不同週期
+    for period in [7, 21]:
+        rsi_alt = _first_series(registry.calculate("rsi", df, {"period": period}))
+        if rsi_alt is not None:
+            derived[f"rsi_{period}"] = rsi_alt
+
+    # SMA/EMA 不同週期的價格偏離
+    for period in [10, 50, 100]:
+        sma_alt = _first_series(registry.calculate("sma", df, {"period": period}))
+        if sma_alt is not None and atr_arr is not None:
+            safe_atr = atr_arr.copy()
+            safe_atr[safe_atr == 0] = np.nan
+            derived[f"price_vs_sma{period}"] = (close - sma_alt) / safe_atr
+
+    # ADX 不同週期
+    for period in [7, 21]:
+        adx_alt = _first_series(registry.calculate("adx", df, {"period": period}))
+        if adx_alt is not None:
+            derived[f"adx_{period}"] = adx_alt
+
+    # ── 斜率 / 加速度因子 ────────────────────
+    # RSI 斜率（5 根線性回歸斜率）
+    if rsi is not None and len(rsi) > 10:
+        rsi_slope = pd.Series(rsi).rolling(5).apply(
+            lambda x: np.polyfit(range(len(x)), x, 1)[0] if len(x) == 5 else np.nan,
+            raw=False,
+        ).values
+        derived["rsi_slope"] = rsi_slope
+
+    # MACD 零軸距離
+    if macd_calc and "MACD_Line" in macd_calc:
+        macd_line = _to_array(macd_calc["MACD_Line"])
+        derived["macd_zero_dist"] = macd_line
+
+    # 成交量加速度
+    vol = df["volume"].values.astype(float)
+    vol_ma5 = pd.Series(vol).rolling(5).mean().values
+    vol_ma20 = pd.Series(vol).rolling(20).mean().values
+    vol_ma20_safe = vol_ma20.copy()
+    vol_ma20_safe[vol_ma20_safe == 0] = np.nan
+    derived["vol_accel"] = vol_ma5 / vol_ma20_safe
+
+    # 價格動量（不同週期）
+    for period in [3, 10, 20]:
+        mom = _roc(close, period)
+        derived[f"price_mom_{period}"] = mom
+
+    # ── 交叉/位置因子 ─────────────────────────
+    # SMA 交叉信號（短均-長均 / ATR 標準化）
+    sma20 = _first_series(registry.calculate("sma", df, {"period": 20}))
+    sma50 = _first_series(registry.calculate("sma", df, {"period": 50}))
+    if sma20 is not None and sma50 is not None and atr_arr is not None:
+        safe_atr = atr_arr.copy()
+        safe_atr[safe_atr == 0] = np.nan
+        derived["sma_cross_dist"] = (sma20 - sma50) / safe_atr
+
+    # Donchian 位置
+    don_calc = _safe_calc("donchian")
+    if don_calc and "Donchian_Upper" in don_calc and "Donchian_Lower" in don_calc:
+        don_u = _to_array(don_calc["Donchian_Upper"])
+        don_l = _to_array(don_calc["Donchian_Lower"])
+        don_range = don_u - don_l
+        don_range[don_range == 0] = np.nan
+        derived["donchian_position"] = (close - don_l) / don_range
+
+    # 價格相對 ATR 正規化波動
+    if atr_arr is not None:
+        close_safe = close.copy()
+        close_safe[close_safe == 0] = np.nan
+        derived["atr_pct"] = atr_arr / close_safe
+
+    # RSI - 50 距離（衡量中性偏離）
+    if rsi is not None:
+        derived["rsi_neutral_dist"] = rsi - 50.0
+
+    # HighLow 比率
+    high = df["high"].values.astype(float)
+    low = df["low"].values.astype(float)
+    low_safe = low.copy()
+    low_safe[low_safe == 0] = np.nan
+    derived["high_low_ratio"] = (high - low) / low_safe
+
+    # 收盤位置（在當日 HL 範圍中的相對位置）
+    hl_range = high - low
+    hl_range[hl_range == 0] = np.nan
+    derived["close_position"] = (close - low) / hl_range
+
+    # EMA 偏離（短/長）
+    for period in [10, 50]:
+        ema_alt = _first_series(registry.calculate("ema", df, {"period": period}))
+        if ema_alt is not None and atr_arr is not None:
+            safe_atr = atr_arr.copy()
+            safe_atr[safe_atr == 0] = np.nan
+            derived[f"price_vs_ema{period}"] = (close - ema_alt) / safe_atr
+
+    # OBV 斜率
+    if obv_arr is not None and len(obv_arr) > 10:
+        obv_slope = pd.Series(obv_arr).rolling(10).apply(
+            lambda x: np.polyfit(range(len(x)), x, 1)[0] if len(x) == 10 else np.nan,
+            raw=False,
+        ).values
+        obv_std = pd.Series(obv_arr).rolling(20).std().values
+        obv_std[obv_std == 0] = np.nan
+        derived["obv_slope_norm"] = obv_slope / obv_std
+
+    # BIAS 不同週期
+    for period in [10, 30]:
+        sma_b = _first_series(registry.calculate("sma", df, {"period": period}))
+        if sma_b is not None:
+            sma_safe = sma_b.copy()
+            sma_safe[sma_safe == 0] = np.nan
+            derived[f"bias_{period}"] = (close - sma_b) / sma_safe * 100
+
+    # StochRSI 差值（%K - %D 如果有）
+    if stoch_calc and "StochRSI_K" in stoch_calc and "StochRSI_D" in stoch_calc:
+        stoch_k_arr = _to_array(stoch_calc["StochRSI_K"])
+        stoch_d_arr = _to_array(stoch_calc["StochRSI_D"])
+        derived["stochrsi_kd_spread"] = stoch_k_arr - stoch_d_arr
+
+    # 連續漲跌天數
+    price_change = np.diff(close, prepend=close[0])
+    streak = np.zeros(n)
+    for i in range(1, n):
+        if price_change[i] > 0:
+            streak[i] = max(0, streak[i - 1]) + 1
+        elif price_change[i] < 0:
+            streak[i] = min(0, streak[i - 1]) - 1
+    derived["price_streak"] = streak
 
     return derived
 
@@ -404,6 +536,193 @@ def _quantile_analysis(
         }
     except Exception:
         return None
+
+
+# ═══════════════════════════════════════════════════════
+#  智慧策略分級（嚴格 / 建議 / 寬鬆）
+# ═══════════════════════════════════════════════════════
+
+_MIN_TRIGGER_TARGET = 10  # 建議版至少觸發次數
+
+
+def _generate_strategy_tiers(
+    factors: dict[str, np.ndarray],
+    factor_results: dict[str, dict],
+    quantile_results: dict[str, dict],
+    positive: list[tuple[str, dict]],
+    negative: list[tuple[str, dict]],
+    n_bars: int,
+) -> dict:
+    """根據因子掃描結果，自動產生三級策略建議。
+
+    嚴格版：所有有效因子的 best_quantile 條件（AND），可能觸發極少
+    建議版：貪心放寬 — 按 IC 弱→強依次移除/放寬，直到觸發 ≥ 10 次
+    寬鬆版：僅保留 IC 最強的 2 個因子
+    """
+    # 收集有分位數分析的因子條件
+    all_conditions: list[dict] = []
+    for _label, qa in quantile_results.items():
+        bq = qa.get("best_quantile")
+        if not bq or not bq.get("entry_suggestion"):
+            continue
+        factor_name = qa["factor"]
+        if factor_name not in factors:
+            continue
+
+        ranges = qa.get("quantile_ranges", [])
+        n_q = qa.get("n_quantiles", 5)
+        q_idx = bq["index"]
+        q_range = bq.get("range", {})
+        ic_val = factor_results.get(factor_name, {}).get("abs_ic_recent", 0)
+
+        all_conditions.append({
+            "factor": factor_name,
+            "best_q_idx": q_idx,
+            "n_quantiles": n_q,
+            "ranges": ranges,
+            "best_range": q_range,
+            "entry_suggestion": bq["entry_suggestion"],
+            "return_pct": bq.get("return_pct", 0),
+            "abs_ic": ic_val,
+        })
+
+    if not all_conditions:
+        return {}
+
+    # 按 IC 強度排序（強 → 弱）
+    all_conditions.sort(key=lambda c: c["abs_ic"], reverse=True)
+
+    def _count_triggers(conds: list[dict]) -> int:
+        """計算多個條件同時成立的 bar 數"""
+        if not conds:
+            return n_bars
+        masks = []
+        for c in conds:
+            fname = c["factor"]
+            if fname not in factors:
+                continue
+            arr = factors[fname]
+            lo = c.get("use_low")
+            hi = c.get("use_high")
+            if lo is not None and hi is not None:
+                mask = (arr >= lo) & (arr <= hi)
+            elif lo is not None:
+                mask = arr >= lo
+            elif hi is not None:
+                mask = arr <= hi
+            else:
+                continue
+            mask = np.where(np.isnan(arr), False, mask)
+            masks.append(mask)
+        if not masks:
+            return n_bars
+        combined = masks[0]
+        for m in masks[1:]:
+            combined = combined & m
+        return int(np.nansum(combined))
+
+    def _build_condition_entry(c: dict) -> dict:
+        """從原始條件建構帶 use_low/use_high 的結構"""
+        q_idx = c["best_q_idx"]
+        n_q = c["n_quantiles"]
+        ranges = c["ranges"]
+        r = c["best_range"]
+
+        if q_idx == n_q - 1:
+            return {**c, "use_low": r.get("low"), "use_high": None,
+                    "description": f"> {r.get('low', 0):.2f}"}
+        elif q_idx == 0:
+            return {**c, "use_low": None, "use_high": r.get("high"),
+                    "description": f"< {r.get('high', 0):.2f}"}
+        else:
+            return {**c, "use_low": r.get("low"), "use_high": r.get("high"),
+                    "description": f"{r.get('low', 0):.2f} ~ {r.get('high', 0):.2f}"}
+
+    def _relax_condition(c: dict) -> dict:
+        """向相鄰分位放寬一級"""
+        q_idx = c["best_q_idx"]
+        n_q = c["n_quantiles"]
+        ranges = c["ranges"]
+
+        if q_idx == n_q - 1 and q_idx >= 1:
+            new_lo = ranges[q_idx - 1].get("low", c.get("use_low", 0))
+            return {**c, "use_low": new_lo, "best_q_idx": q_idx - 1,
+                    "description": f"> {new_lo:.2f} (放寬)"}
+        elif q_idx == 0 and q_idx < n_q - 1:
+            new_hi = ranges[q_idx + 1].get("high", c.get("use_high", 0))
+            return {**c, "use_high": new_hi, "best_q_idx": q_idx + 1,
+                    "description": f"< {new_hi:.2f} (放寬)"}
+        elif c.get("use_low") is not None and c.get("use_high") is not None:
+            lo_expand = ranges[max(0, q_idx - 1)].get("low", c["use_low"])
+            hi_expand = ranges[min(n_q - 1, q_idx + 1)].get("high", c["use_high"])
+            return {**c, "use_low": lo_expand, "use_high": hi_expand,
+                    "description": f"{lo_expand:.2f} ~ {hi_expand:.2f} (放寬)"}
+        return c
+
+    # === 嚴格版 ===
+    strict_conds = [_build_condition_entry(c) for c in all_conditions]
+    strict_triggers = _count_triggers(strict_conds)
+
+    # === 建議版（貪心放寬，直到觸發 ≥ 目標值）===
+    moderate_conds = [_build_condition_entry(c) for c in all_conditions]
+    moderate_triggers = _count_triggers(moderate_conds)
+
+    if moderate_triggers < _MIN_TRIGGER_TARGET:
+        # 策略：先從 IC 最弱的因子開始移除或放寬
+        for attempt in range(3):
+            if moderate_triggers >= _MIN_TRIGGER_TARGET:
+                break
+            # 嘗試放寬 IC 最弱的因子
+            weakest_idx = len(moderate_conds) - 1
+            if weakest_idx < 0:
+                break
+
+            if attempt == 0:
+                # 第一輪：放寬最弱因子的閾值
+                for i in range(len(moderate_conds) - 1, -1, -1):
+                    relaxed = _relax_condition(moderate_conds[i])
+                    test_conds = moderate_conds[:i] + [relaxed] + moderate_conds[i + 1:]
+                    test_triggers = _count_triggers(test_conds)
+                    if test_triggers > moderate_triggers:
+                        moderate_conds[i] = relaxed
+                        moderate_triggers = test_triggers
+                    if moderate_triggers >= _MIN_TRIGGER_TARGET:
+                        break
+            else:
+                # 第二輪起：移除最弱因子
+                if len(moderate_conds) > 2:
+                    removed = moderate_conds.pop()
+                    moderate_triggers = _count_triggers(moderate_conds)
+
+    # === 寬鬆版（只保留 IC 最強的前 2 個，放寬一級）===
+    loose_conds = [_relax_condition(_build_condition_entry(c)) for c in all_conditions[:2]]
+    loose_triggers = _count_triggers(loose_conds)
+
+    # 如果寬鬆版還不夠，再放寬一次
+    if loose_triggers < _MIN_TRIGGER_TARGET and loose_conds:
+        loose_conds = [_relax_condition(c) for c in loose_conds]
+        loose_triggers = _count_triggers(loose_conds)
+
+    def _format_tier(conds, triggers):
+        return {
+            "conditions": [
+                {
+                    "factor": c["factor"],
+                    "description": c.get("description", c.get("entry_suggestion", "")),
+                    "abs_ic": round(c.get("abs_ic", 0), 4),
+                    "return_pct": round(c.get("return_pct", 0), 2),
+                }
+                for c in conds
+            ],
+            "trigger_count": triggers,
+            "factor_count": len(conds),
+        }
+
+    return {
+        "strict": _format_tier(strict_conds, strict_triggers),
+        "moderate": _format_tier(moderate_conds, moderate_triggers),
+        "loose": _format_tier(loose_conds, loose_triggers),
+    }
 
 
 # ═══════════════════════════════════════════════════════
@@ -636,14 +955,14 @@ def run_factor_scan(
         key=lambda x: x[1]["ic_recent"],
     )[:top_n]
 
-    # 分位數分析（對所有 TOP 正相關和 TOP 負相關因子都做）
+    # 分位數分析（對所有 TOP 正相關和 TOP 負相關因子都做，各取 top_n 個）
     quantile_results = {}
-    for idx, (k, _v) in enumerate(positive[:3]):
+    for idx, (k, _v) in enumerate(positive[:top_n]):
         if k in factors:
             qa = _quantile_analysis(factors[k], fwd_full)
             if qa:
                 quantile_results[f"positive_{idx+1}"] = {"factor": k, **qa}
-    for idx, (k, _v) in enumerate(negative[:3]):
+    for idx, (k, _v) in enumerate(negative[:top_n]):
         if k in factors:
             qa = _quantile_analysis(factors[k], fwd_full)
             if qa:
@@ -656,6 +975,12 @@ def run_factor_scan(
 
     # 高相關警告
     high_corr = _find_high_correlations(factors, list(factor_results.keys()))
+
+    # 智慧策略分級
+    strategy_tiers = _generate_strategy_tiers(
+        factors, factor_results, quantile_results,
+        positive, negative, n,
+    )
 
     # 組裝結果
     def _fmt(items):
@@ -689,6 +1014,7 @@ def run_factor_scan(
         "combo_top": combo_results,
         "quantile_analysis": quantile_results,
         "high_correlation_warnings": high_corr,
+        "strategy_tiers": strategy_tiers,
         "effective_count": sum(
             1 for v in factor_results.values()
             if v["abs_ic_recent"] > 0.05

@@ -73,7 +73,11 @@ async def calculate_indicator(request: IndicatorRequest):
     if df.empty:
         raise HTTPException(status_code=404, detail=f"找不到 {symbol} {timeframe} 的數據")
 
-    result = registry.calculate(request.indicator_type.lower(), df, calc_params)
+    # 注入 symbol / timeframe 到參數（多時間框架指標需要）
+    _calc_params_with_ctx = dict(calc_params or {})
+    _calc_params_with_ctx.setdefault("_symbol", str(symbol))
+    _calc_params_with_ctx.setdefault("_timeframe", str(timeframe))
+    result = registry.calculate(request.indicator_type.lower(), df, _calc_params_with_ctx)
 
     if result is None:
         raise HTTPException(status_code=500, detail="指標計算失敗")

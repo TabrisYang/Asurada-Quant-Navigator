@@ -107,6 +107,23 @@ _INDICATOR_TEXT_MAP: dict[str, tuple[str, str]] = {
     "成交量密集": ("poc", "overlay"),
     "hv": ("hv", "sub_chart"),
     "歷史波動率": ("hv", "sub_chart"),
+    "vol_squeeze": ("vol_squeeze", "sub_chart"),
+    "波動壓縮": ("vol_squeeze", "sub_chart"),
+    "rsi_divergence": ("rsi_divergence", "sub_chart"),
+    "rsi背離": ("rsi_divergence", "sub_chart"),
+    "rsi 背離": ("rsi_divergence", "sub_chart"),
+    "macd_divergence": ("macd_divergence", "sub_chart"),
+    "macd背離": ("macd_divergence", "sub_chart"),
+    "macd 背離": ("macd_divergence", "sub_chart"),
+    "vol_divergence": ("vol_divergence", "sub_chart"),
+    "成交量背離": ("vol_divergence", "sub_chart"),
+    "leading_composite": ("leading_composite", "sub_chart"),
+    "綜合先行": ("leading_composite", "sub_chart"),
+    "先行訊號": ("leading_composite", "sub_chart"),
+    "mtf_mss": ("mtf_mss", "sub_chart"),
+    "mss": ("mtf_mss", "sub_chart"),
+    "結構轉變": ("mtf_mss", "sub_chart"),
+    "多時間框架": ("mtf_mss", "sub_chart"),
 }
 
 # ─── JSON function call 過濾（方案 A 安全網）───────────
@@ -212,6 +229,87 @@ def _detect_mentioned_indicators(text: str, existing_ids: set[str]) -> list[dict
         {"action": "add", "indicator_id": ind_id, "display_mode": dm}
         for ind_id, dm in detected.items()
     ]
+
+
+# 數值相關關鍵詞（避免只是問定義時觸發計算）
+_VALUE_KEYWORDS = {"多少", "是多少", "目前", "現在", "幾", "數值", "分析", "趨勢", "看"}
+
+_MAX_AUTO_CALC = 5  # 單次最多自動計算指標數
+
+
+def _auto_calc_indicator_values(user_msg: str, chart_state: dict | None) -> dict:
+    """偵測使用者訊息中提到的指標，自動計算最新值注入到 chart_state。
+
+    只在使用者訊息包含「數值相關詞」時觸發，避免純定義問題浪費計算。
+    已在前端啟用的指標（indicatorValues 中已有）不重複計算。
+    """
+    if not chart_state or not user_msg:
+        return chart_state or {}
+
+    msg_lower = user_msg.lower()
+
+    has_value_intent = any(kw in user_msg for kw in _VALUE_KEYWORDS)
+    if not has_value_intent:
+        return chart_state
+
+    existing_keys = set((chart_state.get("indicatorValues") or {}).keys())
+    need_calc: list[str] = []
+
+    for keyword, (ind_id, _dm) in _INDICATOR_TEXT_MAP.items():
+        if keyword in msg_lower and ind_id not in need_calc:
+            if ind_id not in existing_keys:
+                need_calc.append(ind_id)
+        if len(need_calc) >= _MAX_AUTO_CALC:
+            break
+
+    if not need_calc:
+        return chart_state
+
+    symbol = chart_state.get("symbol", "")
+    timeframe = chart_state.get("timeframe", "4h")
+
+    try:
+        from app.data.fetchers.crypto_engine import crypto_engine
+        from app.core.indicators import registry as ind_registry
+
+        df = crypto_engine.load_local_data(symbol, timeframe)
+        if df.empty or len(df) < 10:
+            return chart_state
+
+        auto_values = dict(chart_state.get("indicatorValues") or {})
+
+        for ind_id in need_calc:
+            try:
+                calc_result = ind_registry.calculate(ind_id, df)
+                if not calc_result:
+                    continue
+                for series_name, series_data in calc_result.items():
+                    if not series_data:
+                        continue
+                    tail = series_data[-5:]
+                    rounded = [round(v, 4) if v is not None else None for v in tail]
+                    valid = [v for v in rounded if v is not None]
+                    trend = "→"
+                    if len(valid) >= 2:
+                        diff = valid[-1] - valid[0]
+                        thr = abs(valid[0]) * 0.02 or 0.001
+                        if diff > thr:
+                            trend = "↑"
+                        elif diff < -thr:
+                            trend = "↓"
+                    key = series_name if series_name != "value" else ind_id
+                    auto_values[key] = {"values": rounded, "trend": trend, "auto": True}
+            except Exception:
+                pass
+
+        chart_state = {**chart_state, "indicatorValues": auto_values}
+        if need_calc:
+            logger.info(f"自動計算指標值: {need_calc}")
+    except Exception as e:
+        logger.warning(f"自動計算指標值失敗: {e}")
+
+    return chart_state
+
 
 # 觸發摘要壓縮的閾值（歷史訊息超過此數就壓縮舊的部分）
 SUMMARY_THRESHOLD = 10
@@ -621,6 +719,9 @@ async def chat_stream(request: ChatRequest):
     _intents = detect_intents(request.message, mode=request.mode)
     _dynamic_prompt = assemble_system_prompt(_intents)
     logger.info(f"意圖偵測: {_intents} → SYSTEM_PROMPT 模組已動態組裝")
+
+    # ★ 自動計算使用者提到但前端未啟用的指標值，注入 chart_state
+    request.chart_state = _auto_calc_indicator_values(request.message, request.chart_state)
 
     messages = _build_messages(request, rag_fragments=_rag_context_fragments, intents=_intents)
     conversation_id = request.conversation_id or str(uuid.uuid4())

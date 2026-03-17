@@ -563,7 +563,25 @@ export interface FactorScanResult {
     best_quantile?: { index: number; range: { low: number; high: number }; return_pct: number; entry_suggestion: string } | null;
   }>;
   high_correlation_warnings?: { factor_a: string; factor_b: string; correlation: number }[];
+  strategy_tiers?: {
+    strict?: StrategyTier;
+    moderate?: StrategyTier;
+    loose?: StrategyTier;
+  };
   effective_count?: number;
+}
+
+export interface StrategyTierCondition {
+  factor: string;
+  description: string;
+  abs_ic: number;
+  return_pct: number;
+}
+
+export interface StrategyTier {
+  conditions: StrategyTierCondition[];
+  trigger_count: number;
+  factor_count: number;
 }
 
 export async function runFactorScan(req: FactorScanRequest): Promise<FactorScanResult> {
@@ -572,6 +590,38 @@ export async function runFactorScan(req: FactorScanRequest): Promise<FactorScanR
     return res.data;
   } catch (err: unknown) {
     return { status: 'error', message: (err as Error)?.message || '因子掃描失敗' };
+  }
+}
+
+// ===== 觸發次數預覽 =====
+
+export interface TriggerCondition {
+  factor: string;
+  operator: string;
+  value: number;
+  value2?: number;
+  enabled: boolean;
+}
+
+export interface TriggerPreviewResult {
+  status: string;
+  message?: string;
+  trigger_count: number;
+  total_bars: number;
+  trigger_pct: number;
+  conditions_used: number;
+  last_trigger_time?: string;
+}
+
+export async function triggerPreview(
+  symbol: string, timeframe: string, conditions: TriggerCondition[],
+): Promise<TriggerPreviewResult> {
+  try {
+    const res = await api.post('/factor-scan/trigger-preview', { symbol, timeframe, conditions });
+    return res.data;
+  } catch (err: unknown) {
+    return { status: 'error', message: (err as Error)?.message || '預覽失敗',
+             trigger_count: 0, total_bars: 0, trigger_pct: 0, conditions_used: 0 };
   }
 }
 

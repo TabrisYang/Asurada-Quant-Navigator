@@ -1,42 +1,42 @@
 /** 阿斯拉量化系統 — 因子掃描面板 */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { useChartStore } from '../../stores/chartStore';
-import { runFactorScan } from '../../services/api';
-import type { FactorScanResult, FactorScanItem } from '../../services/api';
+import { runFactorScan, triggerPreview } from '../../services/api';
+import type { FactorScanResult, FactorScanItem, StrategyTier, StrategyTierCondition, TriggerCondition } from '../../services/api';
 
-function useGenerateBacktest() {
-  const setPendingChatMessage = useChartStore((s) => s.setPendingChatMessage);
-  const symbol = useChartStore((s) => s.symbol);
-  const timeframe = useChartStore((s) => s.timeframe);
+type TierKey = 'strict' | 'moderate' | 'loose';
 
-  return useCallback((result: FactorScanResult) => {
-    const parts: string[] = [];
-    parts.push(`根據因子掃描結果，請用以下有效因子對 ${symbol} ${timeframe} 做回測：`);
+// ─── 從 tier conditions 轉換成調整器可編輯格式 ───
+function tierToEditableConds(conditions: StrategyTierCondition[]): EditableCond[] {
+  return conditions.map((c) => {
+    let op = '>';
+    let val = 0;
+    let val2: number | undefined;
+    const desc = c.description;
 
-    const allEntries: string[] = [];
-    result.quantile_analysis && Object.values(result.quantile_analysis).forEach((qa) => {
-      if (qa.best_quantile?.entry_suggestion) {
-        allEntries.push(`${qa.factor} ${qa.best_quantile.entry_suggestion}`);
-      }
-    });
-
-    if (allEntries.length > 0) {
-      parts.push(`建議進場條件：${allEntries.join('、')}`);
+    if (desc.includes('~')) {
+      op = 'between';
+      const parts = desc.replace(/[()放寬]/g, '').split('~').map((s) => parseFloat(s.trim()));
+      val = parts[0] || 0;
+      val2 = parts[1] || 0;
+    } else if (desc.startsWith('<')) {
+      op = '<';
+      val = parseFloat(desc.replace(/[<()放寬]/g, '').trim()) || 0;
+    } else if (desc.startsWith('>')) {
+      op = '>';
+      val = parseFloat(desc.replace(/[>()放寬]/g, '').trim()) || 0;
+    } else {
+      const num = parseFloat(desc.replace(/[^0-9.\-]/g, ''));
+      if (!isNaN(num)) { op = '>'; val = num; }
     }
 
-    if ((result.positive_top?.length ?? 0) > 0) {
-      const top3 = result.positive_top!.slice(0, 3).map((f) => f.factor);
-      parts.push(`正相關有效因子：${top3.join('、')}`);
-    }
-    if ((result.negative_top?.length ?? 0) > 0) {
-      const top3 = result.negative_top!.slice(0, 3).map((f) => f.factor);
-      parts.push(`負相關有效因子（反向使用）：${top3.join('、')}`);
-    }
-
-    parts.push('請設計一個結合以上因子的策略並執行回測分析。');
-    setPendingChatMessage(parts.join('\n'));
-  }, [setPendingChatMessage, symbol, timeframe]);
+    return {
+      factor: c.factor, operator: op, value: val, value2: val2,
+      enabled: true, abs_ic: c.abs_ic, return_pct: c.return_pct,
+      original_description: c.description,
+    };
+  });
 }
 
 // ─── IC 強度判讀 ────────────────────────────
@@ -142,27 +142,84 @@ function ComboTable({ items, label }: { items: ComboItem[]; label: string }) {
   );
 }
 
+function buildScanSummary(r: FactorScanResult): string {
+  if (r.status !== 'success') return '';
+  const parts: string[] = [];
+  parts.push(`市場體制:${r.regime?.label ?? '未知'}(ADX=${r.regime?.adx ?? '?'})`);
+  if (r.positive_top?.length) {
+    parts.push('正相關TOP:' + r.positive_top.slice(0, 3).map(
+      (f) => `${f.factor}(IC=${f.ic_recent > 0 ? '+' : ''}${f.ic_recent.toFixed(3)},${f.decay_trend})`
+    ).join(','));
+  }
+  if (r.negative_top?.length) {
+    parts.push('負相關TOP:' + r.negative_top.slice(0, 3).map(
+      (f) => `${f.factor}(IC=${f.ic_recent.toFixed(3)},${f.decay_trend})`
+    ).join(','));
+  }
+
+  // 優先使用策略分級的建議版
+  const moderate = r.strategy_tiers?.moderate;
+  if (moderate && moderate.conditions.length > 0) {
+    const condStr = moderate.conditions.map(
+      (c) => `${c.factor} ${c.description}(IC=${c.abs_ic},報酬${c.return_pct > 0 ? '+' : ''}${c.return_pct}%)`
+    ).join(',');
+    parts.push(`建議版策略(${moderate.trigger_count}次觸發):${condStr}`);
+  } else if (r.quantile_analysis) {
+    const entries = Object.values(r.quantile_analysis)
+      .filter((qa) => qa.best_quantile?.entry_suggestion)
+      .slice(0, 3)
+      .map((qa) => `${qa.factor} ${qa.best_quantile!.entry_suggestion}(報酬${qa.best_quantile!.return_pct > 0 ? '+' : ''}${qa.best_quantile!.return_pct.toFixed(1)}%)`);
+    if (entries.length) parts.push('建議進場:' + entries.join(','));
+  }
+
+  parts.push(`有效因子${r.effective_count}/${r.total_factors_scanned}`);
+  return parts.join('｜');
+}
+
 // ─── 主面板 ─────────────────────────────────
 export default function FactorScanPanel() {
   const symbol = useChartStore((s) => s.symbol);
   const timeframe = useChartStore((s) => s.timeframe);
+  const setLastFactorScan = useChartStore((s) => s.setLastFactorScan);
 
   const [result, setResult] = useState<FactorScanResult | null>(null);
   const [scanning, setScanning] = useState(false);
   const [showPanel, setShowPanel] = useState(false);
+  const [customizerConds, setCustomizerConds] = useState<EditableCond[] | null>(null);
+  const [customizerExpanded, setCustomizerExpanded] = useState(false);
+  const [activeTier, setActiveTier] = useState<TierKey | null>(null);
+
+  const handleLoadTier = useCallback((key: TierKey) => {
+    const tier = result?.strategy_tiers?.[key];
+    if (!tier) return;
+    const conds = tierToEditableConds(tier.conditions);
+    setCustomizerConds(conds);
+    setCustomizerExpanded(true);
+    setActiveTier(key);
+  }, [result]);
 
   const handleScan = useCallback(async () => {
     setScanning(true);
     setShowPanel(true);
+    setActiveTier(null);
+    setCustomizerConds(null);
+    setCustomizerExpanded(false);
     try {
       const data = await runFactorScan({ symbol, timeframe, forward_period: 5, top_n: 5 });
       setResult(data);
+      if (data.status === 'success') {
+        setLastFactorScan({
+          symbol, timeframe,
+          timestamp: Date.now(),
+          summary: buildScanSummary(data),
+        });
+      }
     } catch {
       setResult({ status: 'error', message: '掃描失敗' });
     } finally {
       setScanning(false);
     }
-  }, [symbol, timeframe]);
+  }, [symbol, timeframe, setLastFactorScan]);
 
   const thStyle: React.CSSProperties = {
     padding: '4px 8px', textAlign: 'center', fontSize: 11,
@@ -248,7 +305,7 @@ export default function FactorScanPanel() {
             {scanning && (
               <div style={{ textAlign: 'center', padding: 40, color: 'var(--text-muted)' }}>
                 <div style={{ fontSize: 24, marginBottom: 12, animation: 'spin 1s linear infinite', display: 'inline-block' }}>⟳</div>
-                <div>正在掃描 ~36 個因子（含衍生因子）...</div>
+                <div>正在掃描所有因子（含衍生因子）...</div>
               </div>
             )}
 
@@ -348,8 +405,16 @@ export default function FactorScanPanel() {
                   </Section>
                 )}
 
-                {/* 一鍵回測 */}
-                <BacktestButton result={result} />
+                {/* 策略分級建議 */}
+                <StrategyTiersSection result={result} activeTier={activeTier} onLoadTier={handleLoadTier} />
+
+                {/* 互動式因子調整器 */}
+                <FactorCustomizer
+                  result={result}
+                  externalConds={customizerConds}
+                  expanded={customizerExpanded}
+                  setExpanded={setCustomizerExpanded}
+                />
 
                 {/* 底部說明 */}
                 <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 12, padding: '8px 0', borderTop: '1px solid var(--border-color)' }}>
@@ -367,25 +432,347 @@ export default function FactorScanPanel() {
   );
 }
 
-function BacktestButton({ result }: { result: FactorScanResult }) {
-  const generateBacktest = useGenerateBacktest();
-  const hasFactors = (result.positive_top?.length ?? 0) > 0 || (result.negative_top?.length ?? 0) > 0;
-  if (!hasFactors) return null;
+const TIER_META: Record<TierKey, { label: string; emoji: string; color: string; desc: string }> = {
+  strict: { label: '嚴格', emoji: '🎯', color: '#f85149', desc: '所有因子 AND 最佳分位，精準但觸發少' },
+  moderate: { label: '建議', emoji: '⚡', color: '#58a6ff', desc: '自動放寬弱因子，平衡觸發次數與品質' },
+  loose: { label: '寬鬆', emoji: '🌊', color: '#3fb950', desc: '僅保留 IC 最強的 2 個因子，觸發多' },
+};
+
+function StrategyTiersSection({ result, activeTier, onLoadTier }: {
+  result: FactorScanResult;
+  activeTier: TierKey | null;
+  onLoadTier: (key: TierKey) => void;
+}) {
+  const tiers = result.strategy_tiers;
+
+  if (!tiers) return null;
+  const tierKeys: TierKey[] = ['strict', 'moderate', 'loose'];
+  const available = tierKeys.filter((k) => tiers[k] && (tiers[k]!.conditions.length ?? 0) > 0);
+  if (available.length === 0) return null;
+
   return (
-    <button
-      onClick={() => generateBacktest(result)}
-      style={{
-        width: '100%', padding: '10px 16px', borderRadius: 8,
-        border: '1px solid rgba(88,166,255,0.3)',
-        background: 'linear-gradient(135deg, rgba(88,166,255,0.15), rgba(63,185,80,0.1))',
-        color: '#58a6ff', cursor: 'pointer', fontSize: 13, fontWeight: 700,
-        transition: 'all 0.2s', marginTop: 8,
-      }}
-      onMouseEnter={(e) => (e.currentTarget.style.background = 'linear-gradient(135deg, rgba(88,166,255,0.25), rgba(63,185,80,0.2))')}
-      onMouseLeave={(e) => (e.currentTarget.style.background = 'linear-gradient(135deg, rgba(88,166,255,0.15), rgba(63,185,80,0.1))')}
-    >
-      🚀 一鍵回測 — 用掃描結果生成策略
-    </button>
+    <Section title="策略分級建議" color="#79c0ff">
+      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 10 }}>
+        選擇一個版本載入到下方調整器，可進一步微調後再送出回測：
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {available.map((key) => {
+          const tier = tiers[key]!;
+          const meta = TIER_META[key];
+          const isRecommended = key === 'moderate';
+          const isActive = activeTier === key;
+
+          return (
+            <div key={key} style={{
+              padding: '10px 12px', borderRadius: 8,
+              background: isActive ? `${meta.color}12` : isRecommended ? 'rgba(88,166,255,0.08)' : 'var(--bg-secondary)',
+              border: `1px solid ${isActive ? meta.color : isRecommended ? 'rgba(88,166,255,0.4)' : 'var(--border-color)'}`,
+              transition: 'all 0.2s',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span>{meta.emoji}</span>
+                  <span style={{ fontWeight: 700, fontSize: 13, color: meta.color }}>{meta.label}版</span>
+                  {isRecommended && (
+                    <span style={{
+                      fontSize: 9, padding: '1px 6px', borderRadius: 4,
+                      background: 'rgba(88,166,255,0.2)', color: '#58a6ff', fontWeight: 600,
+                    }}>推薦</span>
+                  )}
+                  {isActive && (
+                    <span style={{
+                      fontSize: 9, padding: '1px 6px', borderRadius: 4,
+                      background: `${meta.color}30`, color: meta.color, fontWeight: 600,
+                    }}>已載入 ✓</span>
+                  )}
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{
+                    fontSize: 11, fontFamily: 'monospace',
+                    color: tier.trigger_count >= 10 ? '#3fb950' : tier.trigger_count >= 5 ? '#d29922' : '#f85149',
+                  }}>
+                    觸發 {tier.trigger_count} 次
+                    {tier.trigger_count < 5 && ' ⚠️'}
+                  </span>
+                  <button
+                    onClick={() => onLoadTier(key)}
+                    style={{
+                      padding: '4px 12px', borderRadius: 6, fontSize: 11, fontWeight: 600,
+                      border: `1px solid ${meta.color}44`,
+                      background: isActive ? `${meta.color}30` : `${meta.color}15`,
+                      color: meta.color, cursor: 'pointer', transition: 'all 0.15s',
+                    }}
+                    onMouseEnter={(e) => { e.currentTarget.style.background = `${meta.color}30`; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.background = isActive ? `${meta.color}30` : `${meta.color}15`; }}
+                  >
+                    {isActive ? '✓ 已載入' : '載入此版本'}
+                  </button>
+                </div>
+              </div>
+
+              <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 6 }}>{meta.desc}</div>
+
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                {tier.conditions.map((c, i) => (
+                  <span key={i} style={{
+                    fontSize: 10, padding: '2px 8px', borderRadius: 4,
+                    background: 'var(--bg-primary)', border: '1px solid var(--border-color)',
+                    color: 'var(--text-primary)', fontFamily: 'monospace',
+                  }}>
+                    {c.factor} {c.description}
+                    <span style={{ color: 'var(--text-muted)', marginLeft: 4 }}>IC={c.abs_ic}</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Section>
+  );
+}
+
+// ─── 互動式因子調整器 ───────────────────────
+interface EditableCond {
+  factor: string;
+  operator: string;
+  value: number;
+  value2?: number;
+  enabled: boolean;
+  abs_ic: number;
+  return_pct: number;
+  original_description: string;
+}
+
+function FactorCustomizer({ result, externalConds, expanded, setExpanded }: {
+  result: FactorScanResult;
+  externalConds: EditableCond[] | null;
+  expanded: boolean;
+  setExpanded: (v: boolean) => void;
+}) {
+  const symbol = useChartStore((s) => s.symbol);
+  const timeframe = useChartStore((s) => s.timeframe);
+  const setPendingChatMessage = useChartStore((s) => s.setPendingChatMessage);
+
+  const [conditions, setConditions] = useState<EditableCond[]>([]);
+  const [triggerInfo, setTriggerInfo] = useState<{ count: number; total: number; pct: number; lastTime?: string } | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
+
+  // 接收從 tier 按鈕載入的條件
+  useEffect(() => {
+    if (externalConds && externalConds.length > 0) {
+      setConditions(externalConds);
+      setTriggerInfo(null);
+    }
+  }, [externalConds]);
+
+  // 首次從掃描結果初始化（只在無外部注入時）
+  useEffect(() => {
+    if (externalConds && externalConds.length > 0) return;
+    if (!result.quantile_analysis) return;
+    const conds: EditableCond[] = [];
+    for (const qa of Object.values(result.quantile_analysis)) {
+      const bq = qa.best_quantile;
+      if (!bq?.entry_suggestion) continue;
+
+      let op = '>';
+      let val = bq.range.low;
+      let val2: number | undefined;
+      const sug = bq.entry_suggestion;
+      if (sug.startsWith('>')) {
+        op = '>';
+        val = bq.range.low;
+      } else if (sug.startsWith('<')) {
+        op = '<';
+        val = bq.range.high;
+      } else if (sug.includes('~')) {
+        op = 'between';
+        val = bq.range.low;
+        val2 = bq.range.high;
+      }
+
+      const abs_ic = result.positive_top?.find((f) => f.factor === qa.factor)?.ic_recent
+        ?? result.negative_top?.find((f) => f.factor === qa.factor)?.ic_recent
+        ?? 0;
+
+      conds.push({
+        factor: qa.factor, operator: op, value: val, value2: val2,
+        enabled: true, abs_ic: Math.abs(abs_ic), return_pct: bq.return_pct,
+        original_description: sug,
+      });
+    }
+    conds.sort((a, b) => b.abs_ic - a.abs_ic);
+    setConditions(conds);
+  }, [result]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // debounced 觸發預覽
+  const fetchPreview = useCallback((conds: EditableCond[]) => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(async () => {
+      const apiConds: TriggerCondition[] = conds
+        .filter((c) => c.enabled)
+        .map((c) => ({ factor: c.factor, operator: c.operator, value: c.value, value2: c.value2, enabled: true }));
+      if (apiConds.length === 0) {
+        setTriggerInfo(null);
+        return;
+      }
+      setPreviewing(true);
+      try {
+        const res = await triggerPreview(symbol, timeframe, apiConds);
+        if (res.status === 'success') {
+          setTriggerInfo({ count: res.trigger_count, total: res.total_bars, pct: res.trigger_pct, lastTime: res.last_trigger_time });
+        }
+      } catch { /* ignore */ }
+      setPreviewing(false);
+    }, 400);
+  }, [symbol, timeframe]);
+
+  const updateCond = useCallback((idx: number, patch: Partial<EditableCond>) => {
+    setConditions((prev) => {
+      const next = [...prev];
+      next[idx] = { ...next[idx], ...patch };
+      fetchPreview(next);
+      return next;
+    });
+  }, [fetchPreview]);
+
+  const handleSendBacktest = useCallback(() => {
+    const enabled = conditions.filter((c) => c.enabled);
+    if (enabled.length === 0) return;
+    const parts: string[] = [];
+    parts.push(`根據自訂因子組合，請對 ${symbol} ${timeframe} 做回測：`);
+    parts.push(`進場條件（${enabled.length} 個因子）：`);
+    for (const c of enabled) {
+      const desc = c.operator === 'between'
+        ? `${c.value.toFixed(2)} ~ ${(c.value2 ?? c.value).toFixed(2)}`
+        : `${c.operator} ${c.value.toFixed(2)}`;
+      parts.push(`  - ${c.factor} ${desc} (IC=${c.abs_ic.toFixed(3)})`);
+    }
+    if (triggerInfo) {
+      parts.push(`預估歷史觸發 ${triggerInfo.count} 次 / ${triggerInfo.total} 根 (${triggerInfo.pct}%)`);
+    }
+    parts.push('請依照以上條件設計策略並執行回測分析。');
+    setPendingChatMessage(parts.join('\n'));
+  }, [conditions, symbol, timeframe, triggerInfo, setPendingChatMessage]);
+
+  // 展開時觸發一次預覽
+  useEffect(() => {
+    if (conditions.length > 0 && expanded) fetchPreview(conditions);
+  }, [expanded, externalConds]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (conditions.length === 0) return null;
+
+  return (
+    <Section title="自訂策略組合器" color="#d2a8ff">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        style={{
+          width: '100%', padding: '8px 12px', borderRadius: 6, fontSize: 12,
+          border: '1px solid var(--border-color)', background: 'var(--bg-secondary)',
+          color: 'var(--text-primary)', cursor: 'pointer', textAlign: 'left',
+        }}
+      >
+        {expanded ? '▼' : '▶'} {expanded ? '收起調整器' : '展開 — 自由勾選因子、調整閾值'}
+      </button>
+
+      {expanded && (
+        <div style={{ marginTop: 8, padding: '8px 0' }}>
+          {/* 觸發次數即時顯示 */}
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            padding: '6px 10px', borderRadius: 6, marginBottom: 8,
+            background: triggerInfo && triggerInfo.count >= 10
+              ? 'rgba(63,185,80,0.1)' : triggerInfo && triggerInfo.count >= 5
+              ? 'rgba(210,153,34,0.1)' : 'rgba(248,81,73,0.1)',
+            border: '1px solid var(--border-color)',
+          }}>
+            <span style={{ fontSize: 12, color: 'var(--text-primary)' }}>
+              {previewing ? '⟳ 計算中...' : triggerInfo
+                ? <>歷史觸發 <strong style={{
+                    color: triggerInfo.count >= 10 ? '#3fb950' : triggerInfo.count >= 5 ? '#d29922' : '#f85149',
+                  }}>{triggerInfo.count} 次</strong> / {triggerInfo.total} 根 ({triggerInfo.pct}%)
+                  {triggerInfo.count < 10 && <span style={{ color: '#d29922', marginLeft: 4 }}>⚠ 建議 ≥10 次</span>}
+                </>
+                : '勾選因子後自動計算觸發次數'
+              }
+            </span>
+            {triggerInfo?.lastTime && (
+              <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>最近：{triggerInfo.lastTime.slice(0, 16)}</span>
+            )}
+          </div>
+
+          {/* 因子條件列表 */}
+          {conditions.map((c, i) => (
+            <div key={c.factor} style={{
+              display: 'flex', alignItems: 'center', gap: 6, padding: '4px 0',
+              borderBottom: '1px solid var(--border-color)', opacity: c.enabled ? 1 : 0.45,
+            }}>
+              <input
+                type="checkbox"
+                checked={c.enabled}
+                onChange={(e) => updateCond(i, { enabled: e.target.checked })}
+                style={{ cursor: 'pointer' }}
+              />
+              <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-primary)', minWidth: 110, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {c.factor}
+              </span>
+              <span style={{ fontSize: 10, color: 'var(--text-muted)', minWidth: 55 }}>IC={c.abs_ic.toFixed(3)}</span>
+
+              <select
+                value={c.operator}
+                onChange={(e) => updateCond(i, { operator: e.target.value })}
+                disabled={!c.enabled}
+                style={{ fontSize: 11, padding: '2px 4px', borderRadius: 4, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)' }}
+              >
+                <option value=">">{'>'}</option>
+                <option value="<">{'<'}</option>
+                <option value=">=">{'>='}</option>
+                <option value="<=">{' <='}</option>
+                <option value="between">區間</option>
+              </select>
+
+              <input
+                type="number"
+                value={c.value}
+                step="0.01"
+                onChange={(e) => updateCond(i, { value: parseFloat(e.target.value) || 0 })}
+                disabled={!c.enabled}
+                style={{ width: 70, fontSize: 11, padding: '2px 6px', borderRadius: 4, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontFamily: 'monospace' }}
+              />
+              {c.operator === 'between' && (
+                <>
+                  <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>~</span>
+                  <input
+                    type="number"
+                    value={c.value2 ?? c.value}
+                    step="0.01"
+                    onChange={(e) => updateCond(i, { value2: parseFloat(e.target.value) || 0 })}
+                    disabled={!c.enabled}
+                    style={{ width: 70, fontSize: 11, padding: '2px 6px', borderRadius: 4, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontFamily: 'monospace' }}
+                  />
+                </>
+              )}
+            </div>
+          ))}
+
+          {/* 送出回測按鈕 */}
+          <button
+            onClick={handleSendBacktest}
+            disabled={conditions.filter((c) => c.enabled).length === 0}
+            style={{
+              width: '100%', padding: '8px 16px', borderRadius: 6, marginTop: 8,
+              border: '1px solid rgba(210,168,255,0.3)',
+              background: 'linear-gradient(135deg, rgba(210,168,255,0.15), rgba(88,166,255,0.1))',
+              color: '#d2a8ff', cursor: 'pointer', fontSize: 12, fontWeight: 700, transition: 'all 0.2s',
+            }}
+          >
+            🎛️ 用自訂條件回測
+          </button>
+        </div>
+      )}
+    </Section>
   );
 }
 

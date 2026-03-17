@@ -83,6 +83,10 @@ interface ChartStore {
   pendingChatMessage: string | null;
   setPendingChatMessage: (msg: string | null) => void;
 
+  // ===== 因子掃描結果（共享給助手）=====
+  lastFactorScan: { symbol: string; timeframe: string; timestamp: number; summary: string } | null;
+  setLastFactorScan: (scan: { symbol: string; timeframe: string; timestamp: number; summary: string } | null) => void;
+
   // ===== 取得圖表狀態摘要（給 LLM 用）=====
   getChartStateSummary: () => Record<string, unknown>;
 }
@@ -118,6 +122,8 @@ export const useChartStore = create<ChartStore>((set, get) => ({
   showSyncPanel: false,
   pendingChatMessage: null,
   setPendingChatMessage: (msg) => set({ pendingChatMessage: msg }),
+  lastFactorScan: null,
+  setLastFactorScan: (scan) => set({ lastFactorScan: scan }),
 
   // ===== 圖表操作 =====
   setSymbol: (symbol) => set((state) => {
@@ -132,9 +138,10 @@ export const useChartStore = create<ChartStore>((set, get) => ({
       symbol,
       messages: [...state.messages, divider],
       conversationId: null,
+      lastFactorScan: null,
     };
   }),
-  setTimeframe: (timeframe) => set({ timeframe }),
+  setTimeframe: (timeframe) => set({ timeframe, lastFactorScan: null }),
   setDateRange: (start, end) => set({ startDate: start, endDate: end }),
   setOHLCVData: (data) => set({ ohlcvData: data }),
   setLoading: (loading) => set({ loading }),
@@ -352,16 +359,60 @@ export const useChartStore = create<ChartStore>((set, get) => ({
         avgVolume: Math.round(volumes.reduce((a, b) => a + b, 0) / n),
       };
 
-      // 最近 20 根 K 線的精簡數據（讓 LLM 能看到近期走勢）
-      const recentCount = Math.min(20, n);
+      // 根據時間級別動態決定傳送 K 線數量
+      const candleCountMap: Record<string, number> = {
+        '15m': 20, '1h': 30, '4h': 40, '1d': 50, '1w': 50,
+      };
+      const recentCount = Math.min(candleCountMap[state.timeframe] ?? 30, n);
       summary.recentCandles = data.slice(-recentCount).map((d) => ({
-        t: d.timestamp.slice(0, 10),  // 只保留日期部分
-        o: +d.open.toFixed(4),
+        t: d.timestamp.slice(0, 16),
+        c: +d.close.toFixed(4),
         h: +d.high.toFixed(4),
         l: +d.low.toFixed(4),
-        c: +d.close.toFixed(4),
         v: Math.round(d.volume),
       }));
+
+      // ★ 注入已啟用指標的實際計算值（最近 5 根 + 方向標籤）
+      const RECENT_N = 5;
+      const indicatorValues: Record<string, { values: (number | null)[]; trend: string }> = {};
+
+      for (const ind of state.activeIndicators) {
+        if (!ind.visible || !ind.data) continue;
+        for (const [seriesName, seriesData] of Object.entries(ind.data)) {
+          if (!seriesData || seriesData.length === 0) continue;
+          const tail = seriesData.slice(-RECENT_N);
+          const rounded = tail.map((v) => (v != null ? +v.toFixed(4) : null));
+
+          const validVals = rounded.filter((v): v is number => v != null);
+          let trend = '→';
+          if (validVals.length >= 2) {
+            const first = validVals[0];
+            const last = validVals[validVals.length - 1];
+            const diff = last - first;
+            const threshold = Math.abs(first) * 0.02 || 0.001;
+            if (diff > threshold) trend = '↑';
+            else if (diff < -threshold) trend = '↓';
+          }
+
+          const key = seriesName === 'value' || seriesName === ind.indicator_type
+            ? ind.indicator_type
+            : `${ind.indicator_type}_${seriesName}`;
+          indicatorValues[key] = { values: rounded, trend };
+        }
+      }
+
+      if (Object.keys(indicatorValues).length > 0) {
+        summary.indicatorValues = indicatorValues;
+      }
+    }
+
+    // ★ 注入因子掃描結果摘要（同標的+同級別時才注入）
+    const scan = state.lastFactorScan;
+    if (scan && scan.symbol === state.symbol && scan.timeframe === state.timeframe) {
+      const ageMin = Math.round((Date.now() - scan.timestamp) / 60000);
+      if (ageMin < 60) {
+        summary.factorScanSummary = `[因子掃描結果 ${ageMin}分鐘前] ${scan.summary}`;
+      }
     }
 
     return summary;
