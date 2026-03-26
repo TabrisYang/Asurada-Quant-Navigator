@@ -13,15 +13,19 @@ import { useChartStore } from '../../stores/chartStore';
 import {
   configureLLM, testLLMConnection, discoverModels, exportKnowledgePDF,
   fetchStrategies, addStrategy, updateStrategy, deleteStrategy,
+  fetchSystemSettings, updateSystemSettings,
   type UserStrategy,
 } from '../../services/api';
 import { persistSession } from '../../services/session';
 import type { LLMProvider } from '../../types';
+import MLPanel from './MLPanel';
+import PredictionDashboard from '../PredictionDashboard/PredictionDashboard';
 
 const LLM_PROVIDERS: { id: LLMProvider; name: string; requiresKey: boolean; desc: string }[] = [
   { id: 'openai', name: 'OpenAI (GPT-4/4o)', requiresKey: true, desc: '最成熟的 Function Calling 支援' },
   { id: 'gemini', name: 'Google Gemini', requiresKey: true, desc: '免費額度較高' },
   { id: 'claude', name: 'Anthropic Claude', requiresKey: true, desc: '推理能力強' },
+  { id: 'claude_subscription', name: 'Claude 訂閱制', requiresKey: false, desc: '使用 Claude Code 訂閱額度（需已登入）' },
   { id: 'ollama', name: '本地 Ollama', requiresKey: false, desc: '完全免費，無需 API Key' },
 ];
 
@@ -38,7 +42,7 @@ interface SettingsPanelProps {
 export default function SettingsPanel({ onClose }: SettingsPanelProps) {
   const llmConfig = useChartStore((s) => s.llmConfig);
   const setLLMConfig = useChartStore((s) => s.setLLMConfig);
-  const [activeTab, setActiveTab] = useState<'llm' | 'export' | 'strategies'>('llm');
+  const [activeTab, setActiveTab] = useState<'llm' | 'export' | 'strategies' | 'ml' | 'predictions'>('llm');
   const [apiKey, setApiKey] = useState('');
   const [baseUrl, setBaseUrl] = useState(llmConfig.baseUrl || 'http://localhost:11434');
 
@@ -54,6 +58,17 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
 
   // 儲存
   const [saving, setSaving] = useState(false);
+
+  // 教學模式
+  const [teachingMode, setTeachingMode] = useState(false);
+  useEffect(() => {
+    fetchSystemSettings().then((s) => setTeachingMode(!!s.teaching_mode)).catch(() => {});
+  }, []);
+  const handleTeachingToggle = async () => {
+    const next = !teachingMode;
+    setTeachingMode(next);
+    await updateSystemSettings({ teaching_mode: next }).catch(() => setTeachingMode(!next));
+  };
 
   const selectedProvider = LLM_PROVIDERS.find((p) => p.id === llmConfig.provider);
   const hasSession = !!llmConfig.sessionId;
@@ -91,9 +106,11 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
         }
       }
     } catch (err: any) {
-      const detail = err?.response?.data?.detail || '';
+      const rawDetail = err?.response?.data?.detail;
+      const detail = typeof rawDetail === 'string' ? rawDetail
+        : Array.isArray(rawDetail) ? rawDetail.map((d: any) => d.msg || JSON.stringify(d)).join('; ')
+        : '';
       if (detail.includes('SESSION_EXPIRED')) {
-        // Session 過期：清除舊 session，提示重新輸入
         clearPersistedSession();
         setLLMConfig({ sessionId: undefined });
         setModelsMessage('先前的連線已過期，請重新輸入 API Key 後再偵測模型');
@@ -125,7 +142,10 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
       setTestMessage(result.message || '連線成功');
     } catch (err: any) {
       setTestStatus('failed');
-      const detail = err?.response?.data?.detail || '';
+      const rawDetail2 = err?.response?.data?.detail;
+      const detail = typeof rawDetail2 === 'string' ? rawDetail2
+        : Array.isArray(rawDetail2) ? rawDetail2.map((d: any) => d.msg || JSON.stringify(d)).join('; ')
+        : '';
       if (detail.includes('SESSION_EXPIRED')) {
         clearPersistedSession();
         setLLMConfig({ sessionId: undefined });
@@ -167,7 +187,11 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
       }
     } catch (err: any) {
       setTestStatus('failed');
-      setTestMessage(err?.response?.data?.detail || '儲存失敗');
+      const rawSaveErr = err?.response?.data?.detail;
+      const saveErrMsg = typeof rawSaveErr === 'string' ? rawSaveErr
+        : Array.isArray(rawSaveErr) ? rawSaveErr.map((d: any) => d.msg || JSON.stringify(d)).join('; ')
+        : '儲存失敗';
+      setTestMessage(saveErrMsg);
     } finally {
       setSaving(false);
     }
@@ -189,7 +213,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
       onClick={onClose}
     >
       <div
-        className="rounded-xl shadow-2xl p-6 w-[520px] max-h-[80vh] overflow-y-auto"
+        className={`rounded-xl shadow-2xl p-6 max-h-[80vh] overflow-y-auto ${activeTab === 'ml' ? 'w-[600px]' : 'w-[520px]'}`}
         style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)' }}
         onClick={(e) => e.stopPropagation()}
       >
@@ -222,6 +246,28 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
             分析策略庫
           </button>
           <button
+            onClick={() => setActiveTab('ml')}
+            className="px-3 py-1.5 rounded-t text-sm cursor-pointer"
+            style={{
+              color: activeTab === 'ml' ? 'var(--accent-blue)' : 'var(--text-secondary)',
+              borderBottom: activeTab === 'ml' ? '2px solid var(--accent-blue)' : '2px solid transparent',
+              background: 'transparent',
+            }}
+          >
+            ML 增強
+          </button>
+          <button
+            onClick={() => setActiveTab('predictions')}
+            className="px-3 py-1.5 rounded-t text-sm cursor-pointer"
+            style={{
+              color: activeTab === 'predictions' ? 'var(--accent-blue)' : 'var(--text-secondary)',
+              borderBottom: activeTab === 'predictions' ? '2px solid var(--accent-blue)' : '2px solid transparent',
+              background: 'transparent',
+            }}
+          >
+            預測追蹤
+          </button>
+          <button
             onClick={() => setActiveTab('export')}
             className="px-3 py-1.5 rounded-t text-sm cursor-pointer"
             style={{
@@ -236,6 +282,8 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
 
         {activeTab === 'strategies' && <StrategySection />}
         {activeTab === 'export' && <ExportImportSection onClose={onClose} />}
+        {activeTab === 'ml' && <MLPanel />}
+        {activeTab === 'predictions' && <PredictionDashboard />}
 
         {activeTab === 'llm' && <>
         {/* ===== 1. LLM 供應商選擇 ===== */}
@@ -320,6 +368,24 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
             <p className="text-xs mt-1" style={{ color: 'var(--text-secondary)' }}>
               輸入 API Key 後點「偵測模型」，從可用模型中選擇
             </p>
+          </div>
+        )}
+
+        {/* ===== Claude 訂閱制：無需 Key，直接偵測 ===== */}
+        {llmConfig.provider === 'claude_subscription' && (
+          <div className="mb-6">
+            <StepLabel step={2} text="偵測可用模型" />
+            <p className="text-xs mb-2" style={{ color: 'var(--text-secondary)' }}>
+              系統將自動使用 Claude Code 的訂閱憑證，無需輸入 API Key
+            </p>
+            <button
+              onClick={handleDiscoverModels}
+              disabled={!canDiscover}
+              className="px-4 py-2 rounded-lg text-sm cursor-pointer transition-opacity hover:opacity-80 whitespace-nowrap disabled:opacity-40"
+              style={{ background: 'var(--accent-blue)', color: '#fff' }}
+            >
+              {loadingModels ? '偵測中...' : '偵測模型'}
+            </button>
           </div>
         )}
 
@@ -465,6 +531,34 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
             請測試連線成功後再儲存
           </p>
         )}
+
+        {/* ===== AI 教學模式開關 ===== */}
+        <div className="mt-6 pt-4" style={{ borderTop: '1px solid var(--border-primary)' }}>
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
+                AI 教學模式
+              </div>
+              <div className="text-xs mt-0.5" style={{ color: 'var(--text-secondary)' }}>
+                開啟後 AI 會在分析中解釋指標意義、信號邏輯與策略風險
+              </div>
+            </div>
+            <button
+              onClick={handleTeachingToggle}
+              className="relative inline-flex h-6 w-11 items-center rounded-full transition-colors"
+              style={{
+                backgroundColor: teachingMode ? 'var(--accent-blue)' : 'var(--bg-tertiary)',
+              }}
+            >
+              <span
+                className="inline-block h-4 w-4 rounded-full bg-white transition-transform"
+                style={{
+                  transform: teachingMode ? 'translateX(22px)' : 'translateX(4px)',
+                }}
+              />
+            </button>
+          </div>
+        </div>
         </>}
       </div>
     </div>
@@ -983,6 +1077,9 @@ function StepLabel({ step, text }: { step: number; text: string }) {
     </h3>
   );
 }
+
+
+// MLSettingsSection moved to ./MLPanel.tsx
 
 
 // Re-export for backward compatibility

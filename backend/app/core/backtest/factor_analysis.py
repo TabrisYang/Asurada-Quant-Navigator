@@ -17,6 +17,8 @@ import numpy as np
 import pandas as pd
 from typing import Optional
 
+from loguru import logger
+
 from app.core.indicators import registry
 
 # ─── 適合做因子掃描的指標 ID ────────────────────────
@@ -30,13 +32,46 @@ SCANNABLE_INDICATORS: list[str] = [
 
 # ─── 近期窗口映射（根據 K 線級別） ──────────────────
 _RECENT_BARS: dict[str, int] = {
-    "1m": 200, "3m": 200, "5m": 200, "15m": 200,
-    "30m": 200, "1h": 200, "2h": 200,
-    "4h": 200, "6h": 150, "8h": 120,
-    "1d": 120, "3d": 80, "1w": 60, "1M": 40,
+    "1m": 500, "3m": 400, "5m": 400, "15m": 350,
+    "30m": 300, "1h": 300, "2h": 250,
+    "4h": 300, "6h": 200, "8h": 180,
+    "1d": 180, "3d": 100, "1w": 80, "1M": 50,
 }
 
-_MIN_SAMPLES = 60
+_MIN_SAMPLES_BY_TF: dict[str, int] = {
+    "1m": 500, "3m": 500, "5m": 500, "15m": 400,
+    "30m": 300, "1h": 250, "2h": 200,
+    "4h": 200, "6h": 150, "8h": 150,
+    "1d": 120, "3d": 80, "1w": 60, "1M": 40,
+}
+_MIN_SAMPLES = 60  # fallback
+
+
+def _load_prediction_feedback(symbol: Optional[str] = None) -> dict[str, float]:
+    """從預測追蹤器載入因子歷史表現，回傳 {indicator_name: accuracy_modifier}。
+
+    modifier > 0 表示歷史預測準確，boost 因子權重
+    modifier < 0 表示歷史預測不準確，降低因子權重
+    modifier == 0 表示無數據
+    """
+    try:
+        from app.core.prediction_tracker import prediction_tracker
+        stats = prediction_tracker.get_stats(symbol=symbol, days=60)
+        if stats.get("total", 0) < 8:
+            return {}
+
+        ind_perf = stats.get("indicator_performance", {})
+        modifiers: dict[str, float] = {}
+        for ind_name, perf in ind_perf.items():
+            samples = perf.get("samples", 0)
+            if samples < 3:
+                continue
+            win_rate = perf.get("win_rate", 50)
+            modifiers[ind_name.lower()] = round((win_rate - 50) / 100, 3)
+        return modifiers
+    except Exception as e:
+        logger.debug(f"載入預測反饋失敗（不影響掃描）: {e}")
+        return {}
 
 
 def _to_array(values: list) -> np.ndarray:
@@ -46,10 +81,13 @@ def _to_array(values: list) -> np.ndarray:
     ], dtype=float)
 
 
-def _spearman_ic(f: np.ndarray, r: np.ndarray) -> float:
+def _spearman_ic(f: np.ndarray, r: np.ndarray) -> tuple[float, float]:
+    """回傳 (ic, p_value)。p_value 越小越顯著。"""
     from scipy.stats import spearmanr
-    ic, _ = spearmanr(f, r)
-    return float(ic) if not np.isnan(ic) else 0.0
+    ic, pval = spearmanr(f, r)
+    ic = float(ic) if not np.isnan(ic) else 0.0
+    pval = float(pval) if not np.isnan(pval) else 1.0
+    return ic, pval
 
 
 def _compute_future_returns(closes: np.ndarray, forward_periods: list[int]) -> dict[int, np.ndarray]:
@@ -72,6 +110,7 @@ def _compute_future_returns(closes: np.ndarray, forward_periods: list[int]) -> d
 
 def compute_derived_factors(df: pd.DataFrame) -> dict[str, np.ndarray]:
     """從已有指標衍生額外因子。"""
+    df = df.copy()
     n = len(df)
     derived: dict[str, np.ndarray] = {}
     close = df["close"].values.astype(float)
@@ -118,7 +157,7 @@ def compute_derived_factors(df: pd.DataFrame) -> dict[str, np.ndarray]:
     if bb_calc and "BB_Upper" in bb_calc and "BB_Lower" in bb_calc:
         upper = _to_array(bb_calc["BB_Upper"])
         lower = _to_array(bb_calc["BB_Lower"])
-        width = upper - lower
+        width = np.array(upper - lower, copy=True)
         width[width == 0] = np.nan
         derived["bb_pctb"] = (close - lower) / width
 
@@ -153,7 +192,7 @@ def compute_derived_factors(df: pd.DataFrame) -> dict[str, np.ndarray]:
     if rel_vol is not None:
         kernel = np.ones(5) / 5
         padded = np.concatenate([np.full(4, np.nan), rel_vol])
-        convolved = np.convolve(rel_vol, kernel, mode="full")[:n]
+        convolved = np.convolve(rel_vol, kernel, mode="full")[:n].copy()
         convolved[:4] = np.nan
         derived["vol_ratio_trend"] = convolved
 
@@ -168,7 +207,7 @@ def compute_derived_factors(df: pd.DataFrame) -> dict[str, np.ndarray]:
     if kelt_calc and "Keltner_Mid" in kelt_calc and "Keltner_Upper" in kelt_calc:
         mid = _to_array(kelt_calc["Keltner_Mid"])
         upper = _to_array(kelt_calc["Keltner_Upper"])
-        band = upper - mid
+        band = np.array(upper - mid, copy=True)
         band[band == 0] = np.nan
         derived["keltner_position"] = (close - mid) / band
 
@@ -176,7 +215,7 @@ def compute_derived_factors(df: pd.DataFrame) -> dict[str, np.ndarray]:
     if atr_arr is not None:
         atr_calc_long = registry.calculate("atr", df, {"period": 50})
         if atr_calc_long:
-            atr_long = _to_array(list(atr_calc_long.values())[0])
+            atr_long = _to_array(list(atr_calc_long.values())[0]).copy()
             atr_long[atr_long == 0] = np.nan
             derived["atr_ratio"] = atr_arr / atr_long
 
@@ -198,7 +237,7 @@ def compute_derived_factors(df: pd.DataFrame) -> dict[str, np.ndarray]:
     hv_long = registry.calculate("hv", df, {"period": 30})
     if hv_short and hv_long:
         hv_s = _to_array(list(hv_short.values())[0])
-        hv_l = _to_array(list(hv_long.values())[0])
+        hv_l = _to_array(list(hv_long.values())[0]).copy()
         hv_l[hv_l == 0] = np.nan
         derived["hv_ratio"] = hv_s / hv_l
 
@@ -229,7 +268,7 @@ def compute_derived_factors(df: pd.DataFrame) -> dict[str, np.ndarray]:
         rsi_slope = pd.Series(rsi).rolling(5).apply(
             lambda x: np.polyfit(range(len(x)), x, 1)[0] if len(x) == 5 else np.nan,
             raw=False,
-        ).values
+        ).to_numpy(copy=True)
         derived["rsi_slope"] = rsi_slope
 
     # MACD 零軸距離
@@ -239,8 +278,8 @@ def compute_derived_factors(df: pd.DataFrame) -> dict[str, np.ndarray]:
 
     # 成交量加速度
     vol = df["volume"].values.astype(float)
-    vol_ma5 = pd.Series(vol).rolling(5).mean().values
-    vol_ma20 = pd.Series(vol).rolling(20).mean().values
+    vol_ma5 = pd.Series(vol).rolling(5).mean().to_numpy(copy=True)
+    vol_ma20 = pd.Series(vol).rolling(20).mean().to_numpy(copy=True)
     vol_ma20_safe = vol_ma20.copy()
     vol_ma20_safe[vol_ma20_safe == 0] = np.nan
     derived["vol_accel"] = vol_ma5 / vol_ma20_safe
@@ -264,7 +303,7 @@ def compute_derived_factors(df: pd.DataFrame) -> dict[str, np.ndarray]:
     if don_calc and "Donchian_Upper" in don_calc and "Donchian_Lower" in don_calc:
         don_u = _to_array(don_calc["Donchian_Upper"])
         don_l = _to_array(don_calc["Donchian_Lower"])
-        don_range = don_u - don_l
+        don_range = np.array(don_u - don_l, copy=True)
         don_range[don_range == 0] = np.nan
         derived["donchian_position"] = (close - don_l) / don_range
 
@@ -286,7 +325,7 @@ def compute_derived_factors(df: pd.DataFrame) -> dict[str, np.ndarray]:
     derived["high_low_ratio"] = (high - low) / low_safe
 
     # 收盤位置（在當日 HL 範圍中的相對位置）
-    hl_range = high - low
+    hl_range = np.array(high - low, copy=True)
     hl_range[hl_range == 0] = np.nan
     derived["close_position"] = (close - low) / hl_range
 
@@ -303,8 +342,8 @@ def compute_derived_factors(df: pd.DataFrame) -> dict[str, np.ndarray]:
         obv_slope = pd.Series(obv_arr).rolling(10).apply(
             lambda x: np.polyfit(range(len(x)), x, 1)[0] if len(x) == 10 else np.nan,
             raw=False,
-        ).values
-        obv_std = pd.Series(obv_arr).rolling(20).std().values
+        ).to_numpy(copy=True)
+        obv_std = pd.Series(obv_arr).rolling(20).std().to_numpy(copy=True)
         obv_std[obv_std == 0] = np.nan
         derived["obv_slope_norm"] = obv_slope / obv_std
 
@@ -371,14 +410,15 @@ def _ic_for_slice(
     start: int,
     end: int,
 ) -> Optional[float]:
-    """對指定切片計算 Spearman IC。"""
+    """對指定切片計算 Spearman IC（只回傳 IC 值，用於 decay curve）。"""
     f_slice = factor[start:end]
     r_slice = fwd[start:end]
     valid = ~np.isnan(f_slice) & ~np.isnan(r_slice)
     if np.sum(valid) < 15:
         return None
     try:
-        return _spearman_ic(f_slice[valid], r_slice[valid])
+        ic, _ = _spearman_ic(f_slice[valid], r_slice[valid])
+        return ic
     except Exception:
         return None
 
@@ -542,108 +582,117 @@ def _quantile_analysis(
 #  智慧策略分級（嚴格 / 建議 / 寬鬆）
 # ═══════════════════════════════════════════════════════
 
-_MIN_TRIGGER_TARGET = 10  # 建議版至少觸發次數
-
-
 def _generate_strategy_tiers(
     factors: dict[str, np.ndarray],
     factor_results: dict[str, dict],
     quantile_results: dict[str, dict],
     positive: list[tuple[str, dict]],
     negative: list[tuple[str, dict]],
+    combo_results: dict,
     n_bars: int,
+    prediction_feedback: Optional[dict[str, float]] = None,
 ) -> dict:
-    """根據因子掃描結果，自動產生三級策略建議。
+    """根據因子掃描的**全部結果** + 預測歷史反饋產生三級策略。
 
-    嚴格版：所有有效因子的 best_quantile 條件（AND），可能觸發極少
-    建議版：貪心放寬 — 按 IC 弱→強依次移除/放寬，直到觸發 ≥ 10 次
-    寬鬆版：僅保留 IC 最強的 2 個因子
+    資料來源優先級：
+      1. 雙因子組合（combo IC）— 實際交易是多條件判斷，組合 IC 更有實戰意義
+      2. 正相關 / 負相關 Top 因子排名 — 經 Alpha Decay 和評級過濾
+      3. 分位數分析 — 用來決定每個因子的具體進場閾值
+      4. 預測歷史反饋 — 從過去預測結果 boost/penalize 因子
+
+    三級差異化：
+      嚴格版：所有高品質因子（≥2 星 + 半衰期 ≥ 2）的 best_quantile AND
+      建議版：只取最佳雙因子組合中的因子 + IC 最強 1~2 個單因子（放寬一級）
+      寬鬆版：只保留最強的 2 個因子，再放寬一級
     """
-    # 收集有分位數分析的因子條件
-    all_conditions: list[dict] = []
+
+    # ─── 收集有分位數分析的因子 → {factor_name: quantile_data} ─────
+    qa_map: dict[str, dict] = {}
     for _label, qa in quantile_results.items():
         bq = qa.get("best_quantile")
         if not bq or not bq.get("entry_suggestion"):
             continue
-        factor_name = qa["factor"]
-        if factor_name not in factors:
+        fname = qa["factor"]
+        if fname not in factors:
             continue
+        qa_map[fname] = qa
 
-        ranges = qa.get("quantile_ranges", [])
-        n_q = qa.get("n_quantiles", 5)
+    # ─── 所有候選因子（正+負 Top，帶評級過濾）─────────────
+    all_ranked: list[tuple[str, dict]] = []
+    for k, v in list(positive) + list(negative):
+        if k not in factors:
+            continue
+        rating = v.get("rating", {})
+        stars = rating.get("stars", 0) if isinstance(rating, dict) else 0
+        half_life = v.get("decay", {}).get("half_life")
+        # 過濾：至少 1 星，且半衰期不能太短（< 2 表示衰退太快）
+        if stars < 1:
+            continue
+        if half_life is not None and half_life < 2 and stars < 2:
+            continue
+        all_ranked.append((k, v))
+
+    # 按 |IC| 強度排序（整合預測歷史反饋 boost/penalize）
+    fb = prediction_feedback if isinstance(prediction_feedback, dict) else {}
+    def _score(item: tuple[str, dict]) -> float:
+        base_ic = item[1].get("abs_ic_recent", 0)
+        factor_name_parts = item[0].split("_")
+        modifier = 0.0
+        for part in factor_name_parts:
+            if part in fb:
+                modifier = fb[part]
+                break
+        if item[0] in fb:
+            modifier = fb[item[0]]
+        return base_ic * (1 + modifier)
+
+    all_ranked.sort(key=_score, reverse=True)
+
+    if not all_ranked and not qa_map:
+        return {}
+
+    # ─── 工具函式 ────────────────────────────────────────
+
+    def _build_cond(fname: str) -> dict | None:
+        """從分位數分析中為某因子建構進場條件。"""
+        qa = qa_map.get(fname)
+        if not qa:
+            return None
+        bq = qa.get("best_quantile")
+        if not bq:
+            return None
         q_idx = bq["index"]
-        q_range = bq.get("range", {})
-        ic_val = factor_results.get(factor_name, {}).get("abs_ic_recent", 0)
-
-        all_conditions.append({
-            "factor": factor_name,
+        n_q = qa.get("n_quantiles", 5)
+        ranges = qa.get("quantile_ranges", [])
+        r = bq.get("range", {})
+        ic_val = factor_results.get(fname, {}).get("abs_ic_recent", 0)
+        base = {
+            "factor": fname,
             "best_q_idx": q_idx,
             "n_quantiles": n_q,
             "ranges": ranges,
-            "best_range": q_range,
-            "entry_suggestion": bq["entry_suggestion"],
+            "best_range": r,
+            "entry_suggestion": bq.get("entry_suggestion", ""),
             "return_pct": bq.get("return_pct", 0),
             "abs_ic": ic_val,
-        })
-
-    if not all_conditions:
-        return {}
-
-    # 按 IC 強度排序（強 → 弱）
-    all_conditions.sort(key=lambda c: c["abs_ic"], reverse=True)
-
-    def _count_triggers(conds: list[dict]) -> int:
-        """計算多個條件同時成立的 bar 數"""
-        if not conds:
-            return n_bars
-        masks = []
-        for c in conds:
-            fname = c["factor"]
-            if fname not in factors:
-                continue
-            arr = factors[fname]
-            lo = c.get("use_low")
-            hi = c.get("use_high")
-            if lo is not None and hi is not None:
-                mask = (arr >= lo) & (arr <= hi)
-            elif lo is not None:
-                mask = arr >= lo
-            elif hi is not None:
-                mask = arr <= hi
-            else:
-                continue
-            mask = np.where(np.isnan(arr), False, mask)
-            masks.append(mask)
-        if not masks:
-            return n_bars
-        combined = masks[0]
-        for m in masks[1:]:
-            combined = combined & m
-        return int(np.nansum(combined))
-
-    def _build_condition_entry(c: dict) -> dict:
-        """從原始條件建構帶 use_low/use_high 的結構"""
-        q_idx = c["best_q_idx"]
-        n_q = c["n_quantiles"]
-        ranges = c["ranges"]
-        r = c["best_range"]
-
+        }
         if q_idx == n_q - 1:
-            return {**c, "use_low": r.get("low"), "use_high": None,
+            return {**base, "use_low": r.get("low"), "use_high": None,
                     "description": f"> {r.get('low', 0):.2f}"}
         elif q_idx == 0:
-            return {**c, "use_low": None, "use_high": r.get("high"),
+            return {**base, "use_low": None, "use_high": r.get("high"),
                     "description": f"< {r.get('high', 0):.2f}"}
         else:
-            return {**c, "use_low": r.get("low"), "use_high": r.get("high"),
+            return {**base, "use_low": r.get("low"), "use_high": r.get("high"),
                     "description": f"{r.get('low', 0):.2f} ~ {r.get('high', 0):.2f}"}
 
-    def _relax_condition(c: dict) -> dict:
-        """向相鄰分位放寬一級"""
+    def _relax(c: dict) -> dict:
+        """向相鄰分位放寬一級。"""
         q_idx = c["best_q_idx"]
         n_q = c["n_quantiles"]
-        ranges = c["ranges"]
-
+        ranges = c.get("ranges", [])
+        if not ranges:
+            return c
         if q_idx == n_q - 1 and q_idx >= 1:
             new_lo = ranges[q_idx - 1].get("low", c.get("use_low", 0))
             return {**c, "use_low": new_lo, "best_q_idx": q_idx - 1,
@@ -659,51 +708,113 @@ def _generate_strategy_tiers(
                     "description": f"{lo_expand:.2f} ~ {hi_expand:.2f} (放寬)"}
         return c
 
-    # === 嚴格版 ===
-    strict_conds = [_build_condition_entry(c) for c in all_conditions]
-    strict_triggers = _count_triggers(strict_conds)
-
-    # === 建議版（貪心放寬，直到觸發 ≥ 目標值）===
-    moderate_conds = [_build_condition_entry(c) for c in all_conditions]
-    moderate_triggers = _count_triggers(moderate_conds)
-
-    if moderate_triggers < _MIN_TRIGGER_TARGET:
-        # 策略：先從 IC 最弱的因子開始移除或放寬
-        for attempt in range(3):
-            if moderate_triggers >= _MIN_TRIGGER_TARGET:
-                break
-            # 嘗試放寬 IC 最弱的因子
-            weakest_idx = len(moderate_conds) - 1
-            if weakest_idx < 0:
-                break
-
-            if attempt == 0:
-                # 第一輪：放寬最弱因子的閾值
-                for i in range(len(moderate_conds) - 1, -1, -1):
-                    relaxed = _relax_condition(moderate_conds[i])
-                    test_conds = moderate_conds[:i] + [relaxed] + moderate_conds[i + 1:]
-                    test_triggers = _count_triggers(test_conds)
-                    if test_triggers > moderate_triggers:
-                        moderate_conds[i] = relaxed
-                        moderate_triggers = test_triggers
-                    if moderate_triggers >= _MIN_TRIGGER_TARGET:
-                        break
+    def _count(conds: list[dict]) -> int:
+        if not conds:
+            return n_bars
+        masks = []
+        for c in conds:
+            arr = factors.get(c["factor"])
+            if arr is None:
+                continue
+            lo, hi = c.get("use_low"), c.get("use_high")
+            if lo is not None and hi is not None:
+                mask = (arr >= lo) & (arr <= hi)
+            elif lo is not None:
+                mask = arr >= lo
+            elif hi is not None:
+                mask = arr <= hi
             else:
-                # 第二輪起：移除最弱因子
-                if len(moderate_conds) > 2:
-                    removed = moderate_conds.pop()
-                    moderate_triggers = _count_triggers(moderate_conds)
+                continue
+            masks.append(np.where(np.isnan(arr), False, mask))
+        if not masks:
+            return n_bars
+        combined = masks[0]
+        for m in masks[1:]:
+            combined = combined & m
+        return int(np.nansum(combined))
 
-    # === 寬鬆版（只保留 IC 最強的前 2 個，放寬一級）===
-    loose_conds = [_relax_condition(_build_condition_entry(c)) for c in all_conditions[:2]]
-    loose_triggers = _count_triggers(loose_conds)
+    # ─── 從雙因子組合中提取最佳配對因子 ────────────────────
+    combo_factor_pairs: list[tuple[str, str, float]] = []
+    for group in ("positive_combos", "negative_combos", "hedge_combos"):
+        for combo in combo_results.get(group, []):
+            fa, fb = combo.get("factor_a", ""), combo.get("factor_b", "")
+            cic = combo.get("combo_abs_ic", 0)
+            if fa and fb and cic > 0.03:
+                combo_factor_pairs.append((fa, fb, cic))
+    combo_factor_pairs.sort(key=lambda x: x[2], reverse=True)
 
-    # 如果寬鬆版還不夠，再放寬一次
-    if loose_triggers < _MIN_TRIGGER_TARGET and loose_conds:
-        loose_conds = [_relax_condition(c) for c in loose_conds]
-        loose_triggers = _count_triggers(loose_conds)
+    # ─── 建構各版本的因子集合（去重） ──────────────────────
 
-    def _format_tier(conds, triggers):
+    def _unique_conds(names: list[str]) -> list[dict]:
+        """按 name 列表建構唯一條件集，跳過沒有分位數資料的因子。"""
+        seen, out = set(), []
+        for n in names:
+            if n in seen:
+                continue
+            seen.add(n)
+            c = _build_cond(n)
+            if c:
+                out.append(c)
+        return out
+
+    # ─── 嚴格版：所有高品質因子（≥2 星 + 有分位數分析）──────
+    strict_names = [k for k, v in all_ranked
+                    if (v.get("rating", {}).get("stars", 0) if isinstance(v.get("rating"), dict) else 0) >= 2
+                    and k in qa_map]
+    if not strict_names:
+        strict_names = [k for k, _ in all_ranked[:5] if k in qa_map]
+    strict_conds = _unique_conds(strict_names)
+
+    # ─── 建議版：最佳雙因子組合 + 補充 IC 最強單因子 ────────
+    moderate_names: list[str] = []
+    if combo_factor_pairs:
+        best_pair = combo_factor_pairs[0]
+        moderate_names.extend([best_pair[0], best_pair[1]])
+    # 補充 IC 最強的因子（不跟組合重複）
+    for k, _ in all_ranked:
+        if k not in moderate_names and k in qa_map:
+            moderate_names.append(k)
+            if len(moderate_names) >= 4:
+                break
+    if not moderate_names:
+        moderate_names = [k for k, _ in all_ranked[:3] if k in qa_map]
+
+    moderate_conds = [_relax(c) for c in _unique_conds(moderate_names)]
+
+    # ─── 寬鬆版：只取 IC 最強 2 個，放寬兩級 ────────────────
+    loose_names: list[str] = []
+    if combo_factor_pairs:
+        loose_names = [combo_factor_pairs[0][0], combo_factor_pairs[0][1]]
+    if len(loose_names) < 2:
+        for k, _ in all_ranked:
+            if k not in loose_names and k in qa_map:
+                loose_names.append(k)
+                if len(loose_names) >= 2:
+                    break
+    loose_conds = [_relax(_relax(c)) for c in _unique_conds(loose_names[:2])]
+
+    # ─── 計算觸發數 ─────────────────────────────────────
+    strict_triggers = _count(strict_conds)
+    moderate_triggers = _count(moderate_conds)
+    loose_triggers = _count(loose_conds)
+
+    # 如果建議版觸發不比嚴格版多，額外放寬
+    if moderate_triggers <= strict_triggers and moderate_conds:
+        moderate_conds = [_relax(c) for c in moderate_conds]
+        moderate_triggers = _count(moderate_conds)
+        # 仍然不夠差異 → 移除最弱的因子
+        if moderate_triggers <= strict_triggers and len(moderate_conds) > 2:
+            moderate_conds.sort(key=lambda c: c.get("abs_ic", 0))
+            moderate_conds = moderate_conds[1:]  # 移除最弱
+            moderate_triggers = _count(moderate_conds)
+
+    # 如果寬鬆版觸發不比建議版多，再放寬
+    if loose_triggers <= moderate_triggers and loose_conds:
+        loose_conds = [_relax(c) for c in loose_conds]
+        loose_triggers = _count(loose_conds)
+
+    # ─── 組裝輸出 ────────────────────────────────────────
+    def _format_tier(conds, triggers, source_desc):
         return {
             "conditions": [
                 {
@@ -716,12 +827,30 @@ def _generate_strategy_tiers(
             ],
             "trigger_count": triggers,
             "factor_count": len(conds),
+            "source": source_desc,
         }
 
+    # 標記有預測反饋 boost 的因子
+    fb_note = ""
+    if fb and isinstance(fb, dict):
+        boosted = [k for k, v in fb.items() if isinstance(v, (int, float)) and v > 0.05]
+        penalized = [k for k, v in fb.items() if isinstance(v, (int, float)) and v < -0.05]
+        parts = []
+        if boosted:
+            parts.append(f"歷史驗證好: {','.join(boosted[:3])}")
+        if penalized:
+            parts.append(f"歷史驗證差: {','.join(penalized[:3])}")
+        if parts:
+            fb_note = " | " + " | ".join(parts)
+
     return {
-        "strict": _format_tier(strict_conds, strict_triggers),
-        "moderate": _format_tier(moderate_conds, moderate_triggers),
-        "loose": _format_tier(loose_conds, loose_triggers),
+        "strict": _format_tier(strict_conds, strict_triggers,
+                               "高品質因子（≥2星 + 分位數最佳區間）全部 AND" + fb_note),
+        "moderate": _format_tier(moderate_conds, moderate_triggers,
+                                 "最佳雙因子組合 + IC 強因子（放寬一級）" + fb_note),
+        "loose": _format_tier(loose_conds, loose_triggers,
+                              "僅 IC 最強 2 因子（放寬兩級）" + fb_note),
+        "prediction_feedback_applied": bool(fb),
     }
 
 
@@ -773,12 +902,15 @@ def _combo_ic(
                 if np.sum(valid) < 30:
                     continue
                 try:
-                    ic = _spearman_ic(combo[valid], fwd[valid])
+                    ic, pval = _spearman_ic(combo[valid], fwd[valid])
+                    if pval > 0.10:
+                        continue
                     results.append({
                         "factor_a": ka,
                         "factor_b": kb,
                         "combo_ic": round(ic, 4),
                         "combo_abs_ic": round(abs(ic), 4),
+                        "p_value": round(pval, 4),
                     })
                 except Exception:
                     pass
@@ -802,8 +934,8 @@ def _rate_factor(
     cv: Optional[float],
     half_life: Optional[int],
 ) -> dict:
-    """綜合評級因子狀態。"""
-    if abs_ic < 0.02:
+    """綜合評級因子狀態（已提高門檻）。"""
+    if abs_ic < 0.03:
         status = "inactive"
         stars = 0
         label = "✗ 無效"
@@ -811,18 +943,18 @@ def _rate_factor(
         status = "decaying"
         stars = 1
         label = "↓ 衰退中"
-    elif trend == "rising" and abs_ic > 0.05:
+    elif trend == "rising" and abs_ic > 0.06:
         status = "rising"
         stars = 2
         label = "★★ 升溫中"
-        if abs_ic > 0.08:
+        if abs_ic > 0.10:
             stars = 3
             label = "★★★ 強勢升溫"
-    elif abs_ic > 0.1 and (cv is None or cv < 0.5):
+    elif abs_ic > 0.12 and (cv is None or cv < 0.5):
         status = "strong"
         stars = 3
         label = "★★★ Strong"
-    elif abs_ic > 0.05:
+    elif abs_ic > 0.06:
         if cv is not None and cv < 0.6:
             status = "validated"
             stars = 2
@@ -836,16 +968,56 @@ def _rate_factor(
         stars = 1
         label = "★ Weak"
 
-    # 半衰期極短 → 降級
     if half_life is not None and half_life <= 1 and stars > 1:
         stars = max(stars - 1, 1)
         label = f"↓ 快速衰退 ({label})"
         status = "decaying"
 
-    confidence = "高" if abs_ic > 0.08 and (cv is None or cv < 0.4) else \
-                 "中" if abs_ic > 0.04 else "低"
+    confidence = "高" if abs_ic > 0.10 and (cv is None or cv < 0.4) else \
+                 "中" if abs_ic > 0.05 else "低"
 
     return {"status": status, "stars": stars, "label": label, "confidence": confidence}
+
+
+# ═══════════════════════════════════════════════════════
+#  去重：自動剔除高相關因子
+# ═══════════════════════════════════════════════════════
+
+def _deduplicate_correlated_factors(
+    factor_results: dict,
+    raw_factors: dict[str, np.ndarray],
+    threshold: float = 0.85,
+) -> dict:
+    """剔除因子間 Pearson 相關 > threshold 的冗餘因子，保留 abs_ic_recent 較高者。"""
+    keys = list(factor_results.keys())
+    if len(keys) <= 1:
+        return factor_results
+
+    sorted_keys = sorted(keys, key=lambda k: factor_results[k]["abs_ic_recent"], reverse=True)
+    keep: set[str] = set()
+    removed: set[str] = set()
+
+    for k in sorted_keys:
+        if k in removed:
+            continue
+        keep.add(k)
+        arr_k = raw_factors.get(k)
+        if arr_k is None:
+            continue
+        for other in sorted_keys:
+            if other in keep or other in removed or other == k:
+                continue
+            arr_o = raw_factors.get(other)
+            if arr_o is None:
+                continue
+            valid = ~np.isnan(arr_k) & ~np.isnan(arr_o)
+            if np.sum(valid) < 20:
+                continue
+            corr = np.corrcoef(arr_k[valid], arr_o[valid])[0, 1]
+            if abs(corr) > threshold:
+                removed.add(other)
+
+    return {k: v for k, v in factor_results.items() if k in keep}
 
 
 # ═══════════════════════════════════════════════════════
@@ -877,9 +1049,19 @@ def run_factor_scan(
     if indicator_ids is None:
         indicator_ids = SCANNABLE_INDICATORS
 
+    df = df.copy()
     n = len(df)
-    if n < _MIN_SAMPLES + forward_period:
-        return {"status": "error", "message": f"數據不足（{n} 根），至少需要 {_MIN_SAMPLES + forward_period} 根"}
+    min_samples_tf = _MIN_SAMPLES_BY_TF.get(timeframe, _MIN_SAMPLES)
+    min_required = min_samples_tf + forward_period
+    if n < min_required:
+        return {
+            "status": "error",
+            "message": (
+                f"數據不足（{n} 根 {timeframe} K 線），"
+                f"至少需要 {min_required} 根才能產生可靠的因子掃描結果。"
+                f"建議先載入更多歷史數據。"
+            ),
+        }
 
     recent_bars = _RECENT_BARS.get(timeframe, 200)
     recent_bars = min(recent_bars, n)
@@ -902,69 +1084,96 @@ def run_factor_scan(
     # 判斷市場體制
     regime = _detect_regime(df)
 
-    # 逐因子計算
+    # ── 逐因子計算 ──
+    _IC_THRESHOLD = 0.05
+    _IC_THRESHOLD_RELAXED = 0.03
+    _P_VALUE_CUTOFF = 0.05
+
     factor_results = {}
     for key, arr in factors.items():
-        # 全域 IC
         valid_full = ~np.isnan(arr) & ~np.isnan(fwd_full)
         if np.sum(valid_full) < 30:
             continue
         try:
-            ic_full = _spearman_ic(arr[valid_full], fwd_full[valid_full])
+            ic_full, pval_full = _spearman_ic(arr[valid_full], fwd_full[valid_full])
         except Exception:
             continue
 
-        # 近期 IC
         valid_recent = ~np.isnan(arr) & ~np.isnan(fwd_recent)
         samples_recent = int(np.sum(valid_recent))
         if samples_recent >= 30:
             try:
-                ic_recent = _spearman_ic(arr[valid_recent], fwd_recent[valid_recent])
+                ic_recent, pval_recent = _spearman_ic(arr[valid_recent], fwd_recent[valid_recent])
             except Exception:
-                ic_recent = ic_full
+                ic_recent, pval_recent = ic_full, pval_full
         else:
-            ic_recent = ic_full
+            ic_recent, pval_recent = ic_full, pval_full
             samples_recent = int(np.sum(valid_full))
 
-        # Alpha Decay
-        decay = _compute_decay_curve(arr, fwd_full, n_windows=6)
+        # p-value 過濾：兩個 IC 都不顯著則跳過
+        if pval_full > _P_VALUE_CUTOFF and pval_recent > _P_VALUE_CUTOFF:
+            continue
 
-        # 評級
+        decay = _compute_decay_curve(arr, fwd_full, n_windows=6)
         rating = _rate_factor(abs(ic_recent), decay["trend"], decay["cv"], decay["half_life"])
 
         factor_results[key] = {
             "ic_recent": round(ic_recent, 4),
             "ic_full": round(ic_full, 4),
             "abs_ic_recent": round(abs(ic_recent), 4),
+            "p_value_full": round(pval_full, 4),
+            "p_value_recent": round(pval_recent, 4),
             "samples": samples_recent,
             "decay": decay,
             "rating": rating,
         }
 
     if not factor_results:
-        return {"status": "error", "message": "所有因子計算失敗或樣本不足"}
+        return {"status": "error", "message": "所有因子計算失敗或樣本不足（或均未通過 p-value 顯著性檢定）"}
 
-    # 分正/負相關排序
+    # ── 自動剔除高相關因子 ──
+    factor_results = _deduplicate_correlated_factors(factor_results, factors, threshold=0.85)
+
+    # ── 分正/負相關排序（動態 IC 門檻） ──
+    ic_threshold = _IC_THRESHOLD
     positive = sorted(
-        [(k, v) for k, v in factor_results.items() if v["ic_recent"] > 0.02],
+        [(k, v) for k, v in factor_results.items()
+         if v["ic_recent"] > ic_threshold and v["p_value_recent"] <= _P_VALUE_CUTOFF],
         key=lambda x: x[1]["ic_recent"], reverse=True,
     )[:top_n]
-
     negative = sorted(
-        [(k, v) for k, v in factor_results.items() if v["ic_recent"] < -0.02],
+        [(k, v) for k, v in factor_results.items()
+         if v["ic_recent"] < -ic_threshold and v["p_value_recent"] <= _P_VALUE_CUTOFF],
         key=lambda x: x[1]["ic_recent"],
     )[:top_n]
 
-    # 分位數分析（對所有 TOP 正相關和 TOP 負相關因子都做，各取 top_n 個）
+    if len(positive) + len(negative) < 3:
+        ic_threshold = _IC_THRESHOLD_RELAXED
+        positive = sorted(
+            [(k, v) for k, v in factor_results.items()
+             if v["ic_recent"] > ic_threshold and v["p_value_recent"] <= _P_VALUE_CUTOFF],
+            key=lambda x: x[1]["ic_recent"], reverse=True,
+        )[:top_n]
+        negative = sorted(
+            [(k, v) for k, v in factor_results.items()
+             if v["ic_recent"] < -ic_threshold and v["p_value_recent"] <= _P_VALUE_CUTOFF],
+            key=lambda x: x[1]["ic_recent"],
+        )[:top_n]
+
+    # ── 分位數分析（OOS: 70% 訓練 / 30% 測試） ──
+    oos_split = int(n * 0.7)
+    fwd_oos = fwd_full.copy()
+    fwd_oos[:oos_split] = np.nan
+
     quantile_results = {}
     for idx, (k, _v) in enumerate(positive[:top_n]):
         if k in factors:
-            qa = _quantile_analysis(factors[k], fwd_full)
+            qa = _quantile_analysis(factors[k], fwd_oos)
             if qa:
                 quantile_results[f"positive_{idx+1}"] = {"factor": k, **qa}
     for idx, (k, _v) in enumerate(negative[:top_n]):
         if k in factors:
-            qa = _quantile_analysis(factors[k], fwd_full)
+            qa = _quantile_analysis(factors[k], fwd_oos)
             if qa:
                 quantile_results[f"negative_{idx+1}"] = {"factor": k, **qa}
 
@@ -976,19 +1185,27 @@ def run_factor_scan(
     # 高相關警告
     high_corr = _find_high_correlations(factors, list(factor_results.keys()))
 
-    # 智慧策略分級
+    # 預測歷史反饋（用於 boost / penalize 因子）
+    prediction_feedback = _load_prediction_feedback(symbol=None)
+
+    # 智慧策略分級（整合雙因子組合 + IC 排名 + Alpha Decay + 預測反饋）
     strategy_tiers = _generate_strategy_tiers(
         factors, factor_results, quantile_results,
-        positive, negative, n,
+        positive, negative, combo_results, n,
+        prediction_feedback=prediction_feedback,
     )
 
     # 組裝結果
+    relaxed_mode = ic_threshold == _IC_THRESHOLD_RELAXED
+
     def _fmt(items):
         return [
             {
                 "factor": k,
                 "ic_recent": v["ic_recent"],
                 "ic_full": v["ic_full"],
+                "p_value_recent": v.get("p_value_recent"),
+                "p_value_full": v.get("p_value_full"),
                 "decay_trend": v["decay"]["trend"],
                 "decay_curve": v["decay"]["curve"],
                 "half_life": v["decay"]["half_life"],
@@ -1000,15 +1217,25 @@ def run_factor_scan(
             for k, v in items
         ]
 
+    warnings: list[str] = []
+    if relaxed_mode:
+        warnings.append("因子數量不足，已將 IC 門檻從 0.05 降級至 0.03，結果可靠度較低。")
+    if n < min_samples_tf * 2:
+        warnings.append(f"數據量偏低（{n} 根），建議載入 {min_samples_tf * 3}+ 根以獲得更穩定結果。")
+
     return {
         "status": "success",
-        "symbol": None,  # 由呼叫方填入
+        "symbol": None,
         "timeframe": timeframe,
         "total_bars": n,
         "recent_bars": recent_bars,
         "forward_period": forward_period,
         "regime": regime,
         "total_factors_scanned": len(factor_results),
+        "ic_threshold_used": ic_threshold,
+        "p_value_cutoff": _P_VALUE_CUTOFF,
+        "oos_split_ratio": "70/30",
+        "dedup_threshold": 0.85,
         "positive_top": _fmt(positive),
         "negative_top": _fmt(negative),
         "combo_top": combo_results,
@@ -1019,6 +1246,7 @@ def run_factor_scan(
             1 for v in factor_results.values()
             if v["abs_ic_recent"] > 0.05
         ),
+        "scan_warnings": warnings,
     }
 
 
@@ -1101,6 +1329,7 @@ def compute_factor_ic(
     ic_method: str = "rank",
 ) -> dict:
     """計算每個指標因子的 IC（向下相容介面）。"""
+    df = df.copy()
     if forward_periods is None:
         forward_periods = [1, 3, 5, 10, 20]
 
@@ -1127,8 +1356,7 @@ def compute_factor_ic(
                         continue
 
                     if ic_method == "rank":
-                        ic = _spearman_ic(factor_arr[valid], fwd[valid])
-                        p_value = None
+                        ic, p_value = _spearman_ic(factor_arr[valid], fwd[valid])
                     else:
                         ic = float(np.corrcoef(factor_arr[valid], fwd[valid])[0, 1])
                         p_value = None
@@ -1184,6 +1412,7 @@ def compute_factor_correlation(
     indicator_ids: list[str],
 ) -> dict:
     """計算因子之間的相關性矩陣（向下相容）。"""
+    df = df.copy()
     factors = _collect_all_factors(df, indicator_ids, include_derived=False)
 
     if len(factors) < 2:
@@ -1208,6 +1437,7 @@ def compute_composite_signal(
     normalize: bool = True,
 ) -> dict:
     """多因子加權合成信號（向下相容）。"""
+    df = df.copy()
     n = len(df)
     weighted_sum = np.zeros(n)
     total_weight = 0

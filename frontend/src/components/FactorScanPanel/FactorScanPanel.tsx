@@ -3,6 +3,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { useChartStore } from '../../stores/chartStore';
 import { runFactorScan, triggerPreview } from '../../services/api';
+import { toast } from '../Toast';
 import type { FactorScanResult, FactorScanItem, StrategyTier, StrategyTierCondition, TriggerCondition } from '../../services/api';
 
 type TierKey = 'strict' | 'moderate' | 'loose';
@@ -37,6 +38,195 @@ function tierToEditableConds(conditions: StrategyTierCondition[]): EditableCond[
       original_description: c.description,
     };
   });
+}
+
+// ─── 量化概念解說（零 token，純模板） ──────────────
+const QUANT_EXPLAIN: Record<string, { title: string; body: string; example?: string }> = {
+  ic: {
+    title: 'IC（Information Coefficient）',
+    body: '衡量一個因子跟未來報酬的相關性。範圍 -1 ~ +1，絕對值越大代表預測力越強。',
+    example: 'IC = +0.15 代表這個因子跟未來漲跌有很強的正相關，數值越高 → 未來越容易漲。',
+  },
+  alpha_decay: {
+    title: 'Alpha Decay（預測力衰減）',
+    body: '因子的預測力會隨時間衰減。衰減越慢代表因子越穩定可靠，衰減快的因子需要更頻繁更新。',
+    example: '半衰期 = 4 表示這個因子的預測力大約 4 個週期後會降到一半。',
+  },
+  half_life: {
+    title: '半衰期（Half-Life）',
+    body: '因子的預測力衰減到一半所需的時間週期。數值越大 = 因子越持久穩定。',
+    example: '半衰期 ≥ 4：穩定；2~3：中等；≤ 1：快速衰退，可能是雜訊。',
+  },
+  quantile: {
+    title: '分位數分析（Quantile Analysis）',
+    body: '把因子值從小到大分成 5 組（Q1~Q5），看每組的平均未來報酬。找出「哪個範圍進場最賺」。',
+    example: 'Q1 報酬 +0.36% 且是最佳 → 當因子值在 Q1 範圍時進場，歷史上平均賺 0.36%。',
+  },
+  combo_ic: {
+    title: '雙因子組合 IC',
+    body: '兩個因子合併計算的預測力。組合 IC 高於單因子 IC 代表這兩個因子配合使用更有效。',
+    example: '因子A IC=0.10 + 因子B IC=0.08 → 組合 IC=0.15，代表配合使用效果比單獨用好。',
+  },
+  monotonic: {
+    title: '單調性（Monotonicity）',
+    body: '因子值從 Q1→Q5 的報酬是否遞增或遞減。單調 = 因子值越大（或越小）報酬越好，線性關係清楚。',
+    example: '非單調 ⚠️ 代表中間某些區間可能有反轉，使用時需搭配其他因子確認。',
+  },
+  strategy_tier: {
+    title: '策略分級（Strict / Moderate / Loose）',
+    body: '嚴格版用所有高品質因子 AND，精準但機會少；建議版用最佳雙因子組合 + 強因子，平衡精準和機會；寬鬆版只用最強 2 個因子，機會多但雜訊也多。',
+    example: '建議先從「建議版」開始，觀察觸發次數和歷史報酬，再決定要更嚴格還是更寬鬆。',
+  },
+  trigger_count: {
+    title: '觸發次數',
+    body: '歷史上滿足所有進場條件的 K 線數量。太少（< 10）代表條件太嚴，回測統計意義不足；太多（> 50%）代表條件太鬆，可能沒有選擇性。',
+    example: '觸發 50 次 / 7000 根 = 0.7%，代表條件非常嚴格，只在極少數時刻觸發。',
+  },
+};
+
+function WhyButton({ concept }: { concept: keyof typeof QUANT_EXPLAIN }) {
+  const [open, setOpen] = useState(false);
+  const info = QUANT_EXPLAIN[concept];
+  if (!info) return null;
+  return (
+    <span style={{ position: 'relative', display: 'inline-block' }}>
+      <span
+        onClick={(e) => { e.stopPropagation(); setOpen(!open); }}
+        style={{
+          cursor: 'pointer', fontSize: 10, opacity: 0.5,
+          color: 'var(--accent-blue)', marginLeft: 3,
+          userSelect: 'none',
+        }}
+        title="點擊瞭解這個概念"
+      >❓</span>
+      {open && (
+        <div
+          onClick={(e) => e.stopPropagation()}
+          style={{
+            position: 'absolute', left: 16, top: -8, zIndex: 1000,
+            width: 280, padding: '12px 14px', borderRadius: 10,
+            background: 'var(--bg-secondary, #161b22)',
+            border: '1px solid var(--accent-blue)',
+            boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
+            fontSize: 11, lineHeight: 1.6,
+            color: 'var(--text-primary, #e6edf3)',
+          }}
+        >
+          <div style={{ fontWeight: 700, marginBottom: 6, color: 'var(--accent-blue)' }}>
+            {info.title}
+          </div>
+          <p style={{ margin: 0, marginBottom: 8, color: 'var(--text-secondary)' }}>{info.body}</p>
+          {info.example && (
+            <div style={{
+              padding: '6px 8px', borderRadius: 6,
+              background: 'rgba(88,166,255,0.08)',
+              border: '1px solid rgba(88,166,255,0.2)',
+              fontSize: 10, color: 'var(--text-secondary)',
+            }}>
+              💡 {info.example}
+            </div>
+          )}
+          <button
+            onClick={() => setOpen(false)}
+            style={{
+              marginTop: 8, padding: '3px 10px', borderRadius: 4,
+              background: 'rgba(88,166,255,0.15)', border: '1px solid rgba(88,166,255,0.3)',
+              color: 'var(--accent-blue)', fontSize: 10, cursor: 'pointer',
+            }}
+          >關閉</button>
+        </div>
+      )}
+    </span>
+  );
+}
+
+// ─── IC 條形圖視覺化 ────────────────────────
+function IcBarChart({ items, title }: { items: FactorScanItem[]; title: string }) {
+  if (!items || items.length === 0) return null;
+  const maxAbs = Math.max(...items.map(i => Math.abs(i.ic_recent)), 0.01);
+
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 6 }}>
+        {title}
+      </div>
+      {items.map((item, idx) => {
+        const pct = Math.abs(item.ic_recent) / maxAbs * 100;
+        const isPos = item.ic_recent > 0;
+        const barColor = isPos ? '#3fb950' : '#f85149';
+        return (
+          <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 3 }}>
+            <span style={{
+              width: 90, fontSize: 10, color: 'var(--text-secondary)',
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              textAlign: 'right', flexShrink: 0,
+            }}>
+              {item.factor}
+            </span>
+            <div style={{ flex: 1, height: 12, background: 'var(--bg-tertiary)', borderRadius: 3, overflow: 'hidden', position: 'relative' }}>
+              <div style={{
+                position: 'absolute',
+                left: isPos ? '50%' : `${50 - pct / 2}%`,
+                width: `${pct / 2}%`,
+                height: '100%',
+                background: barColor,
+                borderRadius: 3,
+                opacity: 0.7,
+              }} />
+              <div style={{
+                position: 'absolute', left: '50%', top: 0, bottom: 0,
+                width: 1, background: 'var(--text-muted)', opacity: 0.3,
+              }} />
+            </div>
+            <span style={{ width: 52, fontSize: 10, fontFamily: 'monospace', color: barColor, textAlign: 'right', flexShrink: 0 }}>
+              {isPos ? '+' : ''}{item.ic_recent.toFixed(4)}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── 雙因子組合熱力圖 ─────────────────────────
+type ComboItemViz = { factor_a: string; factor_b: string; combo_ic: number; combo_abs_ic: number };
+
+function ComboHeatmap({ items }: { items: ComboItemViz[] }) {
+  if (!items || items.length === 0) return null;
+  const maxAbs = Math.max(...items.map(i => i.combo_abs_ic), 0.01);
+
+  const getColor = (ic: number) => {
+    const abs = Math.abs(ic);
+    const intensity = Math.min(abs / maxAbs, 1);
+    if (ic > 0) return `rgba(63, 185, 80, ${0.15 + intensity * 0.6})`;
+    return `rgba(248, 81, 73, ${0.15 + intensity * 0.6})`;
+  };
+
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 6 }}>
+        雙因子組合 IC 熱力圖
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: 3 }}>
+        {items.map((c, i) => (
+          <div key={i} style={{
+            padding: '6px 8px', borderRadius: 6,
+            background: getColor(c.combo_ic),
+            border: '1px solid rgba(255,255,255,0.05)',
+            fontSize: 10, lineHeight: 1.4,
+          }}>
+            <div style={{ fontWeight: 600, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {c.factor_a}
+            </div>
+            <div style={{ color: 'var(--text-muted)' }}>× {c.factor_b}</div>
+            <div style={{ fontFamily: 'monospace', color: c.combo_ic > 0 ? '#3fb950' : '#f85149', fontWeight: 700 }}>
+              {c.combo_ic > 0 ? '+' : ''}{c.combo_ic.toFixed(4)}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 // ─── IC 強度判讀 ────────────────────────────
@@ -101,6 +291,10 @@ function FactorRow({ item, rank }: { item: FactorScanItem; rank: number }) {
       <td style={{ padding: '6px 8px', textAlign: 'right', fontFamily: 'monospace', color: item.ic_recent > 0 ? '#3fb950' : '#f85149' }}>
         {item.ic_recent > 0 ? '+' : ''}{item.ic_recent.toFixed(4)}
       </td>
+      <td style={{ padding: '6px 8px', textAlign: 'right', fontFamily: 'monospace', fontSize: 10,
+        color: (item.p_value_recent ?? 1) <= 0.01 ? '#3fb950' : (item.p_value_recent ?? 1) <= 0.05 ? '#e3a008' : '#f85149' }}>
+        {item.p_value_recent != null ? item.p_value_recent.toFixed(3) : '—'}
+      </td>
       <td style={{ padding: '6px 4px' }}><IcStrengthBar ic={item.ic_recent} /></td>
       <td style={{ padding: '6px 8px', textAlign: 'right', fontFamily: 'monospace', color: 'var(--text-muted)', fontSize: 11 }}>
         {item.ic_full > 0 ? '+' : ''}{item.ic_full.toFixed(4)}
@@ -146,14 +340,15 @@ function buildScanSummary(r: FactorScanResult): string {
   if (r.status !== 'success') return '';
   const parts: string[] = [];
   parts.push(`市場體制:${r.regime?.label ?? '未知'}(ADX=${r.regime?.adx ?? '?'})`);
+  if (r.ic_threshold_used) parts.push(`IC門檻:${r.ic_threshold_used}`);
   if (r.positive_top?.length) {
     parts.push('正相關TOP:' + r.positive_top.slice(0, 3).map(
-      (f) => `${f.factor}(IC=${f.ic_recent > 0 ? '+' : ''}${f.ic_recent.toFixed(3)},${f.decay_trend})`
+      (f) => `${f.factor}(IC=${f.ic_recent > 0 ? '+' : ''}${f.ic_recent.toFixed(3)},p=${(f.p_value_recent ?? 0).toFixed(3)},${f.decay_trend})`
     ).join(','));
   }
   if (r.negative_top?.length) {
     parts.push('負相關TOP:' + r.negative_top.slice(0, 3).map(
-      (f) => `${f.factor}(IC=${f.ic_recent.toFixed(3)},${f.decay_trend})`
+      (f) => `${f.factor}(IC=${f.ic_recent.toFixed(3)},p=${(f.p_value_recent ?? 0).toFixed(3)},${f.decay_trend})`
     ).join(','));
   }
 
@@ -213,9 +408,11 @@ export default function FactorScanPanel() {
           timestamp: Date.now(),
           summary: buildScanSummary(data),
         });
+        toast(`因子掃描完成（有效因子 ${data.effective_count || 0}/${data.total_factors_scanned || 0}）`, 'success');
       }
     } catch {
       setResult({ status: 'error', message: '掃描失敗' });
+      toast('因子掃描失敗', 'error');
     } finally {
       setScanning(false);
     }
@@ -315,23 +512,66 @@ export default function FactorScanPanel() {
 
             {result?.status === 'success' && !scanning && (
               <>
+                {/* 掃描警告 */}
+                {(result.scan_warnings?.length ?? 0) > 0 && (
+                  <div style={{ marginBottom: 12 }}>
+                    {result.scan_warnings!.map((w, i) => (
+                      <div key={i} style={{ fontSize: 12, color: '#d29922', padding: '4px 12px', background: 'rgba(210,153,34,0.08)', borderRadius: 6, marginBottom: 4 }}>
+                        ⚠️ {w}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* 掃描元資訊 */}
+                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', fontSize: 11, color: 'var(--text-muted)', marginBottom: 10, padding: '0 4px' }}>
+                  <span>IC門檻: {result.ic_threshold_used ?? '—'}</span>
+                  <span>p-value: ≤{result.p_value_cutoff ?? '—'}</span>
+                  <span>分位數: OOS {result.oos_split_ratio ?? '—'}</span>
+                  <span>去重: r&gt;{result.dedup_threshold ?? '—'}</span>
+                </div>
+
                 {/* 正相關 TOP */}
                 {(result.positive_top?.length ?? 0) > 0 && (
-                  <Section title="正相關 TOP — 因子值↑ → 未來價格↑" color="#3fb950">
+                  <Section title={<>正相關 TOP — 因子值↑ → 未來價格↑<WhyButton concept="ic" /></>} color="#3fb950">
                     <FactorTable items={result.positive_top!} headerStyle={thStyle} />
                   </Section>
                 )}
 
                 {/* 負相關 TOP */}
                 {(result.negative_top?.length ?? 0) > 0 && (
-                  <Section title="負相關 TOP — 因子值↑ → 未來價格↓" color="#f85149">
+                  <Section title={<>負相關 TOP — 因子值↑ → 未來價格↓<WhyButton concept="ic" /></>} color="#f85149">
                     <FactorTable items={result.negative_top!} headerStyle={thStyle} />
                   </Section>
                 )}
 
+                {/* IC 視覺化條形圖 */}
+                {((result.positive_top?.length ?? 0) + (result.negative_top?.length ?? 0)) > 0 && (
+                  <Section title="IC 分佈視覺化" color="#8b949e">
+                    <IcBarChart
+                      items={[...(result.positive_top || []), ...(result.negative_top || [])].sort((a, b) => b.ic_recent - a.ic_recent)}
+                      title="所有因子 IC（正 → 負）"
+                    />
+                  </Section>
+                )}
+
+                {/* 雙因子熱力圖 */}
+                {result.combo_top && (() => {
+                  const allCombos = [
+                    ...(result.combo_top.positive_combos || []),
+                    ...(result.combo_top.negative_combos || []),
+                    ...(result.combo_top.hedge_combos || []),
+                  ];
+                  return allCombos.length > 0 ? (
+                    <Section title="雙因子組合強度" color="#d2a8ff">
+                      <ComboHeatmap items={allCombos} />
+                    </Section>
+                  ) : null;
+                })()}
+
                 {/* 分位數分析 + 最佳進場建議 */}
                 {result.quantile_analysis && Object.keys(result.quantile_analysis).length > 0 && (
-                  <Section title="最佳進場區間分析" color="#79c0ff">
+                  <Section title={<>最佳進場區間分析<WhyButton concept="quantile" /></>} color="#79c0ff">
                     {Object.entries(result.quantile_analysis).map(([label, qa]) => (
                       <div key={label} style={{ marginBottom: 12, padding: '8px 10px', background: 'var(--bg-secondary)', borderRadius: 8 }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
@@ -384,7 +624,7 @@ export default function FactorScanPanel() {
 
                 {/* 雙因子組合 */}
                 {result.combo_top && (
-                  <Section title="雙因子組合" color="#d2a8ff">
+                  <Section title={<>雙因子組合<WhyButton concept="combo_ic" /></>} color="#d2a8ff">
                     <ComboTable items={result.combo_top.positive_combos ?? []} label="正正組合（同方向看多增強）" />
                     <ComboTable items={result.combo_top.negative_combos ?? []} label="負負組合（同方向看空增強）" />
                     <ComboTable items={result.combo_top.hedge_combos ?? []} label="多空對沖組合（正因子 - 負因子）" />
@@ -404,6 +644,12 @@ export default function FactorScanPanel() {
                     ))}
                   </Section>
                 )}
+
+                {/* 策略建構精靈 */}
+                <StrategyWizard result={result} onSendMessage={(msg) => {
+                  const setPending = useChartStore.getState().setPendingChatMessage;
+                  setPending(msg);
+                }} />
 
                 {/* 策略分級建議 */}
                 <StrategyTiersSection result={result} activeTier={activeTier} onLoadTier={handleLoadTier} />
@@ -433,9 +679,9 @@ export default function FactorScanPanel() {
 }
 
 const TIER_META: Record<TierKey, { label: string; emoji: string; color: string; desc: string }> = {
-  strict: { label: '嚴格', emoji: '🎯', color: '#f85149', desc: '所有因子 AND 最佳分位，精準但觸發少' },
-  moderate: { label: '建議', emoji: '⚡', color: '#58a6ff', desc: '自動放寬弱因子，平衡觸發次數與品質' },
-  loose: { label: '寬鬆', emoji: '🌊', color: '#3fb950', desc: '僅保留 IC 最強的 2 個因子，觸發多' },
+  strict: { label: '嚴格', emoji: '🎯', color: '#f85149', desc: '高品質因子（≥2星 + Alpha Decay 過濾）全部 AND' },
+  moderate: { label: '建議', emoji: '⚡', color: '#58a6ff', desc: '最佳雙因子組合 + 強 IC 因子，放寬一級' },
+  loose: { label: '寬鬆', emoji: '🌊', color: '#3fb950', desc: '僅保留 IC 最強 2 因子，放寬兩級' },
 };
 
 function StrategyTiersSection({ result, activeTier, onLoadTier }: {
@@ -451,7 +697,7 @@ function StrategyTiersSection({ result, activeTier, onLoadTier }: {
   if (available.length === 0) return null;
 
   return (
-    <Section title="策略分級建議" color="#79c0ff">
+    <Section title={<>策略分級建議<WhyButton concept="strategy_tier" /></>} color="#79c0ff">
       <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 10 }}>
         選擇一個版本載入到下方調整器，可進一步微調後再送出回測：
       </div>
@@ -511,7 +757,9 @@ function StrategyTiersSection({ result, activeTier, onLoadTier }: {
                 </div>
               </div>
 
-              <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 6 }}>{meta.desc}</div>
+              <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 6 }}>
+                {tier.source || meta.desc}
+              </div>
 
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                 {tier.conditions.map((c, i) => (
@@ -776,7 +1024,178 @@ function FactorCustomizer({ result, externalConds, expanded, setExpanded }: {
   );
 }
 
-function Section({ title, color, children }: { title: string; color: string; children: React.ReactNode }) {
+// ─── 策略建構精靈 ───────────────────────────
+function StrategyWizard({ result, onSendMessage }: { result: FactorScanResult; onSendMessage: (msg: string) => void }) {
+  const [step, setStep] = useState(0);
+  const [selectedFactors, setSelectedFactors] = useState<Set<string>>(new Set());
+  const [direction, setDirection] = useState<'long' | 'short'>('long');
+  const symbol = useChartStore(s => s.symbol);
+  const timeframe = useChartStore(s => s.timeframe);
+
+  const allFactors: FactorScanItem[] = [
+    ...(result.positive_top || []),
+    ...(result.negative_top || []),
+  ];
+
+  const toggleFactor = (f: string) => {
+    const next = new Set(selectedFactors);
+    if (next.has(f)) next.delete(f); else next.add(f);
+    setSelectedFactors(next);
+  };
+
+  const buildPrompt = () => {
+    const factors = allFactors.filter(f => selectedFactors.has(f.factor));
+    const conditions = factors.map(f => {
+      const qa = result.quantile_analysis?.[
+        Object.keys(result.quantile_analysis || {}).find(k =>
+          (result.quantile_analysis as Record<string, { factor: string }>)[k]?.factor === f.factor
+        ) || ''
+      ];
+      const suggestion = qa?.best_quantile?.entry_suggestion;
+      return suggestion ? `${f.factor} ${suggestion}` : f.factor;
+    });
+    return `請對 ${symbol} ${timeframe} 做${direction === 'long' ? '做多' : '做空'}策略回測：\n進場條件：${conditions.join('、')}\n\n選用因子：${factors.map(f => `${f.factor}(IC=${f.ic_recent > 0 ? '+' : ''}${f.ic_recent.toFixed(3)})`).join(', ')}\n\n請設計策略並執行回測分析。`;
+  };
+
+  const steps = ['選擇方向', '選擇因子', '確認送出'];
+
+  return (
+    <Section title="🧙 策略建構精靈" color="#d2a8ff">
+      {/* 步驟指示器 */}
+      <div style={{ display: 'flex', gap: 4, marginBottom: 12 }}>
+        {steps.map((s, i) => (
+          <div key={i} style={{
+            flex: 1, textAlign: 'center', padding: '4px 0',
+            borderRadius: 4, fontSize: 10, fontWeight: i === step ? 700 : 400,
+            background: i === step ? 'rgba(210,168,255,0.2)' : 'var(--bg-tertiary)',
+            color: i === step ? '#d2a8ff' : i < step ? '#3fb950' : 'var(--text-muted)',
+            border: i === step ? '1px solid rgba(210,168,255,0.4)' : '1px solid transparent',
+            cursor: i < step ? 'pointer' : 'default',
+          }}
+            onClick={() => { if (i < step) setStep(i); }}
+          >
+            {i < step ? '✓ ' : ''}{s}
+          </div>
+        ))}
+      </div>
+
+      {/* Step 0: Direction */}
+      {step === 0 && (
+        <div>
+          <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 8 }}>選擇策略方向：</div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {(['long', 'short'] as const).map(d => (
+              <button
+                key={d}
+                onClick={() => setDirection(d)}
+                style={{
+                  flex: 1, padding: '10px 0', borderRadius: 8,
+                  border: direction === d ? `2px solid ${d === 'long' ? '#3fb950' : '#f85149'}` : '1px solid var(--border-color)',
+                  background: direction === d ? (d === 'long' ? 'rgba(63,185,80,0.1)' : 'rgba(248,81,73,0.1)') : 'var(--bg-tertiary)',
+                  color: d === 'long' ? '#3fb950' : '#f85149',
+                  fontSize: 13, fontWeight: 700, cursor: 'pointer',
+                }}
+              >
+                {d === 'long' ? '📈 做多' : '📉 做空'}
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={() => setStep(1)}
+            style={{
+              width: '100%', marginTop: 10, padding: '8px', borderRadius: 6,
+              background: 'rgba(210,168,255,0.15)', border: '1px solid rgba(210,168,255,0.3)',
+              color: '#d2a8ff', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+            }}
+          >
+            下一步 →
+          </button>
+        </div>
+      )}
+
+      {/* Step 1: Pick factors */}
+      {step === 1 && (
+        <div>
+          <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 8 }}>
+            勾選要納入策略的因子（建議 2~4 個）<WhyButton concept="combo_ic" />
+          </div>
+          <div style={{ maxHeight: 200, overflowY: 'auto' }}>
+            {allFactors.map(f => {
+              const sel = selectedFactors.has(f.factor);
+              return (
+                <div
+                  key={f.factor}
+                  onClick={() => toggleFactor(f.factor)}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 8,
+                    padding: '6px 8px', marginBottom: 2, borderRadius: 6,
+                    cursor: 'pointer',
+                    background: sel ? 'rgba(210,168,255,0.1)' : 'transparent',
+                    border: sel ? '1px solid rgba(210,168,255,0.3)' : '1px solid transparent',
+                  }}
+                >
+                  <span style={{ fontSize: 14 }}>{sel ? '☑️' : '⬜'}</span>
+                  <span style={{ flex: 1, fontSize: 11, color: 'var(--text-primary)' }}>{f.factor}</span>
+                  <span style={{
+                    fontSize: 10, fontFamily: 'monospace',
+                    color: f.ic_recent > 0 ? '#3fb950' : '#f85149',
+                  }}>
+                    IC={f.ic_recent > 0 ? '+' : ''}{f.ic_recent.toFixed(3)}
+                  </span>
+                  <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>{f.status_label}</span>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+            <button onClick={() => setStep(0)} style={{
+              flex: 1, padding: '6px', borderRadius: 6, fontSize: 11, cursor: 'pointer',
+              background: 'var(--bg-tertiary)', border: '1px solid var(--border-color)', color: 'var(--text-secondary)',
+            }}>← 上一步</button>
+            <button onClick={() => setStep(2)} disabled={selectedFactors.size === 0} style={{
+              flex: 1, padding: '6px', borderRadius: 6, fontSize: 11, cursor: 'pointer',
+              background: selectedFactors.size > 0 ? 'rgba(210,168,255,0.15)' : 'var(--bg-tertiary)',
+              border: '1px solid rgba(210,168,255,0.3)', color: '#d2a8ff',
+              opacity: selectedFactors.size > 0 ? 1 : 0.4,
+            }}>下一步 →</button>
+          </div>
+        </div>
+      )}
+
+      {/* Step 2: Confirm and send */}
+      {step === 2 && (
+        <div>
+          <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 8 }}>確認策略：</div>
+          <div style={{
+            padding: '10px 12px', borderRadius: 8,
+            background: 'var(--bg-tertiary)', fontSize: 11, lineHeight: 1.6,
+            color: 'var(--text-primary)', marginBottom: 10,
+          }}>
+            <div>📊 標的：<strong>{symbol}</strong> ({timeframe})</div>
+            <div>{direction === 'long' ? '📈 做多' : '📉 做空'}</div>
+            <div>🔬 因子數：{selectedFactors.size} 個</div>
+            <div style={{ marginTop: 4, color: 'var(--text-muted)', fontSize: 10 }}>
+              {Array.from(selectedFactors).join(' + ')}
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button onClick={() => setStep(1)} style={{
+              flex: 1, padding: '6px', borderRadius: 6, fontSize: 11, cursor: 'pointer',
+              background: 'var(--bg-tertiary)', border: '1px solid var(--border-color)', color: 'var(--text-secondary)',
+            }}>← 修改</button>
+            <button onClick={() => { onSendMessage(buildPrompt()); }} style={{
+              flex: 1, padding: '8px', borderRadius: 6, fontSize: 12, fontWeight: 700, cursor: 'pointer',
+              background: 'linear-gradient(135deg, rgba(210,168,255,0.2), rgba(88,166,255,0.15))',
+              border: '1px solid rgba(210,168,255,0.4)', color: '#d2a8ff',
+            }}>🚀 送出回測</button>
+          </div>
+        </div>
+      )}
+    </Section>
+  );
+}
+
+function Section({ title, color, children }: { title: React.ReactNode; color: string; children: React.ReactNode }) {
   return (
     <div style={{ marginBottom: 16 }}>
       <div style={{ fontSize: 13, fontWeight: 700, color, marginBottom: 8, paddingBottom: 4, borderBottom: `1px solid ${color}33` }}>
@@ -795,6 +1214,7 @@ function FactorTable({ items, headerStyle }: { items: FactorScanItem[]; headerSt
           <th style={headerStyle}>#</th>
           <th style={{ ...headerStyle, textAlign: 'left' }}>因子</th>
           <th style={headerStyle}>近期IC</th>
+          <th style={headerStyle}>p值</th>
           <th style={headerStyle}>強度</th>
           <th style={headerStyle}>長期IC</th>
           <th style={headerStyle}>Decay</th>

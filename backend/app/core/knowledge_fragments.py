@@ -450,5 +450,101 @@ class KnowledgeFragmentStore:
         except Exception:
             return {"total_fragments": 0, "total_hits": 0, "seed_count": 0}
 
+    def list_all(
+        self,
+        symbol: Optional[str] = None,
+        fragment_type: Optional[str] = None,
+        sort_by: str = "hit_count",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict:
+        """列出所有知識碎片（供前端瀏覽器使用）。"""
+        if not self._conn:
+            return {"fragments": [], "total": 0, "symbols": [], "types": []}
+
+        try:
+            where_parts = ["1=1"]
+            params: list = []
+            if symbol:
+                where_parts.append("symbol = ?")
+                params.append(symbol)
+            if fragment_type:
+                where_parts.append("fragment_type = ?")
+                params.append(fragment_type)
+            where_clause = " AND ".join(where_parts)
+
+            sort_map = {
+                "hit_count": "hit_count DESC, created_at DESC",
+                "created_at": "created_at DESC",
+                "type": "fragment_type ASC, hit_count DESC",
+            }
+            order = sort_map.get(sort_by, sort_map["hit_count"])
+
+            total = self._conn.execute(
+                f"SELECT COUNT(*) FROM fragments WHERE {where_clause}", params,
+            ).fetchone()[0]
+
+            rows = self._conn.execute(
+                f"""SELECT id, content, fragment_type, symbol, source_question,
+                           created_at, hit_count, is_seed
+                    FROM fragments
+                    WHERE {where_clause}
+                    ORDER BY {order}
+                    LIMIT ? OFFSET ?""",
+                params + [limit, offset],
+            ).fetchall()
+
+            now = time.time()
+            fragments = []
+            for r in rows:
+                fid, content, ftype, sym, src_q, created_at, hits, is_seed = r
+                age_days = (now - created_at) / 86400
+                quality = _compute_fragment_quality(ftype, hits)
+                fragments.append({
+                    "id": fid,
+                    "content": content,
+                    "type": ftype,
+                    "symbol": sym or "通用",
+                    "source_question": src_q or "",
+                    "hit_count": hits,
+                    "quality_score": round(quality, 2),
+                    "age_days": round(age_days, 1),
+                    "created_at": datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M"),
+                    "is_seed": bool(is_seed),
+                })
+
+            all_symbols = [
+                r[0] or "通用" for r in
+                self._conn.execute("SELECT DISTINCT symbol FROM fragments ORDER BY symbol").fetchall()
+            ]
+            all_types = [
+                r[0] for r in
+                self._conn.execute("SELECT DISTINCT fragment_type FROM fragments ORDER BY fragment_type").fetchall()
+            ]
+
+            return {
+                "fragments": fragments,
+                "total": total,
+                "symbols": sorted(set(all_symbols)),
+                "types": all_types,
+            }
+        except Exception as e:
+            logger.warning(f"列出知識碎片失敗: {e}")
+            return {"fragments": [], "total": 0, "symbols": [], "types": []}
+
+    def delete_by_id(self, fragment_id: int) -> bool:
+        """刪除指定 ID 的知識碎片。"""
+        if not self._conn:
+            return False
+        try:
+            deleted = self._conn.execute(
+                "DELETE FROM fragments WHERE id = ?", (fragment_id,),
+            ).rowcount
+            self._conn.commit()
+            return deleted > 0
+        except Exception as e:
+            logger.warning(f"刪除知識碎片失敗: {e}")
+            return False
+
 
 fragment_store = KnowledgeFragmentStore()

@@ -115,6 +115,9 @@ python3 -c "from google import genai" 2>/dev/null || NEED_INSTALL=true
 python3 -c "import ccxt" 2>/dev/null || NEED_INSTALL=true
 python3 -c "import pandas_ta" 2>/dev/null || NEED_INSTALL=true
 python3 -c "from cryptography.fernet import Fernet" 2>/dev/null || NEED_INSTALL=true
+python3 -c "import lightgbm" 2>/dev/null || NEED_INSTALL=true
+python3 -c "import xgboost" 2>/dev/null || NEED_INSTALL=true
+python3 -c "import sklearn" 2>/dev/null || NEED_INSTALL=true
 
 if [ "$NEED_INSTALL" = true ]; then
     echo -e "  ${YELLOW}正在安裝/更新依賴（約需 1-2 分鐘）...${NC}"

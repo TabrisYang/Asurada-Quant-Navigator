@@ -27,6 +27,8 @@ async def discover_models(
         return await _discover_openai(api_key)
     elif provider == "claude":
         return _discover_claude_static()
+    elif provider == "claude_subscription":
+        return _discover_claude_subscription_static()
     elif provider == "ollama":
         return await _discover_ollama(base_url or "http://localhost:11434")
     else:
@@ -164,6 +166,16 @@ def _discover_claude_static() -> list[dict]:
         {"id": "claude-sonnet-4-20250514", "name": "Claude Sonnet 4", "description": "推理能力強，最新旗艦模型"},
         {"id": "claude-3-5-sonnet-20241022", "name": "Claude 3.5 Sonnet", "description": "性價比高"},
         {"id": "claude-3-5-haiku-20241022", "name": "Claude 3.5 Haiku", "description": "回應最快，成本最低"},
+    ]
+
+
+def _discover_claude_subscription_static() -> list[dict]:
+    """Claude 訂閱制可用模型（含 Opus，實際可用性取決於訂閱等級）"""
+    return [
+        {"id": "claude-opus-4-20250514", "name": "Claude Opus 4", "description": "最強推理模型（需 Max 訂閱）"},
+        {"id": "claude-sonnet-4-20250514", "name": "Claude Sonnet 4", "description": "推理能力強，最新旗艦模型"},
+        {"id": "claude-3-5-sonnet-20241022", "name": "Claude 3.5 Sonnet", "description": "性價比高"},
+        {"id": "claude-3-5-haiku-20241022", "name": "Claude 3.5 Haiku", "description": "回應最快"},
     ]
 
 

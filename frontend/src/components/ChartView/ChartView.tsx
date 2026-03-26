@@ -676,6 +676,30 @@ export default function ChartView() {
     };
   }, []);
 
+  // 註冊圖表截圖功能（供 ChatInterface 呼叫）
+  useEffect(() => {
+    const store = useChartStore.getState();
+    const capture = async (): Promise<string | null> => {
+      const el = mainContainerRef.current?.parentElement;
+      if (!el) return null;
+      try {
+        const html2canvas = (await import('html2canvas')).default;
+        const canvas = await html2canvas(el, {
+          backgroundColor: '#0d1117',
+          scale: 1,
+          logging: false,
+          useCORS: true,
+        });
+        return canvas.toDataURL('image/jpeg', 0.7);
+      } catch (e) {
+        console.warn('截圖失敗:', e);
+        return null;
+      }
+    };
+    store.setCaptureScreenshot(capture);
+    return () => { store.setCaptureScreenshot(null); };
+  }, []);
+
   // 更新 K 線 + 成交量數據
   useEffect(() => {
     if (!candleSeriesRef.current || !volumeSeriesRef.current || ohlcvData.length === 0) return;
@@ -701,8 +725,13 @@ export default function ChartView() {
 
     candleSeriesRef.current.setData(candleData);
     volumeSeriesRef.current.setData(volumeData);
-    chartRef.current?.timeScale().fitContent();
-  }, [ohlcvData]);
+
+    const chart = chartRef.current;
+    if (chart) {
+      chart.priceScale('right').applyOptions({ autoScale: true });
+      chart.timeScale().fitContent();
+    }
+  }, [ohlcvData, symbol]);
 
   // 更新 overlay 指標（含 Market Structure 特殊渲染）
   useEffect(() => {

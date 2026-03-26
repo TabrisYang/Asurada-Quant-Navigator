@@ -130,6 +130,7 @@ export async function streamChatMessage(
   sessionId?: string,
   chatHistory?: Array<{ role: string; content: string }>,
   mode?: string,
+  chartScreenshot?: string,
 ): Promise<void> {
   const body: Record<string, unknown> = {
     message,
@@ -141,6 +142,9 @@ export async function streamChatMessage(
   };
   if (mode) {
     body.mode = mode;
+  }
+  if (chartScreenshot) {
+    body.chart_screenshot = chartScreenshot;
   }
 
   let doneEmitted = false;
@@ -372,6 +376,50 @@ export async function fetchDistilledKnowledge() {
   return res.data;
 }
 
+// ===== 知識碎片 API =====
+
+export interface FragmentItem {
+  id: number;
+  content: string;
+  type: string;
+  symbol: string;
+  source_question: string;
+  hit_count: number;
+  quality_score: number;
+  age_days: number;
+  created_at: string;
+  is_seed: boolean;
+}
+
+export interface FragmentListResult {
+  status: string;
+  fragments: FragmentItem[];
+  total: number;
+  symbols: string[];
+  types: string[];
+}
+
+export async function fetchFragments(params?: {
+  symbol?: string;
+  fragment_type?: string;
+  sort_by?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<FragmentListResult> {
+  const res = await api.get('/chat/fragments', { params });
+  return res.data;
+}
+
+export async function deleteFragment(fragmentId: number) {
+  const res = await api.delete(`/chat/fragments/${fragmentId}`);
+  return res.data;
+}
+
+export async function addUserNote(note: string, symbol?: string) {
+  const res = await api.post('/chat/fragments/note', { message: note, symbol });
+  return res.data;
+}
+
 // ===== 對話歷史 API =====
 
 export async function fetchChatHistory(limit: number = 20) {
@@ -528,6 +576,8 @@ export interface FactorScanItem {
   factor: string;
   ic_recent: number;
   ic_full: number;
+  p_value_recent?: number | null;
+  p_value_full?: number | null;
   decay_trend: string;
   decay_curve: (number | null)[];
   half_life: number | null;
@@ -569,6 +619,11 @@ export interface FactorScanResult {
     loose?: StrategyTier;
   };
   effective_count?: number;
+  ic_threshold_used?: number;
+  p_value_cutoff?: number;
+  oos_split_ratio?: string;
+  dedup_threshold?: number;
+  scan_warnings?: string[];
 }
 
 export interface StrategyTierCondition {
@@ -582,6 +637,7 @@ export interface StrategyTier {
   conditions: StrategyTierCondition[];
   trigger_count: number;
   factor_count: number;
+  source?: string;
 }
 
 export async function runFactorScan(req: FactorScanRequest): Promise<FactorScanResult> {
@@ -623,6 +679,176 @@ export async function triggerPreview(
     return { status: 'error', message: (err as Error)?.message || '預覽失敗',
              trigger_count: 0, total_bars: 0, trigger_pct: 0, conditions_used: 0 };
   }
+}
+
+// ===== ML 增強 =====
+
+export interface MLModel {
+  id: string;
+  name: string;
+  category: string;
+  description: string;
+  available: boolean;
+  missing_deps: string[];
+  min_samples: number;
+  supports_gpu: boolean;
+  training_speed: string;
+  default_config: Record<string, any>;
+}
+
+export interface MLSettings {
+  enabled: string;
+  model_id: string;
+  feature_set: string;
+  forward_period: number;
+  threshold: number;
+  show_explanation: boolean;
+  train_window: number;
+  retrain_interval: number;
+  walk_forward: boolean;
+  wf_windows: number;
+  min_samples: number;
+  consensus_mode: string;
+  target_direction: string;
+  target_threshold: number;
+  lookback_window: number;
+  _warnings?: string[];
+}
+
+export async function fetchMLModels(): Promise<MLModel[]> {
+  const res = await api.get('/ml/models');
+  return res.data.models || [];
+}
+
+export async function fetchMLSettings(): Promise<MLSettings> {
+  const res = await api.get('/ml/settings');
+  return res.data.settings;
+}
+
+export async function updateMLSettings(updates: Partial<MLSettings>): Promise<MLSettings> {
+  const res = await api.put('/ml/settings', updates);
+  return res.data.settings;
+}
+
+export async function fetchMLStatus(symbol: string, timeframe: string = '4h', modelId?: string) {
+  const params: Record<string, string> = { symbol, timeframe };
+  if (modelId) params.model_id = modelId;
+  const res = await api.get('/ml/status', { params });
+  return res.data;
+}
+
+export async function trainMLModel(params: {
+  symbol: string;
+  timeframe?: string;
+  model_id?: string;
+  start_date?: string;
+  end_date?: string;
+}) {
+  const res = await api.post('/ml/train', params);
+  return res.data;
+}
+
+export async function predictML(params: {
+  symbol: string;
+  timeframe?: string;
+  model_id?: string;
+  consensus?: boolean;
+}) {
+  const res = await api.post('/ml/predict', params);
+  return res.data;
+}
+
+export async function compareMLModels(params: {
+  symbol: string;
+  timeframe?: string;
+  model_ids?: string[];
+  feature_set?: string;
+  forward_period?: number;
+}) {
+  const res = await api.post('/ml/compare', params);
+  return res.data;
+}
+
+export async function retrainMLModel(params: {
+  symbol: string;
+  timeframe?: string;
+  model_id?: string;
+}) {
+  const res = await api.post('/ml/retrain', params);
+  return res.data;
+}
+
+export async function fetchTrainedModels(symbol?: string) {
+  const params: Record<string, string> = {};
+  if (symbol) params.symbol = symbol;
+  const res = await api.get('/ml/trained', { params });
+  return res.data;
+}
+
+// ===== ML 監控 API =====
+
+export async function fetchMLPerformanceHistory(symbol?: string, modelId?: string) {
+  const params: Record<string, string> = {};
+  if (symbol) params.symbol = symbol;
+  if (modelId) params.model_id = modelId;
+  const res = await api.get('/ml/performance-history', { params });
+  return res.data;
+}
+
+export async function checkMLHealth(symbol: string, timeframe: string = '4h') {
+  const res = await api.get('/ml/health', { params: { symbol, timeframe } });
+  return res.data;
+}
+
+// ===== 預測追蹤 API =====
+
+export async function fetchPredictionStats(symbol?: string, days?: number) {
+  const params: Record<string, string> = {};
+  if (symbol) params.symbol = symbol;
+  if (days) params.days = String(days);
+  const res = await api.get('/predictions/stats', { params });
+  return res.data;
+}
+
+export async function fetchActivePredictions(symbol?: string) {
+  const params: Record<string, string> = {};
+  if (symbol) params.symbol = symbol;
+  const res = await api.get('/predictions/active', { params });
+  return res.data;
+}
+
+export async function fetchPredictionHistory(symbol?: string, limit?: number) {
+  const params: Record<string, string> = {};
+  if (symbol) params.symbol = symbol;
+  if (limit) params.limit = String(limit);
+  const res = await api.get('/predictions/history', { params });
+  return res.data;
+}
+
+export async function updatePredictionNote(predId: number, note: string) {
+  const res = await api.put(`/predictions/${predId}/note`, { note });
+  return res.data;
+}
+
+export async function generateReview(startDate?: string, endDate?: string, symbol?: string) {
+  const body: Record<string, string> = {};
+  if (startDate) body.start_date = startDate;
+  if (endDate) body.end_date = endDate;
+  if (symbol) body.symbol = symbol;
+  const res = await api.post('/predictions/review', body, { timeout: 120000 });
+  return res.data;
+}
+
+// ===== 系統通用設定 =====
+
+export async function fetchSystemSettings(): Promise<Record<string, unknown>> {
+  const res = await api.get('/config/system-settings');
+  return res.data.settings;
+}
+
+export async function updateSystemSettings(updates: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const res = await api.put('/config/system-settings', updates);
+  return res.data.settings;
 }
 
 // ===== 健康檢查 =====

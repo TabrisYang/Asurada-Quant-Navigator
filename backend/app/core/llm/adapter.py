@@ -74,6 +74,7 @@ _PRICING: dict[str, dict[str, tuple[float, float]]] = {
         "claude-3-5-haiku": (0.80, 4.00),
         "claude-3-opus": (15.00, 75.00),
     },
+    "claude_subscription": {},  # 訂閱制，無額外費用
     "ollama": {},  # 本地免費
 }
 
@@ -121,12 +122,14 @@ class BaseLLMAdapter(ABC):
         chart_state: Optional[dict] = None,
         force_text: bool = False,
         system_prompt: Optional[str] = None,
+        chart_screenshot: Optional[str] = None,
     ) -> LLMResponse:
         """發送對話請求
 
         Args:
             force_text: 若為 True，不傳送 tools 給 LLM，強制只產生文字回應。
             system_prompt: 動態組裝的 SYSTEM_PROMPT，傳入後取代預設完整版。
+            chart_screenshot: base64 JPEG 圖表截圖（data:image/jpeg;base64,...）。
         """
         pass
 
@@ -155,6 +158,15 @@ class BaseLLMAdapter(ABC):
             prompt += f"\n\n目前圖表狀態：\n{json.dumps(chart_state, ensure_ascii=False, indent=2)}"
         return prompt
 
+    @staticmethod
+    def _extract_base64(data_url: str) -> tuple[str, str]:
+        """從 data URL 提取 base64 資料和 media type。"""
+        if data_url.startswith("data:"):
+            header, b64 = data_url.split(",", 1)
+            media_type = header.split(":")[1].split(";")[0]
+            return b64, media_type
+        return data_url, "image/jpeg"
+
 
 class OpenAIAdapter(BaseLLMAdapter):
     """OpenAI (GPT-4/4o) 適配器"""
@@ -163,13 +175,27 @@ class OpenAIAdapter(BaseLLMAdapter):
         self.api_key = api_key
         self.model = model
 
-    async def chat(self, messages: list[dict], chart_state: Optional[dict] = None, force_text: bool = False, system_prompt: Optional[str] = None) -> LLMResponse:
+    async def chat(self, messages: list[dict], chart_state: Optional[dict] = None, force_text: bool = False, system_prompt: Optional[str] = None, chart_screenshot: Optional[str] = None) -> LLMResponse:
         try:
             from openai import AsyncOpenAI
             client = AsyncOpenAI(api_key=self.api_key, timeout=_LLM_TIMEOUT)
 
             sys_msg = {"role": "system", "content": self._build_system_message(chart_state, system_prompt)}
             all_messages = [sys_msg] + messages
+
+            # 注入圖表截圖到最後一個 user 訊息
+            if chart_screenshot:
+                for i in range(len(all_messages) - 1, -1, -1):
+                    if all_messages[i]["role"] == "user":
+                        text_content = all_messages[i]["content"]
+                        all_messages[i] = {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": f"[目前圖表截圖如下]\n{text_content}"},
+                                {"type": "image_url", "image_url": {"url": chart_screenshot, "detail": "high"}},
+                            ],
+                        }
+                        break
 
             create_kwargs: dict = {
                 "model": self.model,
@@ -356,7 +382,8 @@ class GeminiAdapter(BaseLLMAdapter):
 
         raise last_error  # type: ignore
 
-    async def chat(self, messages: list[dict], chart_state: Optional[dict] = None, force_text: bool = False, system_prompt: Optional[str] = None) -> LLMResponse:
+    async def chat(self, messages: list[dict], chart_state: Optional[dict] = None, force_text: bool = False, system_prompt: Optional[str] = None, chart_screenshot: Optional[str] = None) -> LLMResponse:
+        import base64
         from google.genai import types
 
         config_kwargs: dict = {
@@ -376,6 +403,16 @@ class GeminiAdapter(BaseLLMAdapter):
             gemini_contents.append(
                 types.Content(role=role, parts=[types.Part.from_text(text=msg["content"])])
             )
+
+        # 注入圖表截圖到最後一個 user 訊息
+        if chart_screenshot:
+            b64_data, media_type = self._extract_base64(chart_screenshot)
+            image_part = types.Part.from_bytes(data=base64.b64decode(b64_data), mime_type=media_type)
+            for i in range(len(gemini_contents) - 1, -1, -1):
+                if gemini_contents[i].role == "user":
+                    gemini_contents[i].parts.insert(0, types.Part.from_text(text="[目前圖表截圖如下]"))
+                    gemini_contents[i].parts.append(image_part)
+                    break
 
         # 只使用使用者選擇的模型，不自動降級
         try:
@@ -479,7 +516,7 @@ class GeminiAdapter(BaseLLMAdapter):
 class ClaudeAdapter(BaseLLMAdapter):
     """Anthropic Claude 適配器"""
 
-    def __init__(self, api_key: str, model: str = "claude-sonnet-4-20250514"):
+    def __init__(self, api_key: str = "", model: str = "claude-sonnet-4-20250514"):
         self.api_key = api_key
         self.model = model
 
@@ -495,7 +532,7 @@ class ClaudeAdapter(BaseLLMAdapter):
             })
         return tools
 
-    async def chat(self, messages: list[dict], chart_state: Optional[dict] = None, force_text: bool = False, system_prompt: Optional[str] = None) -> LLMResponse:
+    async def chat(self, messages: list[dict], chart_state: Optional[dict] = None, force_text: bool = False, system_prompt: Optional[str] = None, chart_screenshot: Optional[str] = None) -> LLMResponse:
         try:
             from anthropic import AsyncAnthropic
             client = AsyncAnthropic(api_key=self.api_key, timeout=_LLM_TIMEOUT)
@@ -504,6 +541,28 @@ class ClaudeAdapter(BaseLLMAdapter):
             for msg in messages:
                 if msg["role"] in ("user", "assistant"):
                     claude_messages.append(msg)
+
+            # 注入圖表截圖到最後一個 user 訊息（Claude Vision API）
+            if chart_screenshot:
+                b64_data, media_type = self._extract_base64(chart_screenshot)
+                for i in range(len(claude_messages) - 1, -1, -1):
+                    if claude_messages[i]["role"] == "user":
+                        text_content = claude_messages[i]["content"]
+                        claude_messages[i] = {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": f"[目前圖表截圖如下]\n{text_content}"},
+                                {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": media_type,
+                                        "data": b64_data,
+                                    },
+                                },
+                            ],
+                        }
+                        break
 
             create_kwargs: dict = {
                 "model": self.model,
@@ -554,6 +613,268 @@ class ClaudeAdapter(BaseLLMAdapter):
         yield response.message
 
 
+class ClaudeSubscriptionAdapter(BaseLLMAdapter):
+    """透過 claude CLI 使用訂閱額度的適配器"""
+
+    def __init__(self, model: str = "sonnet"):
+        self.model = model
+
+    # ── 共用 ──
+
+    @staticmethod
+    def _format_tools_for_prompt() -> str:
+        """將 FUNCTION_DEFINITIONS 轉成文字，注入 system prompt"""
+        lines = [
+            "\n\n【可用工具 — Function Call】",
+            "當你需要執行操作時，用以下 XML 格式呼叫工具：",
+            "<tool_call>{\"name\": \"函式名\", \"arguments\": {參數}}</tool_call>",
+            "",
+            "可用函式列表：",
+        ]
+        for i, fd in enumerate(FUNCTION_DEFINITIONS, 1):
+            func = fd.get("function", fd)
+            name = func.get("name", "")
+            desc = func.get("description", "")
+            lines.append(f"\n{i}. {name} — {desc}")
+            params = func.get("parameters", {})
+            props = params.get("properties", {})
+            required = set(params.get("required", []))
+            if props:
+                lines.append("   參數:")
+                for pname, pinfo in props.items():
+                    ptype = pinfo.get("type", "string")
+                    pdesc = pinfo.get("description", "")
+                    enum_vals = pinfo.get("enum")
+                    req_mark = " (必填)" if pname in required else ""
+                    enum_str = f", 可選值: {enum_vals}" if enum_vals else ""
+                    lines.append(f"   - {pname} ({ptype}{req_mark}): {pdesc}{enum_str}")
+        lines.append("\n重要：你必須主動呼叫這些工具來獲取真實數據，不要憑空猜測。")
+        return "\n".join(lines)
+
+    def _build_system_message(
+        self,
+        chart_state: Optional[dict] = None,
+        system_prompt: Optional[str] = None,
+        include_tools: bool = True,
+    ) -> str:
+        """覆寫父類：附加工具定義文字"""
+        prompt = super()._build_system_message(chart_state, system_prompt)
+        if include_tools:
+            prompt += self._format_tools_for_prompt()
+        return prompt
+
+    def _build_user_prompt(self, messages: list[dict]) -> str:
+        """組裝對話歷史 + 當前訊息為單一 prompt"""
+        prompt_parts: list[str] = []
+        last_user_msg = ""
+        for msg in messages:
+            role_label = "使用者" if msg["role"] == "user" else "助手"
+            content = msg["content"] if isinstance(msg["content"], str) else str(msg["content"])
+            if msg["role"] == "user":
+                last_user_msg = content
+            prompt_parts.append(f"{role_label}: {content}")
+        return "\n\n".join(prompt_parts) if len(messages) > 1 else last_user_msg
+
+    @staticmethod
+    def _parse_tool_calls(text: str) -> tuple[str, list[dict[str, Any]]]:
+        """解析 <tool_call> XML 並回傳 (clean_text, function_calls)"""
+        tool_call_re = re.compile(r"<tool_call>\s*(\{[\s\S]*?\})\s*</tool_call>")
+        function_calls: list[dict[str, Any]] = []
+        for match in tool_call_re.finditer(text):
+            try:
+                obj = json.loads(match.group(1))
+                fc = {"name": obj.get("name", ""), "arguments": obj.get("arguments", {})}
+                if fc["name"]:
+                    function_calls.append(fc)
+            except json.JSONDecodeError:
+                pass
+        clean_text = tool_call_re.sub("", text).strip()
+        return clean_text, function_calls
+
+    @staticmethod
+    def _build_usage(usage_data: dict, model: str) -> TokenUsage:
+        inp = usage_data.get("input_tokens", 0) or 0
+        out = usage_data.get("output_tokens", 0) or 0
+        cache_read = usage_data.get("cache_read_input_tokens", 0) or 0
+        cache_create = usage_data.get("cache_creation_input_tokens", 0) or 0
+        return TokenUsage(
+            prompt_tokens=inp + cache_read + cache_create,
+            completion_tokens=out,
+            total_tokens=inp + out + cache_read + cache_create,
+            model=model,
+            provider="claude_subscription",
+        )
+
+    async def chat(
+        self,
+        messages: list[dict],
+        chart_state: Optional[dict] = None,
+        force_text: bool = False,
+        system_prompt: Optional[str] = None,
+        chart_screenshot: Optional[str] = None,
+    ) -> LLMResponse:
+        """使用 stream-json 模式逐行讀取，避免整體 timeout"""
+        import os
+        import tempfile
+
+        try:
+            sys_prompt = self._build_system_message(
+                chart_state, system_prompt, include_tools=not force_text,
+            )
+            user_prompt = self._build_user_prompt(messages)
+
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+                f.write(sys_prompt)
+                sys_prompt_file = f.name
+
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "claude", "-p",
+                    "--output-format", "stream-json",
+                    "--verbose",
+                    "--include-partial-messages",
+                    "--model", self.model,
+                    "--system-prompt-file", sys_prompt_file,
+                    "--no-session-persistence",
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+
+                proc.stdin.write(user_prompt.encode("utf-8"))
+                await proc.stdin.drain()
+                proc.stdin.close()
+
+                full_text = ""
+                usage = None
+                result_data = None
+                _line_timeout = 60  # 每行最多等 60 秒
+
+                while True:
+                    try:
+                        line = await asyncio.wait_for(
+                            proc.stdout.readline(), timeout=_line_timeout,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning("Claude CLI stream 逐行讀取超時（60s 無新輸出）")
+                        break
+
+                    if not line:
+                        break
+
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    evt_type = data.get("type")
+
+                    if evt_type == "stream_event":
+                        event = data.get("event", {})
+                        if event.get("type") == "content_block_delta":
+                            delta = event.get("delta", {})
+                            if delta.get("type") == "text_delta":
+                                full_text += delta.get("text", "")
+
+                    elif evt_type == "result":
+                        full_text = data.get("result", full_text)
+                        usage_data = data.get("usage", {})
+                        usage = self._build_usage(usage_data, self.model)
+                        result_data = data
+
+                await proc.wait()
+            finally:
+                os.unlink(sys_prompt_file)
+
+            if not full_text:
+                return LLMResponse(message="Claude CLI 回應為空")
+
+            if not usage:
+                usage = TokenUsage(
+                    prompt_tokens=0, completion_tokens=0, total_tokens=0,
+                    model=self.model, provider="claude_subscription",
+                )
+
+            clean_text, function_calls = self._parse_tool_calls(full_text)
+
+            return LLMResponse(
+                message=clean_text,
+                function_calls=function_calls,
+                raw_response=result_data,
+                usage=usage,
+            )
+
+        except Exception as e:
+            logger.error(f"Claude CLI 請求失敗: {e}")
+            return LLMResponse(message=f"Claude 訂閱制請求失敗: {str(e)}")
+
+    async def chat_stream(
+        self, messages: list[dict], chart_state: Optional[dict] = None, system_prompt: Optional[str] = None,
+    ):
+        """真正的 streaming — 逐 chunk yield 文字"""
+        import os
+        import tempfile
+
+        try:
+            sys_prompt = self._build_system_message(chart_state, system_prompt)
+            user_prompt = self._build_user_prompt(messages)
+
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+                f.write(sys_prompt)
+                sys_prompt_file = f.name
+
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "claude", "-p",
+                    "--output-format", "stream-json",
+                    "--verbose",
+                    "--include-partial-messages",
+                    "--model", self.model,
+                    "--system-prompt-file", sys_prompt_file,
+                    "--no-session-persistence",
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+
+                proc.stdin.write(user_prompt.encode("utf-8"))
+                await proc.stdin.drain()
+                proc.stdin.close()
+
+                _line_timeout = 60
+
+                while True:
+                    try:
+                        line = await asyncio.wait_for(
+                            proc.stdout.readline(), timeout=_line_timeout,
+                        )
+                    except asyncio.TimeoutError:
+                        break
+                    if not line:
+                        break
+
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    if data.get("type") == "stream_event":
+                        event = data.get("event", {})
+                        if event.get("type") == "content_block_delta":
+                            delta = event.get("delta", {})
+                            text = delta.get("text", "")
+                            if text:
+                                yield text
+
+                await proc.wait()
+            finally:
+                os.unlink(sys_prompt_file)
+
+        except Exception as e:
+            logger.error(f"Claude CLI streaming 失敗: {e}")
+            yield f"Claude 訂閱制請求失敗: {str(e)}"
+
+
 class OllamaAdapter(BaseLLMAdapter):
     """Ollama 本地模型適配器"""
 
@@ -561,12 +882,23 @@ class OllamaAdapter(BaseLLMAdapter):
         self.base_url = base_url.rstrip("/")
         self.model = model
 
-    async def chat(self, messages: list[dict], chart_state: Optional[dict] = None, force_text: bool = False, system_prompt: Optional[str] = None) -> LLMResponse:
+    async def chat(self, messages: list[dict], chart_state: Optional[dict] = None, force_text: bool = False, system_prompt: Optional[str] = None, chart_screenshot: Optional[str] = None) -> LLMResponse:
         try:
             import httpx
 
             sys_msg = {"role": "system", "content": self._build_system_message(chart_state, system_prompt)}
             all_messages = [sys_msg] + messages
+
+            # Ollama 多模態模型（llava 等）支援 images 欄位
+            if chart_screenshot:
+                b64_data, _ = self._extract_base64(chart_screenshot)
+                for i in range(len(all_messages) - 1, -1, -1):
+                    if all_messages[i]["role"] == "user":
+                        all_messages[i] = {
+                            **all_messages[i],
+                            "images": [b64_data],
+                        }
+                        break
 
             async with httpx.AsyncClient(timeout=float(_LLM_TIMEOUT)) as client:
                 response = await client.post(
@@ -654,6 +986,13 @@ def create_adapter(
         if not api_key:
             raise ValueError("Claude 需要 API Key")
         return ClaudeAdapter(api_key=api_key, model=model_name)
+
+    elif provider == "claude_subscription":
+        from app.core.auth.claude_oauth import check_claude_cli_available
+        status = check_claude_cli_available()
+        if not status["available"]:
+            raise ValueError(status["error"] or "Claude CLI 不可用")
+        return ClaudeSubscriptionAdapter(model=model_name)
 
     elif provider == "ollama":
         return OllamaAdapter(

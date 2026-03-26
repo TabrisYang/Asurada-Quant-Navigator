@@ -41,6 +41,7 @@ ALLOWED_FUNCTIONS = {
     "analyze_event_patterns",
     "run_quant_research",
     "optimize_indicator_params",
+    "scan_conditional_probability",
 }
 
 
@@ -149,6 +150,10 @@ async def execute_function_calls(
                 result = await _exec_optimize_params(args, default_symbol, default_timeframe)
                 results.append({"function": name, "result": result})
 
+            elif name == "scan_conditional_probability":
+                result = await _exec_conditional_prob_scan(args, default_symbol, default_timeframe)
+                results.append({"function": name, "result": result})
+
         except Exception as e:
             logger.error(f"執行 {name} 失敗: {e}")
             results.append({"function": name, "error": str(e)})
@@ -157,7 +162,10 @@ async def execute_function_calls(
 
 
 async def _exec_query_chart(args: dict, default_symbol: str, default_tf: str) -> dict:
-    """執行 query_chart_data"""
+    """執行 query_chart_data — 回傳壓縮價格摘要供 LLM 精確回答歷史問題"""
+    import numpy as np
+    import pandas as pd
+
     symbol = args.get("symbol", default_symbol)
     timeframe = args.get("timeframe", default_tf)
     start = args.get("start_date")
@@ -165,7 +173,7 @@ async def _exec_query_chart(args: dict, default_symbol: str, default_tf: str) ->
 
     df = crypto_engine.load_local_data(symbol, timeframe, start, end)
 
-    return {
+    result: dict[str, Any] = {
         "chart_updates": {
             "symbol": symbol,
             "timeframe": timeframe,
@@ -175,6 +183,73 @@ async def _exec_query_chart(args: dict, default_symbol: str, default_tf: str) ->
             "dataPoints": len(df),
         }
     }
+
+    if df.empty:
+        return result
+
+    closes = df["close"].values
+    highs = df["high"].values
+    lows = df["low"].values
+    volumes = df["volume"].values
+    timestamps = df["timestamp"].values
+
+    high_idx = int(np.argmax(highs))
+    low_idx = int(np.argmin(lows))
+
+    result["price_summary"] = {
+        "period_high": round(float(highs[high_idx]), 4),
+        "period_high_date": str(timestamps[high_idx])[:16],
+        "period_low": round(float(lows[low_idx]), 4),
+        "period_low_date": str(timestamps[low_idx])[:16],
+        "first_open": round(float(df["open"].iloc[0]), 4),
+        "last_close": round(float(closes[-1]), 4),
+        "first_date": str(timestamps[0])[:16],
+        "last_date": str(timestamps[-1])[:16],
+        "avg_volume": int(np.mean(volumes)),
+    }
+
+    ts_series = pd.to_datetime(df["timestamp"])
+    n = len(df)
+
+    if n > 60 and timeframe in ("15m", "1h", "4h"):
+        day_labels = ts_series.dt.strftime("%Y-%m-%d")
+        daily = []
+        for day, idx_list in sorted(ts_series.groupby(day_labels).groups.items()):
+            pos = idx_list.to_numpy()
+            daily.append({"d": day,
+                          "h": round(float(highs[pos].max()), 4),
+                          "l": round(float(lows[pos].min()), 4),
+                          "c": round(float(closes[pos[-1]]), 4)})
+        if len(daily) > 90:
+            mo_labels = ts_series.dt.strftime("%Y-%m")
+            monthly = []
+            for mo, idx_list in sorted(ts_series.groupby(mo_labels).groups.items()):
+                pos = idx_list.to_numpy()
+                monthly.append({"m": mo,
+                                "h": round(float(highs[pos].max()), 4),
+                                "l": round(float(lows[pos].min()), 4),
+                                "c": round(float(closes[pos[-1]]), 4)})
+            result["price_summary"]["monthly_ohlc"] = monthly
+        else:
+            result["price_summary"]["daily_ohlc"] = daily
+    elif n > 60 and timeframe in ("1d", "1w"):
+        mo_labels = ts_series.dt.strftime("%Y-%m")
+        monthly = []
+        for mo, idx_list in sorted(ts_series.groupby(mo_labels).groups.items()):
+            pos = idx_list.to_numpy()
+            monthly.append({"m": mo,
+                            "h": round(float(highs[pos].max()), 4),
+                            "l": round(float(lows[pos].min()), 4),
+                            "c": round(float(closes[pos[-1]]), 4)})
+        result["price_summary"]["monthly_ohlc"] = monthly
+    else:
+        result["price_summary"]["candles"] = [
+            {"t": str(timestamps[i])[:16], "h": round(float(highs[i]), 4),
+             "l": round(float(lows[i]), 4), "c": round(float(closes[i]), 4)}
+            for i in range(n)
+        ]
+
+    return result
 
 
 def _exec_manage_indicator(args: dict) -> dict:
@@ -417,7 +492,13 @@ async def _exec_compare_strategies(args: dict, default_symbol: str, default_tf: 
     start = args.get("start_date")
     end = args.get("end_date")
 
+    _MIN_BARS = 60
     df = crypto_engine.load_local_data(symbol, timeframe, start, end)
+    if len(df) < _MIN_BARS and (start or end):
+        df_full = crypto_engine.load_local_data(symbol, timeframe)
+        if len(df_full) >= _MIN_BARS:
+            df = df_full
+            logger.info(f"策略比較 [{symbol}]: 指定日期範圍數據不足，已自動擴大至全部本地數據（{len(df)} 根）")
     if df.empty:
         return {"status": "error", "message": f"找不到 {symbol} {timeframe} 的本地數據，請先同步。"}
 
@@ -474,7 +555,15 @@ async def _exec_backtest(args: dict, default_symbol: str, default_tf: str) -> di
     start = args.get("start_date")
     end = args.get("end_date")
 
+    _MIN_BARS_BACKTEST = 60
     df = crypto_engine.load_local_data(symbol, timeframe, start, end)
+    if len(df) < _MIN_BARS_BACKTEST and (start or end):
+        df_full = crypto_engine.load_local_data(symbol, timeframe)
+        if len(df_full) >= _MIN_BARS_BACKTEST:
+            df = df_full
+            logger.info(
+                f"回測 [{symbol}]: 指定日期範圍數據不足，已自動擴大至全部本地數據（{len(df)} 根）"
+            )
     if df.empty:
         return {"status": "error", "message": f"找不到 {symbol} {timeframe} 的本地數據，請先同步。"}
 
@@ -521,9 +610,15 @@ async def _exec_analyze_event_patterns(args: dict, default_symbol: str, default_
     start = args.get("start_date")
     end = args.get("end_date")
 
+    _min_bars_event = lookback + n_bars + 20
     df = crypto_engine.load_local_data(symbol, timeframe, start, end)
-    if df.empty or len(df) < lookback + n_bars + 20:
-        return {"status": "error", "message": f"數據不足（需至少 {lookback + n_bars + 20} 根 K 線）。請先同步更多歷史數據。"}
+    if len(df) < _min_bars_event and (start or end):
+        df_full = crypto_engine.load_local_data(symbol, timeframe)
+        if len(df_full) >= _min_bars_event:
+            df = df_full
+            logger.info(f"事件分析 [{symbol}]: 指定日期範圍數據不足，已自動擴大至全部本地數據（{len(df)} 根）")
+    if df.empty or len(df) < _min_bars_event:
+        return {"status": "error", "message": f"數據不足（需至少 {_min_bars_event} 根 K 線）。請先同步更多歷史數據。"}
 
     closes = df["close"].values
     highs = df["high"].values
@@ -700,11 +795,24 @@ async def _exec_quant_research(args: dict, default_symbol: str, default_tf: str)
     take_profit = args.get("take_profit_pct")
     leverage = args.get("leverage", 1.0)
 
+    _MIN_BARS_RESEARCH = 100
     df = crypto_engine.load_local_data(symbol, timeframe, start, end)
-    if df.empty or len(df) < 100:
-        return {"status": "error", "message": f"數據不足（{len(df)} 根 K 線），至少需要 100 根。請先同步更多歷史數據。"}
+    date_expanded = False
+    if len(df) < _MIN_BARS_RESEARCH and (start or end):
+        df_full = crypto_engine.load_local_data(symbol, timeframe)
+        if len(df_full) >= _MIN_BARS_RESEARCH:
+            df = df_full
+            date_expanded = True
+            logger.info(
+                f"量化研究 [{symbol}]: 指定日期範圍數據不足（{len(crypto_engine.load_local_data(symbol, timeframe, start, end))} 根），"
+                f"已自動擴大至全部本地數據（{len(df)} 根）"
+            )
+    if df.empty or len(df) < _MIN_BARS_RESEARCH:
+        return {"status": "error", "message": f"數據不足（{len(df)} 根 K 線），至少需要 {_MIN_BARS_RESEARCH} 根。請先同步更多歷史數據。"}
 
-    report = {"symbol": symbol, "timeframe": timeframe, "total_bars": len(df)}
+    report: dict = {"symbol": symbol, "timeframe": timeframe, "total_bars": len(df)}
+    if date_expanded:
+        report["notice"] = "因指定日期範圍數據不足，已自動擴大至全部本地數據進行分析。"
 
     # ── 1. 因子掃描（含近期 IC、Alpha Decay、衍生因子、組合 IC、分位數、相關性）──
     logger.info(f"量化研究 [{symbol}]: 因子掃描中（含衍生因子）...")
@@ -715,11 +823,15 @@ async def _exec_quant_research(args: dict, default_symbol: str, default_tf: str)
                 "regime": scan.get("regime"),
                 "total_scanned": scan.get("total_factors_scanned"),
                 "effective_count": scan.get("effective_count"),
+                "ic_threshold_used": scan.get("ic_threshold_used"),
+                "p_value_cutoff": scan.get("p_value_cutoff"),
+                "oos_split_ratio": scan.get("oos_split_ratio"),
                 "positive_top": scan.get("positive_top", []),
                 "negative_top": scan.get("negative_top", []),
                 "combo_top": scan.get("combo_top", []),
                 "quantile_analysis": scan.get("quantile_analysis"),
                 "high_correlation_warnings": scan.get("high_correlation_warnings", []),
+                "scan_warnings": scan.get("scan_warnings", []),
             }
             # 同時提供向下相容的簡化排名
             all_tops = scan.get("positive_top", []) + scan.get("negative_top", [])
@@ -926,3 +1038,136 @@ async def _exec_optimize_params(args: dict, default_symbol: str, default_tf: str
         forward_bars=forward_bars,
     )
     return result
+
+
+async def _exec_conditional_prob_scan(args: dict, default_symbol: str, default_tf: str) -> dict:
+    """條件機率掃描：掃描指標數值區間，計算每個區間後續 N 根 K 線漲/跌 ≥ X% 的機率"""
+    import numpy as np
+    import pandas as pd
+
+    symbol = args.get("symbol", default_symbol)
+    timeframe = args.get("timeframe", default_tf)
+    indicator_ids = args.get("indicators", ["rsi"])
+    forward_bars = args.get("forward_bars", 6)
+    target_pct = args.get("target_pct", 3.0)
+    direction = args.get("direction", "up")
+    n_bins = args.get("n_bins", 10)
+    start = args.get("start_date")
+    end = args.get("end_date")
+
+    df = crypto_engine.load_local_data(symbol, timeframe, start, end)
+    if df.empty or len(df) < forward_bars + 50:
+        return {"status": "error", "message": f"數據不足（{len(df)} 根 K 線），至少需要 {forward_bars + 50} 根。"}
+
+    closes = df["close"].values.astype(float)
+    n = len(closes)
+
+    future_hit = np.zeros(n, dtype=bool)
+    for i in range(n - forward_bars):
+        pct = (closes[i + forward_bars] - closes[i]) / closes[i] * 100
+        if direction == "up":
+            future_hit[i] = pct >= target_pct
+        else:
+            future_hit[i] = pct <= -target_pct
+    valid_range = n - forward_bars
+
+    results_by_indicator = {}
+
+    for ind_id in indicator_ids:
+        try:
+            calc = registry.calculate(ind_id, df)
+            if not calc:
+                continue
+        except Exception:
+            continue
+
+        for series_name, values in calc.items():
+            key = f"{ind_id}_{series_name}" if series_name != ind_id else ind_id
+            arr = np.array([float(v) if v is not None else np.nan for v in values], dtype=float)
+            valid_mask = ~np.isnan(arr[:valid_range])
+
+            if valid_mask.sum() < 20:
+                continue
+
+            valid_vals = arr[:valid_range][valid_mask]
+            lo, hi = float(np.percentile(valid_vals, 2)), float(np.percentile(valid_vals, 98))
+            if hi - lo < 1e-8:
+                continue
+
+            bin_edges = np.linspace(lo, hi, n_bins + 1)
+            bins = []
+
+            best_prob = 0.0
+            best_bin_label = ""
+
+            for b in range(n_bins):
+                bl, bh = bin_edges[b], bin_edges[b + 1]
+                if b == n_bins - 1:
+                    in_bin = valid_mask & (arr[:valid_range] >= bl) & (arr[:valid_range] <= bh)
+                else:
+                    in_bin = valid_mask & (arr[:valid_range] >= bl) & (arr[:valid_range] < bh)
+
+                count = int(in_bin.sum())
+                if count < 3:
+                    bins.append({
+                        "range": f"{bl:.2f}~{bh:.2f}", "count": count,
+                        "hit": 0, "prob_pct": None, "note": "樣本不足",
+                    })
+                    continue
+
+                hit_count = int(future_hit[:valid_range][in_bin].sum())
+                prob = hit_count / count * 100
+
+                label = f"{bl:.2f}~{bh:.2f}"
+                bins.append({
+                    "range": label, "count": count,
+                    "hit": hit_count, "prob_pct": round(prob, 1),
+                })
+
+                if prob > best_prob and count >= 5:
+                    best_prob = prob
+                    best_bin_label = label
+
+            baseline_prob = float(future_hit[:valid_range][valid_mask].sum()) / valid_mask.sum() * 100
+
+            results_by_indicator[key] = {
+                "indicator": ind_id,
+                "series": series_name,
+                "total_valid_samples": int(valid_mask.sum()),
+                "baseline_prob_pct": round(baseline_prob, 1),
+                "best_range": best_bin_label,
+                "best_prob_pct": round(best_prob, 1),
+                "lift_vs_baseline": round(best_prob - baseline_prob, 1) if best_prob > 0 else 0,
+                "bins": bins,
+            }
+
+    if not results_by_indicator:
+        return {"status": "error", "message": "指定的指標無法計算或數據不足"}
+
+    overall_best = max(
+        results_by_indicator.values(),
+        key=lambda x: x["best_prob_pct"],
+    )
+
+    dir_label = f"上漲≥{target_pct}%" if direction == "up" else f"下跌≥{target_pct}%"
+
+    return {
+        "status": "success",
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "target": f"後續 {forward_bars} 根 K 線{dir_label}",
+        "direction": direction,
+        "target_pct": target_pct,
+        "forward_bars": forward_bars,
+        "data_range": f"{str(df['timestamp'].iloc[0])[:10]} ~ {str(df['timestamp'].iloc[-1])[:10]}",
+        "total_bars": n,
+        "indicators": results_by_indicator,
+        "overall_best": {
+            "indicator": overall_best["indicator"],
+            "range": overall_best["best_range"],
+            "prob_pct": overall_best["best_prob_pct"],
+            "baseline_pct": overall_best["baseline_prob_pct"],
+            "lift": overall_best["lift_vs_baseline"],
+        },
+        "warning": "條件機率不代表因果關係，高機率區間可能樣本較少。建議搭配其他分析交叉驗證。",
+    }

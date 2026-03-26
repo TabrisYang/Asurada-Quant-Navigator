@@ -87,6 +87,10 @@ interface ChartStore {
   lastFactorScan: { symbol: string; timeframe: string; timestamp: number; summary: string } | null;
   setLastFactorScan: (scan: { symbol: string; timeframe: string; timestamp: number; summary: string } | null) => void;
 
+  // ===== 圖表截圖（給 LLM 視覺分析用）=====
+  captureScreenshot: (() => Promise<string | null>) | null;
+  setCaptureScreenshot: (fn: (() => Promise<string | null>) | null) => void;
+
   // ===== 取得圖表狀態摘要（給 LLM 用）=====
   getChartStateSummary: () => Record<string, unknown>;
 }
@@ -124,6 +128,8 @@ export const useChartStore = create<ChartStore>((set, get) => ({
   setPendingChatMessage: (msg) => set({ pendingChatMessage: msg }),
   lastFactorScan: null,
   setLastFactorScan: (scan) => set({ lastFactorScan: scan }),
+  captureScreenshot: null,
+  setCaptureScreenshot: (fn) => set({ captureScreenshot: fn }),
 
   // ===== 圖表操作 =====
   setSymbol: (symbol) => set((state) => {

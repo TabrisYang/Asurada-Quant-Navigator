@@ -234,33 +234,61 @@ def _detect_mentioned_indicators(text: str, existing_ids: set[str]) -> list[dict
 # 數值相關關鍵詞（避免只是問定義時觸發計算）
 _VALUE_KEYWORDS = {"多少", "是多少", "目前", "現在", "幾", "數值", "分析", "趨勢", "看"}
 
-_MAX_AUTO_CALC = 5  # 單次最多自動計算指標數
+# ─── 按意圖等級定義核心指標集 ────────────────────────────
+# analysis: 覆蓋 regime 判定 + 4 維度最小必要集
+_ANALYSIS_CORE_INDICATORS = [
+    "adx", "atr", "rsi", "macd", "bb", "obv",
+]
+# deep analysis: 覆蓋全 7 維度 + 先行訊號
+_DEEP_ANALYSIS_INDICATORS = [
+    "adx", "atr", "rsi", "macd", "bb", "obv",
+    "supertrend", "stochrsi", "donchian", "rel_vol",
+    "leading_composite", "mtf_mss",
+]
+
+_MAX_AUTO_CALC = 15
 
 
-def _auto_calc_indicator_values(user_msg: str, chart_state: dict | None) -> dict:
-    """偵測使用者訊息中提到的指標，自動計算最新值注入到 chart_state。
+def _auto_calc_indicator_values(
+    user_msg: str,
+    chart_state: dict | None,
+    intents: set[str] | None = None,
+) -> dict:
+    """根據意圖等級 + 使用者提及的指標，自動計算數值注入 chart_state。
 
-    只在使用者訊息包含「數值相關詞」時觸發，避免純定義問題浪費計算。
-    已在前端啟用的指標（indicatorValues 中已有）不重複計算。
+    三種觸發模式（按優先順序）：
+    1. 深度分析意圖 → 自動計算 _DEEP_ANALYSIS_INDICATORS（12 個）
+    2. 一般分析意圖 → 自動計算 _ANALYSIS_CORE_INDICATORS（6 個）
+    3. 關鍵字比對   → 只計算使用者提到的指標（原始邏輯）
     """
     if not chart_state or not user_msg:
         return chart_state or {}
 
+    _intents = intents or set()
     msg_lower = user_msg.lower()
-
-    has_value_intent = any(kw in user_msg for kw in _VALUE_KEYWORDS)
-    if not has_value_intent:
-        return chart_state
-
     existing_keys = set((chart_state.get("indicatorValues") or {}).keys())
     need_calc: list[str] = []
 
-    for keyword, (ind_id, _dm) in _INDICATOR_TEXT_MAP.items():
-        if keyword in msg_lower and ind_id not in need_calc:
-            if ind_id not in existing_keys:
+    is_deep = bool(_intents & {"backtest", "quant_research", "event_analysis", "calibrate"})
+    is_analysis = "analysis" in _intents
+
+    if is_deep:
+        for ind_id in _DEEP_ANALYSIS_INDICATORS:
+            if ind_id not in existing_keys and ind_id not in need_calc:
                 need_calc.append(ind_id)
-        if len(need_calc) >= _MAX_AUTO_CALC:
-            break
+    elif is_analysis:
+        for ind_id in _ANALYSIS_CORE_INDICATORS:
+            if ind_id not in existing_keys and ind_id not in need_calc:
+                need_calc.append(ind_id)
+
+    has_value_intent = is_analysis or is_deep or any(kw in user_msg for kw in _VALUE_KEYWORDS)
+    if has_value_intent:
+        for keyword, (ind_id, _dm) in _INDICATOR_TEXT_MAP.items():
+            if keyword in msg_lower and ind_id not in need_calc:
+                if ind_id not in existing_keys:
+                    need_calc.append(ind_id)
+            if len(need_calc) >= _MAX_AUTO_CALC:
+                break
 
     if not need_calc:
         return chart_state
@@ -304,7 +332,7 @@ def _auto_calc_indicator_values(user_msg: str, chart_state: dict | None) -> dict
 
         chart_state = {**chart_state, "indicatorValues": auto_values}
         if need_calc:
-            logger.info(f"自動計算指標值: {need_calc}")
+            logger.info(f"自動計算指標值 (intent={_intents}): {need_calc}")
     except Exception as e:
         logger.warning(f"自動計算指標值失敗: {e}")
 
@@ -339,6 +367,56 @@ def _resolve_api_key(request: ChatRequest) -> tuple[str, str | None, str | None,
         api_key = request.api_key
 
     return provider, api_key, base_url, model_name
+
+
+def _inject_ml_prediction(
+    chart_state: dict | None,
+    intents: set[str] | None = None,
+) -> dict:
+    """在 chart_state 中注入 ML 預測信號（若可用且啟用）"""
+    if not chart_state:
+        return chart_state or {}
+
+    _intents = intents or set()
+    is_analysis = bool(_intents & {
+        "analysis", "backtest", "quant_research", "event_analysis", "calibrate",
+    })
+    if not is_analysis:
+        return chart_state
+
+    symbol = chart_state.get("symbol", "")
+    timeframe = chart_state.get("timeframe", "4h")
+    if not symbol:
+        return chart_state
+
+    try:
+        from app.core.ml.model_manager import model_manager
+
+        should_enable, reason = model_manager.should_enable_ml(symbol, timeframe)
+        if not should_enable:
+            logger.debug(f"ML 未啟用: {reason}")
+            return chart_state
+
+        from app.data.fetchers.crypto_engine import crypto_engine
+        df = crypto_engine.load_local_data(symbol, timeframe)
+        if df.empty or len(df) < 100:
+            return chart_state
+
+        result = model_manager.predict_consensus(df, symbol, timeframe)
+        if result.get("status") == "success":
+            chart_state["mlPrediction"] = result["prediction"]
+            mode = result["prediction"].get("consensus_mode", "best")
+            n_models = result["prediction"].get("models_considered", 1)
+            logger.info(
+                f"ML 預測注入: {symbol} {timeframe} → "
+                f"{result['prediction']['direction']} "
+                f"(prob={result['prediction']['probability']:.1%}, "
+                f"consensus={mode}, models={n_models})"
+            )
+    except Exception as e:
+        logger.debug(f"ML 預測注入失敗（不影響分析）: {e}")
+
+    return chart_state
 
 
 def _build_messages(
@@ -538,6 +616,18 @@ def _format_function_results(function_calls: list[dict], exec_result: dict) -> s
                 cu = r.get("chart_updates", {})
                 parts.append(f"結果: {cu.get('symbol', '?')} {cu.get('timeframe', '?')}，"
                              f"共 {cu.get('dataPoints', 0)} 根 K 線")
+                ps = r.get("price_summary")
+                if ps:
+                    parts.append(f"期間最高: {ps.get('period_high')} ({ps.get('period_high_date')})")
+                    parts.append(f"期間最低: {ps.get('period_low')} ({ps.get('period_low_date')})")
+                    parts.append(f"首日開盤: {ps.get('first_open')} ({ps.get('first_date')})")
+                    parts.append(f"最後收盤: {ps.get('last_close')} ({ps.get('last_date')})")
+                    for mo in (ps.get("monthly_ohlc") or []):
+                        parts.append(f"  {mo['m']}: H={mo['h']} L={mo['l']} C={mo['c']}")
+                    for day in (ps.get("daily_ohlc") or []):
+                        parts.append(f"  {day['d']}: H={day['h']} L={day['l']} C={day['c']}")
+                    for c in (ps.get("candles") or []):
+                        parts.append(f"  {c['t']}: H={c['h']} L={c['l']} C={c['c']}")
             elif fname == "find_conditions":
                 parts.append(f"結果: 找到 {r.get('matched_periods', 0)} 個匹配時間點")
                 if r.get("summary"):
@@ -548,6 +638,22 @@ def _format_function_results(function_calls: list[dict], exec_result: dict) -> s
                 recs = r.get("recommended", [])
                 names = ", ".join(rec.get("name", rec.get("id", "?")) for rec in recs)
                 parts.append(f"推薦指標: {names}")
+            elif fname == "scan_conditional_probability":
+                parts.append(f"目標: {r.get('target', '?')}")
+                parts.append(f"數據範圍: {r.get('data_range', '?')}，共 {r.get('total_bars', 0)} 根 K 線")
+                ob = r.get("overall_best", {})
+                if ob:
+                    parts.append(f"★ 最佳區間: {ob.get('indicator', '?')} = {ob.get('range', '?')} → "
+                                 f"機率 {ob.get('prob_pct', 0)}%（基線 {ob.get('baseline_pct', 0)}%，提升 {ob.get('lift', 0)} 個百分點）")
+                for key, ind_data in r.get("indicators", {}).items():
+                    parts.append(f"\n指標 {key}（樣本 {ind_data.get('total_valid_samples', 0)}）:")
+                    parts.append(f"  基線機率: {ind_data.get('baseline_prob_pct', 0)}%")
+                    parts.append(f"  最佳區間: {ind_data.get('best_range', '?')} → {ind_data.get('best_prob_pct', 0)}%")
+                    for b in ind_data.get("bins", []):
+                        if b.get("prob_pct") is not None:
+                            parts.append(f"  {b['range']}: {b['prob_pct']}% ({b['hit']}/{b['count']})")
+                        elif b.get("note"):
+                            parts.append(f"  {b['range']}: {b['note']} ({b['count']})")
             else:
                 # 通用格式化（截斷過長內容）
                 result_str = json.dumps(r, ensure_ascii=False)
@@ -582,7 +688,7 @@ async def chat(request: ChatRequest):
 
     provider, api_key, base_url, model_name = _resolve_api_key(request)
 
-    if not api_key and provider != "ollama":
+    if not api_key and provider not in ("ollama", "claude_subscription"):
         msg = (
             "Session 已過期，請重新在設定中輸入 API Key。"
             if request.session_id
@@ -603,7 +709,7 @@ async def chat(request: ChatRequest):
 
     messages = _build_messages(request)
     try:
-        response = await adapter.chat(messages, chart_state=request.chart_state)
+        response = await adapter.chat(messages, chart_state=request.chart_state, chart_screenshot=request.chart_screenshot)
     except Exception as e:
         logger.error(f"LLM 呼叫失敗: {e}")
         return ChatResponse(
@@ -699,7 +805,7 @@ async def chat_stream(request: ChatRequest):
 
     provider, api_key, base_url, model_name = _resolve_api_key(request)
 
-    if not api_key and provider != "ollama":
+    if not api_key and provider not in ("ollama", "claude_subscription"):
         async def no_key_gen():
             msg = "Session 已過期，請重新在設定中輸入 API Key。" if request.session_id \
                 else f"請先在設定中輸入 {provider.upper()} 的 API Key。點擊右上角「設定」進行配置。"
@@ -717,11 +823,16 @@ async def chat_stream(request: ChatRequest):
 
     # ★ 意圖偵測 → 決定載入哪些 SYSTEM_PROMPT 模組與背景資料
     _intents = detect_intents(request.message, mode=request.mode)
-    _dynamic_prompt = assemble_system_prompt(_intents)
-    logger.info(f"意圖偵測: {_intents} → SYSTEM_PROMPT 模組已動態組裝")
+    from app.api.routes.config import load_system_settings
+    _teaching = load_system_settings().get("teaching_mode", False)
+    _dynamic_prompt = assemble_system_prompt(_intents, teaching_mode=_teaching)
+    logger.info(f"意圖偵測: {_intents}, 教學模式={'ON' if _teaching else 'OFF'} → SYSTEM_PROMPT 模組已動態組裝")
 
-    # ★ 自動計算使用者提到但前端未啟用的指標值，注入 chart_state
-    request.chart_state = _auto_calc_indicator_values(request.message, request.chart_state)
+    # ★ 自動計算分析所需 + 使用者提到的指標值，注入 chart_state
+    request.chart_state = _auto_calc_indicator_values(request.message, request.chart_state, intents=_intents)
+
+    # ★ ML 增強：自動注入 ML 預測信號
+    request.chart_state = _inject_ml_prediction(request.chart_state, _intents)
 
     messages = _build_messages(request, rag_fragments=_rag_context_fragments, intents=_intents)
     conversation_id = request.conversation_id or str(uuid.uuid4())
@@ -750,11 +861,19 @@ async def chat_stream(request: ChatRequest):
         yield _sse_event("status", {"message": "正在分析您的問題..."})
 
         try:
-            # 2. 第一輪 LLM 呼叫（使用意圖驅動的動態 SYSTEM_PROMPT）
-            response = await adapter.chat(
+            # 2. 第一輪 LLM 呼叫（使用意圖驅動的動態 SYSTEM_PROMPT，帶心跳）
+            _llm_task = asyncio.create_task(adapter.chat(
                 messages, chart_state=request.chart_state,
                 system_prompt=_dynamic_prompt,
-            )
+                chart_screenshot=request.chart_screenshot,
+            ))
+            _active_tasks.append(_llm_task)
+            _hb_sec = 0
+            while not _llm_task.done():
+                await asyncio.sleep(3)
+                _hb_sec += 3
+                yield _sse_event("status", {"message": f"正在分析您的問題... ({_hb_sec}秒)"})
+            response = _llm_task.result()
 
             if response.usage:
                 total_usage = response.usage
@@ -1217,7 +1336,7 @@ async def preview_distill(request: ChatRequest):
     呼叫 LLM 生成摘要，讓使用者確認後才存入。
     """
     provider, api_key, base_url, model_name = _resolve_api_key(request)
-    if not api_key and provider != "ollama":
+    if not api_key and provider not in ("ollama", "claude_subscription"):
         return {"status": "error", "message": "需要有效的 LLM session 才能執行蒸餾"}
 
     # 準備材料
@@ -1374,6 +1493,61 @@ async def get_fragment_stats():
     """取得知識碎片統計"""
     stats = fragment_store.get_stats()
     return {"status": "ok", **stats}
+
+
+@router.get("/fragments")
+async def list_fragments(
+    symbol: Optional[str] = None,
+    fragment_type: Optional[str] = None,
+    sort_by: str = "hit_count",
+    limit: int = 100,
+    offset: int = 0,
+):
+    """列出所有知識碎片（供前端知識庫瀏覽器使用）"""
+    data = fragment_store.list_all(
+        symbol=symbol,
+        fragment_type=fragment_type,
+        sort_by=sort_by,
+        limit=limit,
+        offset=offset,
+    )
+    return {"status": "ok", **data}
+
+
+@router.delete("/fragments/{fragment_id}")
+async def delete_fragment(fragment_id: int):
+    """刪除指定知識碎片"""
+    ok = fragment_store.delete_by_id(fragment_id)
+    return {"status": "ok" if ok else "not_found"}
+
+
+@router.post("/fragments/note")
+async def add_user_note(request: ChatRequest):
+    """使用者手動添加學習筆記到知識庫。
+
+    前端傳送 { message: "筆記內容", symbol: "BTC/USDT" }
+    """
+    note_text = (request.message or "").strip()
+    if not note_text or len(note_text) < 5:
+        return {"status": "error", "message": "筆記內容太短（至少 5 字）"}
+    if len(note_text) > 2000:
+        return {"status": "error", "message": "筆記內容太長（上限 2000 字）"}
+
+    symbol = request.symbol or "GENERAL"
+
+    fid = fragment_store.store_fragment(
+        content=note_text,
+        fragment_type="user_note",
+        symbol=symbol,
+        source_question=f"[使用者筆記] {note_text[:60]}",
+        is_seed=True,
+    )
+
+    return {
+        "status": "ok",
+        "message": "筆記已儲存到知識庫",
+        "fragment_id": fid,
+    }
 
 
 # ─── 預測追蹤端點 ──────────────────────────────

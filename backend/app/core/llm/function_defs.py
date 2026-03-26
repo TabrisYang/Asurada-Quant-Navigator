@@ -46,6 +46,11 @@ _INTENT_KEYWORDS: dict[str, list[str]] = {
         "大漲", "大跌", "爆量", "共通", "特徵", "事件",
         "之前都", "通常", "暴跌前", "暴漲前", "規律",
     ],
+    "conditional_prob": [
+        "機率", "概率", "多少的時候", "在什麼值", "什麼範圍", "幾的時候",
+        "條件機率", "conditional", "勝率最高",
+        "什麼數值", "多少時", "在哪個區間", "最佳區間",
+    ],
 }
 
 
@@ -120,6 +125,8 @@ chart_state 中的 indicatorValues 包含系統精確計算的指標數值（最
 7. 事件回溯統計（歷史大漲/大跌前的指標共通性，後端 NumPy 計算）
 8. 完整量化研究（IC → 因子相關性 → 回測 → Monte Carlo → Walk Forward → 動態倉位）
 9. 指標參數校準（掃描歷史數據找最佳閾值區間）
+10. 條件機率掃描（指標在什麼數值時，後續上漲/下跌 N% 的機率最高）
+11. 歷史數據精確查詢（指定日期範圍查詢精確的最高/最低價及日期）
 
 【操作規則】
 - 永遠使用台北時區 (UTC+8)
@@ -175,7 +182,22 @@ type 可選：support_resistance, trend, pattern, indicator, strategy, volume, s
 ---PREDICTIONS---
 - [direction:long/short] entry=價格 target=目標 stop=止損 timeframe=48h/7d confidence=high/medium/low regime=趨勢/盤整/高波動 indicators=指標1,指標2 invalidation=推翻本次判斷的具體條件
 ---END_PREDICTIONS---
-每次最多 2 個預測。invalidation 欄位為必填 — 明確寫出「哪些條件發生將推翻本次判斷」。"""
+每次最多 2 個預測。invalidation 欄位為必填 — 明確寫出「哪些條件發生將推翻本次判斷」。
+
+【ML 增強信號】
+若 chart_state 中存在 mlPrediction 欄位，代表系統的 ML 模型已產生前兆模式辨識預測：
+- 模型分析的是「未來 N 根 K 線達到一定幅度漲/跌之前的技術面特徵模式」
+- target_info: 描述預測目標（方向 up/down、幅度門檻、回看窗口）
+- probability: 事件觸發機率（0~1），direction: long/short/neutral，confidence: high/medium/low
+- top_features: ML 認為最重要的前兆特徵（窗口統計：均值/斜率/波動/最新值）及其數值
+- model_quality: 模型的 OOS 準確率和可靠度
+使用規則：
+1. 必須在分析中引用 ML 預測的機率值和主要驅動因子，並說明 ML 預測的目標（如「未來 5 根漲 3% 以上」）
+2. ML 預測僅為輔助參考之一，不可完全依賴，需與技術指標、市場結構等多維度交叉驗證
+3. 若 model_quality.is_reliable 為 false，必須告知使用者「ML 模型品質不足，僅供參考」
+4. 若 ML 結論與技術面分析矛盾，需明確指出分歧並分析可能原因
+5. 不要自行猜測 ML 模型的內部邏輯，僅引用其輸出結果
+6. 前兆特徵中的 slope 代表趨勢方向（正=上升、負=下降），std 代表波動程度"""
 
 
 # ═══════════════════════════════════════════════════════
@@ -467,6 +489,26 @@ _PROMPT_MODULES["quant_research"] = """
 3. Alpha Decay 狀態（升溫 / 穩定 / 衰退）
 4. 具體的使用建議（哪些因子做核心、哪些做輔助、哪些已失效）"""
 
+# ─── conditional_prob（新增）─────────────────────────────
+
+_PROMPT_MODULES["conditional_prob"] = """
+【條件機率掃描 — scan_conditional_probability】
+當使用者問「RSI 在多少時上漲機率最高」「什麼條件下後續漲 3% 機率最大」等問題時，
+必須呼叫 scan_conditional_probability 進行後端統計，不要只用文字猜測。
+
+此函式會：
+1. 把指定指標的數值範圍分成 N 個區間
+2. 統計每個區間後續 forward_bars 根 K 線漲/跌 ≥ target_pct 的機率
+3. 找出機率最高的區間，並計算相對於基線的提升幅度 (lift)
+
+結果解讀：
+- best_range：機率最高的指標數值區間
+- best_prob_pct：該區間的條件機率
+- baseline_prob_pct：不考慮任何條件時的基線機率
+- lift_vs_baseline：相比基線提升了多少個百分點（越高越有參考價值）
+- bins：每個區間的詳細統計（count < 5 的區間結論不可靠）
+- 必須加風險警告：條件機率不代表因果關係"""
+
 # ─── calibrate（保留）─────────────────────────────────
 
 _PROMPT_MODULES["calibrate"] = """
@@ -510,6 +552,19 @@ rsi, macd, bb, ema, sma, adx, supertrend, psar, stochrsi, roc, obv, rel_vol, vol
 7. 說明「這是基於歷史上類似市場環境的統計」"""
 
 
+# ─── teaching（教學模式）──────────────────────────
+
+_PROMPT_MODULES["teaching"] = """
+【教學模式 — 面向學習者的解說】
+你目前處於教學模式。除了正常分析，你必須額外做到：
+1. **指標解說**：每提到一個技術指標，用 1-2 句話解釋它衡量什麼（例：「RSI（相對強弱指數）衡量價格動能的超買超賣程度，數值 0-100，通常 >70 為超買、<30 為超賣」）
+2. **信號邏輯**：每產生一個交易信號，解釋背後的原理（例：「MACD 金叉代表短期均線向上穿越長期均線，暗示近期買盤力量正在增強」）
+3. **策略風險**：每給出交易建議時，說明該策略的前提假設和主要風險（例：「追突破策略在假突破頻繁的盤整市場容易連續止損」）
+4. **術語解釋**：避免未經解釋的專業術語，首次提到 IC、Alpha、Sharpe、Walk Forward 等概念時提供簡短定義
+5. **教學風格**：解說自然嵌入分析文字中，不要分成獨立的「教學段落」，讓使用者在實際分析中學習
+6. **延伸學習**：在分析結尾，提供 1-2 個可進一步探索的相關主題（例：「想深入了解 RSI 背離的應用，可以問我『什麼是 RSI 背離？如何用它判斷趨勢反轉？』」）"""
+
+
 # ═══════════════════════════════════════════════════════
 #  動態組裝
 # ═══════════════════════════════════════════════════════
@@ -526,23 +581,33 @@ _INTENT_TO_MODULES: dict[str, list[str]] = {
     ],
     "calibrate": ["calibrate"],
     "event_analysis": ["event_analysis"],
+    "conditional_prob": ["conditional_prob"],
 }
 
 
-def assemble_system_prompt(intents: set[str]) -> str:
-    """根據偵測到的意圖集合，組裝最終的 SYSTEM_PROMPT。"""
+def assemble_system_prompt(intents: set[str], teaching_mode: bool = False) -> str:
+    """根據偵測到的意圖集合，組裝最終的 SYSTEM_PROMPT。
+
+    Args:
+        intents: 偵測到的使用者意圖集合
+        teaching_mode: 啟用教學模式（解釋指標意義、信號邏輯、策略風險）
+    """
     modules_needed: set[str] = set()
     for intent in intents:
         for mod in _INTENT_TO_MODULES.get(intent, []):
             modules_needed.add(mod)
 
+    if teaching_mode:
+        modules_needed.add("teaching")
+
     # 固定順序確保 prompt 結構一致
     _MODULE_ORDER = (
+        "teaching",
         "regime_v2", "analysis_v2", "factor_validation",
         "risk_checklist", "alpha_monitor",
         "output_lite", "output_full",
-        "drawing", "event_analysis", "quant_research",
-        "calibrate", "backtest",
+        "drawing", "event_analysis", "conditional_prob",
+        "quant_research", "calibrate", "backtest",
     )
 
     parts = [_PROMPT_CORE]
@@ -556,7 +621,7 @@ def assemble_system_prompt(intents: set[str]) -> str:
 # 保留完整版供向下相容（例如 non-streaming endpoint）
 SYSTEM_PROMPT = assemble_system_prompt({
     "analysis", "drawing", "backtest", "quant_research",
-    "calibrate", "event_analysis",
+    "calibrate", "event_analysis", "conditional_prob",
 })
 
 
@@ -569,7 +634,12 @@ FUNCTION_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "query_chart_data",
-            "description": "切換或取得 K 線圖表數據。用於切換幣種、時間週期、或調整日期範圍。",
+            "description": (
+                "查詢歷史 K 線數據並取得壓縮價格摘要（含精確的期間最高/最低價及日期、月度/日度 OHLC）。"
+                "用於回答使用者關於特定日期範圍的價格問題（如「某月低點是多少」「某段時間最高價」），"
+                "也可用於切換幣種、時間週期、調整日期範圍。"
+                "務必指定 start_date 和 end_date 以獲取精確的歷史價格數據。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -782,14 +852,14 @@ FUNCTION_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "run_backtest",
-            "description": "用指定的技術指標進出場條件執行策略回測，返回完整績效統計（勝率、盈虧比、Sharpe、最大回撤等）。自動含滑點 0.05% + 手續費 0.1%，並自動分割樣本內/外數據檢測過擬合。",
+            "description": "用指定的技術指標進出場條件執行策略回測，返回完整績效統計（勝率、盈虧比、Sharpe、最大回撤等）。自動含滑點 0.05% + 手續費 0.1%，並自動分割樣本內/外數據檢測過擬合。【重要】start_date/end_date 僅在使用者明確指定日期時才帶入，否則留空以使用全部本地數據。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "symbol": {"type": "string", "description": "交易對，如 BTC/USDT"},
                     "timeframe": {"type": "string", "description": "K 線週期"},
-                    "start_date": {"type": "string", "description": "開始日期 YYYY-MM-DD"},
-                    "end_date": {"type": "string", "description": "結束日期 YYYY-MM-DD"},
+                    "start_date": {"type": "string", "description": "開始日期 YYYY-MM-DD。僅在使用者明確指定時才帶入，否則留空使用全部數據"},
+                    "end_date": {"type": "string", "description": "結束日期 YYYY-MM-DD。僅在使用者明確指定時才帶入，否則留空使用全部數據"},
                     "direction": {
                         "type": "string",
                         "enum": ["long", "short"],
@@ -847,8 +917,8 @@ FUNCTION_DEFINITIONS = [
                 "properties": {
                     "symbol": {"type": "string", "description": "交易對，如 BTC/USDT"},
                     "timeframe": {"type": "string", "description": "K 線週期"},
-                    "start_date": {"type": "string", "description": "開始日期 YYYY-MM-DD"},
-                    "end_date": {"type": "string", "description": "結束日期 YYYY-MM-DD"},
+                    "start_date": {"type": "string", "description": "開始日期 YYYY-MM-DD。僅在使用者明確指定時才帶入，否則留空使用全部數據"},
+                    "end_date": {"type": "string", "description": "結束日期 YYYY-MM-DD。僅在使用者明確指定時才帶入，否則留空使用全部數據"},
                     "strategies": {
                         "type": "array",
                         "description": "策略陣列（2-5 個），每個策略包含名稱、進出場條件",
@@ -955,6 +1025,8 @@ FUNCTION_DEFINITIONS = [
                 "→ Monte Carlo 模擬 → Walk Forward 驗證 → 動態倉位建議。"
                 "最終輸出策略是否具備 Alpha、穩定度評分、建議槓桿和倉位。"
                 "適用場景：使用者要求「完整量化研究」「策略是否可行」「策略穩定性檢測」。"
+                "【重要】start_date / end_date 僅在使用者明確指定日期時才帶入，"
+                "否則一律留空以使用全部本地數據，避免數據不足導致分析失敗。"
             ),
             "parameters": {
                 "type": "object",
@@ -994,8 +1066,8 @@ FUNCTION_DEFINITIONS = [
                     "leverage": {"type": "number", "description": "槓桿倍數（如 5 = 五倍合約），預設 1"},
                     "symbol": {"type": "string"},
                     "timeframe": {"type": "string"},
-                    "start_date": {"type": "string"},
-                    "end_date": {"type": "string"},
+                    "start_date": {"type": "string", "description": "開始日期 YYYY-MM-DD。僅在使用者明確指定時才帶入，否則留空使用全部數據"},
+                    "end_date": {"type": "string", "description": "結束日期 YYYY-MM-DD。僅在使用者明確指定時才帶入，否則留空使用全部數據"},
                 },
             },
         },
@@ -1029,6 +1101,55 @@ FUNCTION_DEFINITIONS = [
                     "start_date": {"type": "string", "description": "開始日期 YYYY-MM-DD"},
                     "end_date": {"type": "string", "description": "結束日期 YYYY-MM-DD"},
                 },
+            },
+        },
+    },
+    # ── 條件機率掃描 ──
+    {
+        "type": "function",
+        "function": {
+            "name": "scan_conditional_probability",
+            "description": (
+                "條件機率掃描：掃描指定技術指標的所有數值區間，統計每個區間在後續 N 根 K 線內"
+                "價格上漲/下跌超過 X% 的條件機率，並找出機率最高的區間。"
+                "適用場景：「RSI 在多少時後續上漲 3% 機率最高」「MACD 什麼值時最容易漲」"
+                "「什麼條件下勝率最高」。後端使用 NumPy 完成計算，不消耗額外 token。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "indicators": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "要掃描的指標 ID，如 ['rsi','macd','adx','bb','stochrsi']",
+                    },
+                    "forward_bars": {
+                        "type": "integer",
+                        "description": "觀察後續幾根 K 線（預設 6）",
+                        "default": 6,
+                    },
+                    "target_pct": {
+                        "type": "number",
+                        "description": "目標漲/跌幅百分比（如 3 代表 3%）",
+                        "default": 3.0,
+                    },
+                    "direction": {
+                        "type": "string",
+                        "enum": ["up", "down"],
+                        "description": "目標方向：up=上漲, down=下跌",
+                        "default": "up",
+                    },
+                    "n_bins": {
+                        "type": "integer",
+                        "description": "將指標數值範圍分成幾個區間（預設 10）",
+                        "default": 10,
+                    },
+                    "symbol": {"type": "string", "description": "交易對，留空使用當前"},
+                    "timeframe": {"type": "string", "description": "時間級別，留空使用當前"},
+                    "start_date": {"type": "string", "description": "開始日期 YYYY-MM-DD"},
+                    "end_date": {"type": "string", "description": "結束日期 YYYY-MM-DD"},
+                },
+                "required": ["indicators"],
             },
         },
     },

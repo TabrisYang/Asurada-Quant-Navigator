@@ -1,10 +1,47 @@
 """阿斯拉量化系統 — 技術指標路由"""
 
+import hashlib
+import json
+import time
+from collections import OrderedDict
+
 import pandas as pd
 from fastapi import APIRouter, HTTPException
 from loguru import logger
 
 from app.core.indicators import registry
+
+# ─── 指標計算快取（LRU，最多 128 筆，TTL 5 分鐘）───────
+_CACHE_MAX = 128
+_CACHE_TTL = 300
+_indicator_cache: OrderedDict[str, tuple[float, dict]] = OrderedDict()
+
+
+def _cache_key(indicator_type: str, symbol: str, timeframe: str,
+               start_date: str | None, end_date: str | None, params: dict) -> str:
+    raw = json.dumps({
+        "t": indicator_type, "s": symbol, "tf": timeframe,
+        "sd": start_date, "ed": end_date, "p": params,
+    }, sort_keys=True)
+    return hashlib.md5(raw.encode()).hexdigest()
+
+
+def _cache_get(key: str) -> dict | None:
+    item = _indicator_cache.get(key)
+    if item is None:
+        return None
+    ts, data = item
+    if time.time() - ts > _CACHE_TTL:
+        _indicator_cache.pop(key, None)
+        return None
+    _indicator_cache.move_to_end(key)
+    return data
+
+
+def _cache_set(key: str, data: dict):
+    _indicator_cache[key] = (time.time(), data)
+    if len(_indicator_cache) > _CACHE_MAX:
+        _indicator_cache.popitem(last=False)
 from app.data.fetchers.crypto_engine import crypto_engine
 from app.data.fetchers.external import external_fetcher
 from app.models.schemas import (
@@ -62,7 +99,22 @@ async def calculate_indicator(request: IndicatorRequest):
             parameters=calc_params or {k: v["default"] for k, v in indicator.parameters.items()},
         )
 
-    # ─── OHLCV 指標（本地數據計算）────────────────
+    # ─── OHLCV 指標（本地數據計算，帶快取）────────────────
+    ck = _cache_key(
+        request.indicator_type.lower(), str(symbol), str(timeframe),
+        str(start_date) if start_date else None,
+        str(end_date) if end_date else None,
+        calc_params,
+    )
+    cached = _cache_get(ck)
+    if cached is not None:
+        return IndicatorData(
+            name=indicator.name,
+            display_mode=DisplayMode(indicator.display_mode),
+            data=cached,
+            parameters=calc_params or {k: v["default"] for k, v in indicator.parameters.items()},
+        )
+
     df = crypto_engine.load_local_data(
         symbol=str(symbol),
         timeframe=str(timeframe),
@@ -73,7 +125,6 @@ async def calculate_indicator(request: IndicatorRequest):
     if df.empty:
         raise HTTPException(status_code=404, detail=f"找不到 {symbol} {timeframe} 的數據")
 
-    # 注入 symbol / timeframe 到參數（多時間框架指標需要）
     _calc_params_with_ctx = dict(calc_params or {})
     _calc_params_with_ctx.setdefault("_symbol", str(symbol))
     _calc_params_with_ctx.setdefault("_timeframe", str(timeframe))
@@ -81,6 +132,8 @@ async def calculate_indicator(request: IndicatorRequest):
 
     if result is None:
         raise HTTPException(status_code=500, detail="指標計算失敗")
+
+    _cache_set(ck, result)
 
     return IndicatorData(
         name=indicator.name,

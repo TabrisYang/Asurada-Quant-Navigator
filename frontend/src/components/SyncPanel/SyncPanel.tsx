@@ -12,6 +12,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useChartStore } from '../../stores/chartStore';
+import { toast } from '../Toast';
 import {
   triggerDataSync,
   fetchSyncTaskProgress,
@@ -131,9 +132,11 @@ export default function SyncPanel() {
             pollRef.current = null;
             setSyncing(false);
 
-            // 同步完成後自動重新載入當前圖表數據
             if (data.status === 'completed') {
               loadChartData();
+              toast(`數據同步完成（${data.completed_items}/${data.total_items}）`, 'success');
+            } else {
+              toast('數據同步失敗，請檢查日誌', 'error');
             }
           }
         } catch {
@@ -179,7 +182,9 @@ export default function SyncPanel() {
       startPolling(res.task_id);
     } catch (err: any) {
       setSyncing(false);
-      setError(err?.response?.data?.detail || err?.message || '同步啟動失敗');
+      const msg = err?.response?.data?.detail || err?.message || '同步啟動失敗';
+      setError(msg);
+      toast(msg, 'error');
     }
   };
 

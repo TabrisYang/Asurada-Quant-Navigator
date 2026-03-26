@@ -125,6 +125,21 @@ class PredictionTracker:
             CREATE INDEX IF NOT EXISTS idx_pred_symbol_status
             ON predictions(symbol, status)
         """)
+        # 遷移：加入 ml_enhanced 欄位（若不存在）
+        try:
+            self._conn.execute(
+                "ALTER TABLE predictions ADD COLUMN ml_enhanced INTEGER DEFAULT 0"
+            )
+        except sqlite3.OperationalError:
+            pass  # 欄位已存在
+
+        # 遷移：加入 notes 欄位（若不存在）
+        try:
+            self._conn.execute(
+                "ALTER TABLE predictions ADD COLUMN notes TEXT DEFAULT ''"
+            )
+        except sqlite3.OperationalError:
+            pass  # 欄位已存在
         self._conn.commit()
 
     def store(
@@ -403,6 +418,55 @@ class PredictionTracker:
             "recent_losses": recent_losses,
             "current_streak": current_streak,
             "streak_type": streak_type,
+        }
+
+    # ─── 策略日誌 / 覆盤 ──────────────────
+
+    def update_note(self, pred_id: int, note: str):
+        """更新預測的使用者筆記"""
+        self._ensure_db()
+        self._conn.execute(
+            "UPDATE predictions SET notes = ? WHERE id = ?",
+            (note, pred_id),
+        )
+        self._conn.commit()
+
+    def get_review_data(
+        self,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        symbol: Optional[str] = None,
+    ) -> dict:
+        """取得覆盤所需的資料（某時間範圍內的所有已驗證預測）"""
+        self._ensure_db()
+        query = "SELECT * FROM predictions WHERE status != 'active'"
+        params: list = []
+        if start_date:
+            query += " AND created_at >= ?"
+            params.append(start_date)
+        if end_date:
+            query += " AND created_at <= ?"
+            params.append(end_date)
+        if symbol:
+            query += " AND symbol = ?"
+            params.append(symbol)
+        query += " ORDER BY created_at DESC"
+        rows = self._conn.execute(query, params).fetchall()
+        predictions = [dict(r) for r in rows]
+
+        total = len(predictions)
+        wins = sum(1 for p in predictions if p["status"] == "hit_target")
+        losses = sum(1 for p in predictions if p["status"] == "hit_stop")
+
+        return {
+            "predictions": predictions,
+            "summary": {
+                "total": total,
+                "wins": wins,
+                "losses": losses,
+                "expired": total - wins - losses,
+                "win_rate": round(wins / total * 100, 1) if total > 0 else 0,
+            },
         }
 
 

@@ -2,7 +2,9 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useChartStore } from '../../stores/chartStore';
-import { streamChatMessage, fetchUsageSummary, fetchChatHistory, fetchConversationMessages, fetchDistillStatus, previewDistill, confirmDistill } from '../../services/api';
+import { streamChatMessage, fetchUsageSummary, fetchChatHistory, fetchConversationMessages, fetchDistillStatus, previewDistill, confirmDistill, fetchFragments, deleteFragment, addUserNote } from '../../services/api';
+import { toast } from '../Toast';
+import type { FragmentItem } from '../../services/api';
 import type { ChatMessage, TokenUsage, LLMProvider, Timeframe, Annotation } from '../../types';
 
 const QUICK_QUESTIONS_KEY = 'asla_quick_questions';
@@ -68,6 +70,12 @@ export default function ChatInterface() {
   const [distillHint, setDistillHint] = useState(false);
   const [quickQuestions, setQuickQuestions] = useState<string[]>(loadQuickQuestions);
   const [editingQuick, setEditingQuick] = useState(false);
+  const [showKnowledgePanel, setShowKnowledgePanel] = useState(false);
+  const [knowledgeFragments, setKnowledgeFragments] = useState<FragmentItem[]>([]);
+  const [knowledgeTotal, setKnowledgeTotal] = useState(0);
+  const [knowledgeSymbols, setKnowledgeSymbols] = useState<string[]>([]);
+  const [knowledgeTypes, setKnowledgeTypes] = useState<string[]>([]);
+  const [knowledgeLoading, setKnowledgeLoading] = useState(false);
   const [editDraft, setEditDraft] = useState<string[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const isComposingRef = useRef(false);
@@ -106,6 +114,29 @@ export default function ChatInterface() {
     } finally {
       setHistoryLoading(false);
     }
+  }, []);
+
+  // 載入知識碎片
+  const loadKnowledge = useCallback(async (params?: {
+    symbol?: string; fragment_type?: string; sort_by?: string;
+  }) => {
+    setKnowledgeLoading(true);
+    try {
+      const data = await fetchFragments({ limit: 200, ...params });
+      setKnowledgeFragments(data.fragments || []);
+      setKnowledgeTotal(data.total || 0);
+      setKnowledgeSymbols(data.symbols || []);
+      setKnowledgeTypes(data.types || []);
+    } catch { /* silent */ }
+    finally { setKnowledgeLoading(false); }
+  }, []);
+
+  const handleDeleteFragment = useCallback(async (id: number) => {
+    try {
+      await deleteFragment(id);
+      setKnowledgeFragments(prev => prev.filter(f => f.id !== id));
+      setKnowledgeTotal(prev => Math.max(0, prev - 1));
+    } catch { /* silent */ }
   }, []);
 
   // 恢復歷史對話
@@ -249,6 +280,16 @@ export default function ChatInterface() {
       .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content.trim() && m.id !== assistantMsgId)
       .slice(-20)
       .map((m) => ({ role: m.role, content: m.content }));
+
+    // 截取圖表畫面（供 LLM 視覺分析）
+    let screenshot: string | undefined;
+    const captureFn = useChartStore.getState().captureScreenshot;
+    if (captureFn) {
+      try {
+        const img = await captureFn();
+        if (img) screenshot = img;
+      } catch { /* 截圖失敗不阻塞發送 */ }
+    }
 
     await streamChatMessage(
       trimmed,
@@ -421,6 +462,7 @@ export default function ChatInterface() {
       llmConfig.sessionId,
       chatHistory,
       sendMode,
+      screenshot,
     );
 
     // ★ 安全兜底：如果串流結束但沒收到 done 事件（連線中斷等），也要結束載入狀態
@@ -459,6 +501,7 @@ export default function ChatInterface() {
               setShowDistillPanel(!showDistillPanel);
               setShowHistoryPanel(false);
               setShowUsagePanel(false);
+              setShowKnowledgePanel(false);
               if (!showDistillPanel) loadDistillStatus();
             }}
             className="text-xs cursor-pointer hover:opacity-80"
@@ -472,6 +515,7 @@ export default function ChatInterface() {
               setShowHistoryPanel(!showHistoryPanel);
               setShowUsagePanel(false);
               setShowDistillPanel(false);
+              setShowKnowledgePanel(false);
               if (!showHistoryPanel) loadHistory();
             }}
             className="text-xs cursor-pointer hover:opacity-80"
@@ -482,9 +526,24 @@ export default function ChatInterface() {
           </button>
           <button
             onClick={() => {
+              setShowKnowledgePanel(!showKnowledgePanel);
+              setShowUsagePanel(false);
+              setShowHistoryPanel(false);
+              setShowDistillPanel(false);
+              if (!showKnowledgePanel) loadKnowledge();
+            }}
+            className="text-xs cursor-pointer hover:opacity-80"
+            style={{ color: 'var(--accent-blue)' }}
+            title="瀏覽系統累積的知識碎片"
+          >
+            📚 知識庫
+          </button>
+          <button
+            onClick={() => {
               setShowUsagePanel(!showUsagePanel);
               setShowHistoryPanel(false);
               setShowDistillPanel(false);
+              setShowKnowledgePanel(false);
               if (!showUsagePanel) loadUsageSummary();
             }}
             className="text-xs cursor-pointer hover:opacity-80"
@@ -525,6 +584,19 @@ export default function ChatInterface() {
           loading={historyLoading}
           onSelect={restoreConversation}
           onRefresh={loadHistory}
+        />
+      )}
+
+      {/* 知識碎片瀏覽器 */}
+      {showKnowledgePanel && (
+        <KnowledgePanel
+          fragments={knowledgeFragments}
+          total={knowledgeTotal}
+          symbols={knowledgeSymbols}
+          types={knowledgeTypes}
+          loading={knowledgeLoading}
+          onRefresh={loadKnowledge}
+          onDelete={handleDeleteFragment}
         />
       )}
 
@@ -1089,6 +1161,289 @@ function HistoryPanel({
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+
+// ─── 知識碎片瀏覽器面板 ─────────────────────────
+
+const _TYPE_LABELS: Record<string, { label: string; icon: string; color: string }> = {
+  strategy:           { label: '策略',     icon: '🎯', color: '#a855f7' },
+  support_resistance: { label: '支撐壓力', icon: '🏷',  color: '#3b82f6' },
+  lesson:             { label: '經驗教訓', icon: '💡', color: '#eab308' },
+  factor_update:      { label: '因子更新', icon: '📊', color: '#22c55e' },
+  invalidation:       { label: '失效條件', icon: '⚠️',  color: '#ef4444' },
+  trend:              { label: '趨勢',     icon: '📈', color: '#06b6d4' },
+  next_validation:    { label: '驗證待辦', icon: '🔍', color: '#f97316' },
+  pattern:            { label: '型態',     icon: '📐', color: '#c084fc' },
+  regime_tag:         { label: '市場環境', icon: '🌐', color: '#a3a3a3' },
+  scores:             { label: '評分',     icon: '📝', color: '#737373' },
+  indicator:          { label: '指標',     icon: '📉', color: '#2563eb' },
+  volume:             { label: '量能',     icon: '📊', color: '#15803d' },
+  sentiment:          { label: '情緒',     icon: '💭', color: '#facc15' },
+  general:            { label: '一般',     icon: '📄', color: '#9ca3af' },
+  user_note:          { label: '使用者筆記', icon: '✏️', color: '#79c0ff' },
+};
+
+function KnowledgePanel({
+  fragments,
+  total,
+  symbols,
+  types,
+  loading,
+  onRefresh,
+  onDelete,
+}: {
+  fragments: FragmentItem[];
+  total: number;
+  symbols: string[];
+  types: string[];
+  loading: boolean;
+  onRefresh: (params?: { symbol?: string; fragment_type?: string; sort_by?: string }) => void;
+  onDelete: (id: number) => void;
+}) {
+  const [filterSymbol, setFilterSymbol] = useState('');
+  const [filterType, setFilterType] = useState('');
+  const [sortBy, setSortBy] = useState('hit_count');
+  const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [panelHeight, setPanelHeight] = useState(280);
+  const dragging = useRef(false);
+  const dragStartY = useRef(0);
+  const dragStartH = useRef(0);
+
+  const applyFilters = (sym?: string, typ?: string, sort?: string) => {
+    const s = sym ?? filterSymbol;
+    const t = typ ?? filterType;
+    const sb = sort ?? sortBy;
+    onRefresh({ symbol: s || undefined, fragment_type: t || undefined, sort_by: sb });
+  };
+
+  const onDragStart = (e: React.MouseEvent) => {
+    e.preventDefault();
+    dragging.current = true;
+    dragStartY.current = e.clientY;
+    dragStartH.current = panelHeight;
+
+    const onMove = (ev: MouseEvent) => {
+      if (!dragging.current) return;
+      const delta = ev.clientY - dragStartY.current;
+      setPanelHeight(Math.max(120, Math.min(600, dragStartH.current + delta)));
+    };
+    const onUp = () => {
+      dragging.current = false;
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
+  return (
+    <div
+      className="border-b flex flex-col"
+      style={{ borderColor: 'var(--border-color)', background: 'var(--bg-secondary)' }}
+    >
+      {/* 頂部 */}
+      <div className="px-4 py-2 flex items-center justify-between shrink-0">
+        <span className="text-xs font-medium" style={{ color: 'var(--text-primary)' }}>
+          📚 知識庫 ({total} 筆)
+        </span>
+        <button
+          onClick={() => applyFilters()}
+          disabled={loading}
+          className="text-xs cursor-pointer hover:opacity-80 disabled:opacity-40"
+          style={{ color: 'var(--accent-blue)' }}
+        >
+          {loading ? '載入中...' : '🔄'}
+        </button>
+      </div>
+
+      {/* 篩選列 */}
+      <div className="px-4 pb-2 flex items-center gap-2 flex-wrap shrink-0">
+        <select
+          value={filterSymbol}
+          onChange={e => { setFilterSymbol(e.target.value); applyFilters(e.target.value, undefined, undefined); }}
+          className="text-xs px-2 py-1 rounded border cursor-pointer"
+          style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', borderColor: 'var(--border-color)' }}
+        >
+          <option value="">全部標的</option>
+          {symbols.map(s => <option key={s} value={s === '通用' ? '' : s}>{s}</option>)}
+        </select>
+
+        <select
+          value={filterType}
+          onChange={e => { setFilterType(e.target.value); applyFilters(undefined, e.target.value, undefined); }}
+          className="text-xs px-2 py-1 rounded border cursor-pointer"
+          style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', borderColor: 'var(--border-color)' }}
+        >
+          <option value="">全部類型</option>
+          {types.map(t => {
+            const info = _TYPE_LABELS[t];
+            return <option key={t} value={t}>{info ? `${info.icon} ${info.label}` : t}</option>;
+          })}
+        </select>
+
+        <select
+          value={sortBy}
+          onChange={e => { setSortBy(e.target.value); applyFilters(undefined, undefined, e.target.value); }}
+          className="text-xs px-2 py-1 rounded border cursor-pointer"
+          style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', borderColor: 'var(--border-color)' }}
+        >
+          <option value="hit_count">命中最多</option>
+          <option value="created_at">最新</option>
+          <option value="type">按類型</option>
+        </select>
+      </div>
+
+      {/* 碎片列表 */}
+      <div className="overflow-y-auto px-3 pb-1" style={{ maxHeight: `${panelHeight}px` }}>
+        {fragments.length === 0 ? (
+          <p className="px-2 py-3 text-xs text-center" style={{ color: 'var(--text-secondary)' }}>
+            {loading ? '正在載入...' : '尚無知識碎片（與 AI 對話後會自動累積）'}
+          </p>
+        ) : (
+          fragments.map(frag => {
+            const info = _TYPE_LABELS[frag.type] || _TYPE_LABELS.general;
+            const isExpanded = expandedId === frag.id;
+            return (
+              <div
+                key={frag.id}
+                className="mb-1.5 rounded transition-colors"
+                style={{ background: 'var(--bg-tertiary)' }}
+              >
+                {/* 主行 */}
+                <div
+                  className="flex items-start gap-2 px-3 py-2 cursor-pointer hover:opacity-90"
+                  onClick={() => setExpandedId(isExpanded ? null : frag.id)}
+                >
+                  {/* 類型標籤 */}
+                  <span
+                    className="shrink-0 text-xs px-1.5 py-0.5 rounded font-medium"
+                    style={{ background: `${info.color}22`, color: info.color, whiteSpace: 'nowrap' }}
+                  >
+                    {info.icon} {info.label}
+                  </span>
+                  {/* 內容 */}
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs leading-relaxed" style={{
+                      color: 'var(--text-primary)',
+                      display: '-webkit-box',
+                      WebkitLineClamp: isExpanded ? 999 : 2,
+                      WebkitBoxOrient: 'vertical',
+                      overflow: 'hidden',
+                    }}>
+                      {frag.content}
+                    </p>
+                  </div>
+                  {/* 指標 */}
+                  <div className="shrink-0 flex items-center gap-2">
+                    {frag.hit_count > 0 && (
+                      <span className="text-xs" style={{ color: 'var(--accent-green)', fontSize: '10px' }}
+                            title="被引用次數">
+                        ×{frag.hit_count}
+                      </span>
+                    )}
+                    <button
+                      onClick={e => { e.stopPropagation(); if (confirm('確定刪除此知識碎片？')) onDelete(frag.id); }}
+                      className="text-xs cursor-pointer hover:opacity-80"
+                      style={{ color: 'var(--text-secondary)', fontSize: '10px' }}
+                      title="刪除此碎片"
+                    >
+                      🗑
+                    </button>
+                  </div>
+                </div>
+
+                {/* 展開區域：來源追溯 */}
+                {isExpanded && (
+                  <div className="px-3 pb-2 pt-0" style={{ borderTop: '1px dashed var(--border-color)' }}>
+                    <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs mt-1.5" style={{ color: 'var(--text-secondary)', fontSize: '10px' }}>
+                      <span>📍 {frag.symbol}</span>
+                      <span>📅 {frag.created_at}</span>
+                      <span>⏱ {frag.age_days < 1 ? '今天' : `${Math.floor(frag.age_days)} 天前`}</span>
+                      <span>⭐ 品質 {(frag.quality_score * 100).toFixed(0)}%</span>
+                      <span>🔄 引用 {frag.hit_count} 次</span>
+                      {frag.is_seed && <span style={{ color: 'var(--accent-orange, #f0883e)' }}>🌱 種子碎片</span>}
+                    </div>
+                    {frag.source_question && (
+                      <div className="mt-1.5 p-1.5 rounded text-xs" style={{ background: 'var(--bg-secondary)', color: 'var(--text-secondary)' }}>
+                        <span style={{ opacity: 0.6 }}>來源提問：</span>{frag.source_question}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })
+        )}
+      </div>
+
+      {/* 拖曳條 */}
+      {/* 筆記輸入區 */}
+      <NoteInput onRefresh={() => applyFilters()} />
+
+      <div
+        onMouseDown={onDragStart}
+        className="shrink-0 flex items-center justify-center cursor-row-resize select-none"
+        style={{ height: '8px', background: 'var(--border-color)', opacity: 0.5 }}
+        title="拖曳調整面板高度"
+      >
+        <div style={{ width: 30, height: 3, borderRadius: 2, background: 'var(--text-secondary)', opacity: 0.5 }} />
+      </div>
+    </div>
+  );
+}
+
+function NoteInput({ onRefresh }: { onRefresh: () => void }) {
+  const [text, setText] = useState('');
+  const [saving, setSaving] = useState(false);
+  const symbol = useChartStore(s => s.symbol);
+
+  const handleSave = async () => {
+    if (text.trim().length < 5) return;
+    setSaving(true);
+    try {
+      await addUserNote(text.trim(), symbol);
+      toast('筆記已儲存到知識庫', 'success');
+      setText('');
+      onRefresh();
+    } catch {
+      toast('筆記儲存失敗', 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="px-3 py-2 shrink-0 border-t" style={{ borderColor: 'var(--border-color)' }}>
+      <div className="text-xs mb-1" style={{ color: 'var(--text-muted)' }}>
+        ✏️ 添加學習筆記（會自動成為 AI 助手的參考知識）
+      </div>
+      <div className="flex gap-1.5">
+        <input
+          type="text"
+          value={text}
+          onChange={e => setText(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) handleSave(); }}
+          placeholder="記錄你的分析心得、策略觀察..."
+          className="flex-1 px-2 py-1 rounded text-xs border"
+          style={{
+            background: 'var(--bg-primary)',
+            color: 'var(--text-primary)',
+            borderColor: 'var(--border-color)',
+          }}
+          maxLength={2000}
+        />
+        <button
+          onClick={handleSave}
+          disabled={saving || text.trim().length < 5}
+          className="px-3 py-1 rounded text-xs cursor-pointer disabled:opacity-40 hover:opacity-80"
+          style={{ background: 'var(--accent-blue)', color: '#fff' }}
+        >
+          {saving ? '...' : '儲存'}
+        </button>
+      </div>
     </div>
   );
 }

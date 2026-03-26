@@ -50,7 +50,7 @@ async def configure_llm(request: LLMConfigRequest):
     """
     provider = request.provider.value
 
-    # Ollama 不需要 Key
+    # 不需要 API Key 的供應商
     if provider == "ollama":
         base = _validate_ollama_url(request.base_url or "http://localhost:11434")
         session_id = key_manager.store_key(
@@ -63,6 +63,19 @@ async def configure_llm(request: LLMConfigRequest):
             "provider": provider,
             "session_id": session_id,
             "message": f"已設定 LLM 供應商為 {provider}（無需 API Key）",
+        }
+
+    if provider == "claude_subscription":
+        session_id = key_manager.store_key(
+            api_key="",
+            provider=provider,
+            model_name=request.model_name,
+        )
+        return {
+            "status": "ok",
+            "provider": provider,
+            "session_id": session_id,
+            "message": "已設定為 Claude 訂閱制（使用 Claude Code 登入憑證）",
         }
 
     # 需要 API Key 的供應商
@@ -104,7 +117,7 @@ async def test_llm_connection(request: LLMConfigRequest):
     if not api_key and request.api_key:
         api_key = request.api_key
 
-    if not api_key and provider != "ollama":
+    if not api_key and provider not in ("ollama", "claude_subscription"):
         if session_expired:
             raise HTTPException(
                 status_code=401,
@@ -220,6 +233,12 @@ async def list_llm_providers():
                 "description": "推理能力強",
             },
             {
+                "id": "claude_subscription",
+                "name": "Claude 訂閱制",
+                "requires_key": False,
+                "description": "使用 Claude Code 訂閱額度（需已登入 Claude Code）",
+            },
+            {
                 "id": "ollama",
                 "name": "本地 Ollama",
                 "requires_key": False,
@@ -248,7 +267,7 @@ async def list_available_models(request: LLMConfigRequest):
     if not api_key and request.api_key:
         api_key = request.api_key
 
-    if not api_key and provider != "ollama":
+    if not api_key and provider not in ("ollama", "claude_subscription"):
         if session_expired:
             raise HTTPException(
                 status_code=401,
@@ -362,3 +381,45 @@ async def delete_strategy(strategy_id: str):
     if not ok:
         raise HTTPException(status_code=404, detail="策略不存在")
     return {"status": "ok"}
+
+
+# ═══════════════════════════════════════════════════════
+#  系統通用設定（教學模式等）
+# ═══════════════════════════════════════════════════════
+
+import json
+from pathlib import Path
+from app.core.config.settings import settings as _app_settings
+
+_SYSTEM_SETTINGS_FILE = Path(_app_settings.db_path) / "system_settings.json"
+
+
+def load_system_settings() -> dict:
+    """讀取系統通用設定（外部模組可直接呼叫）"""
+    defaults = {"teaching_mode": False}
+    if _SYSTEM_SETTINGS_FILE.exists():
+        try:
+            with open(_SYSTEM_SETTINGS_FILE) as f:
+                data = json.load(f)
+            defaults.update(data)
+        except Exception:
+            pass
+    return defaults
+
+
+@router.get("/system-settings")
+async def get_system_settings():
+    """取得系統通用設定"""
+    return {"status": "ok", "settings": load_system_settings()}
+
+
+@router.put("/system-settings")
+async def update_system_settings(body: dict):
+    """更新系統通用設定"""
+    current = load_system_settings()
+    if "teaching_mode" in body:
+        current["teaching_mode"] = bool(body["teaching_mode"])
+    _SYSTEM_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(_SYSTEM_SETTINGS_FILE, "w") as f:
+        json.dump(current, f, ensure_ascii=False)
+    return {"status": "ok", "settings": current}

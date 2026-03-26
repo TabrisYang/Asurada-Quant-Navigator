@@ -70,7 +70,8 @@ async def factor_scan(request: FactorScanRequest):
         return result
 
     except Exception as e:
-        logger.error(f"因子掃描失敗: {e}")
+        import traceback
+        logger.error(f"因子掃描失敗: {e}\n{traceback.format_exc()}")
         return {"status": "error", "message": str(e)}
 
 

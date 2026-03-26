@@ -33,6 +33,7 @@ class LLMProvider(str, Enum):
     OPENAI = "openai"
     GEMINI = "gemini"
     CLAUDE = "claude"
+    CLAUDE_SUBSCRIPTION = "claude_subscription"
     OLLAMA = "ollama"
 
 
@@ -61,6 +62,7 @@ class ChatRequest(BaseModel):
     messages: list[ChatMessageItem] = Field(default_factory=list, max_length=50)
     conversation_id: Optional[str] = None
     chart_state: Optional[dict[str, Any]] = None
+    chart_screenshot: Optional[str] = None  # base64 JPEG 圖表截圖（供 LLM 視覺分析）
     llm_provider: Optional[LLMProvider] = None
     session_id: Optional[str] = None       # 優先：使用 session token（安全）
     api_key: Optional[str] = None          # 向下相容：直接傳 key（不建議）

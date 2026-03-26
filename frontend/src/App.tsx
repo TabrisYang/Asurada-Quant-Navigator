@@ -9,6 +9,7 @@ import SettingsPanel from './components/SettingsPanel/SettingsPanel';
 import SyncPanel from './components/SyncPanel/SyncPanel';
 import TopBar from './components/TopBar';
 import OnboardingGuide, { useOnboarding } from './components/OnboardingGuide';
+import { ToastContainer } from './components/Toast';
 import { useChartStore } from './stores/chartStore';
 import { calculateIndicator } from './services/api';
 
@@ -116,7 +117,9 @@ function App() {
     <div className="flex flex-col h-screen" style={{ background: 'var(--bg-primary)' }}>
       {/* 頂部工具列 */}
       <ErrorBoundary name="頂部工具列">
-        <TopBar onSettingsClick={() => setShowSettings(true)} />
+        <div data-guide="topbar">
+          <TopBar onSettingsClick={() => setShowSettings(true)} />
+        </div>
       </ErrorBoundary>
 
       {/* 主要內容區 */}
@@ -124,6 +127,7 @@ function App() {
         {/* 左側：指標面板 */}
         {panelExpanded && (
           <div
+            data-guide="indicator-panel"
             className="flex flex-col border-r overflow-y-auto"
             style={{
               width: '280px',
@@ -139,7 +143,7 @@ function App() {
         )}
 
         {/* 中間：K 線圖表 */}
-        <div className="flex-1 flex flex-col overflow-hidden">
+        <div data-guide="chart" className="flex-1 flex flex-col overflow-hidden">
           <ErrorBoundary name="K 線圖表">
             <ChartView />
           </ErrorBoundary>
@@ -148,6 +152,7 @@ function App() {
         {/* 右側：對話介面 */}
         {chatExpanded && (
           <div
+            data-guide="chat"
             className="flex flex-col border-l overflow-hidden"
             style={{
               width: '380px',
@@ -214,6 +219,9 @@ function App() {
 
       {/* 新手引導 */}
       {showOnboarding && <OnboardingGuide onDismiss={dismissOnboarding} />}
+
+      {/* 全域通知 */}
+      <ToastContainer />
     </div>
   );
 }
