@@ -10,6 +10,8 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 
+from loguru import logger
+
 from app.core.config.settings import settings
 from app.data.fetchers.crypto_engine import crypto_engine
 from app.models.schemas import DataSyncRequest, SyncTaskProgress
@@ -75,6 +77,13 @@ async def _run_sync(request: DataSyncRequest, task_id: str):
                     )
                     task.logs.append(f"完成: {item_label}")
 
+                    # ML: 遞增 bars 計數器
+                    try:
+                        from app.core.ml.model_manager import model_manager
+                        model_manager.increment_bars(symbol, tf.value)
+                    except Exception:
+                        pass  # ML 模組未初始化時靜默忽略
+
                 except Exception as e:
                     error_msg = f"{item_label}: {str(e)}"
                     task.errors.append(error_msg)
@@ -91,10 +100,37 @@ async def _run_sync(request: DataSyncRequest, task_id: str):
                     remaining = (total - done) * avg_time
                     task.eta_seconds = round(remaining, 1)
 
+        # ML: 同步完成後驗證預測 + 檢查自動重訓
+        retrain_count = 0
+        validated_count = 0
+        try:
+            from app.core.ml.model_manager import model_manager
+            for symbol in request.symbols:
+                for tf in request.timeframes:
+                    df = crypto_engine.load_local_data(symbol, tf.value)
+                    if df is not None and len(df) > 0:
+                        # 驗證過期的 ML 預測
+                        validated_count += model_manager.validate_ml_predictions(
+                            symbol, tf.value, df,
+                        )
+                        # 檢查自動重訓
+                        results = model_manager.auto_retrain_if_needed(
+                            symbol, tf.value, df,
+                        )
+                        retrain_count += sum(
+                            1 for r in results if r.get("status") == "success"
+                        )
+        except Exception as e:
+            logger.warning(f"ML 後處理失敗（不影響同步結果）: {e}")
+
         task.status = "completed"
         task.progress = 100
         task.eta_seconds = 0
         task.current_item = None
+        if validated_count > 0:
+            task.logs.append(f"已驗證 {validated_count} 筆 ML 預測")
+        if retrain_count > 0:
+            task.logs.append(f"已自動重訓 {retrain_count} 個模型")
         task.logs.append("所有同步任務已完成")
 
     except Exception as e:

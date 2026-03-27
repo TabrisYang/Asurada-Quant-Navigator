@@ -3,7 +3,7 @@
 NumPy 向量化回測核心，支援：
 - 多條件進出場（AND/OR）
 - 止損 / 止盈
-- 保守滑點模型（0.05% 滑點 + 0.1% 手續費）
+- 動態成本模型（基於 ATR/成交量的滑點 + 交易所 maker/taker 費率）
 - 自動 in-sample / out-of-sample 分割
 - 完整績效統計（勝率、盈虧比、Sharpe、MDD 等）
 """
@@ -21,11 +21,62 @@ from loguru import logger
 from app.core.indicators import registry
 
 # ─── 交易成本參數 ────────────────────────────────────
-DEFAULT_SLIPPAGE_PCT = 0.0005   # 0.05% 保守滑點
-DEFAULT_FEE_PCT = 0.001         # 0.1% 手續費（單邊）
+DEFAULT_SLIPPAGE_PCT = 0.0005   # 0.05% 保守滑點（靜態回退值）
+DEFAULT_FEE_PCT = 0.001         # 0.1% 手續費（單邊，靜態回退值）
 DEFAULT_CAPITAL = 10000.0       # 預設初始資金 (USDT)
 MIN_DATA_POINTS = 60            # 最低數據量需求
 OOS_RATIO = 0.3                 # out-of-sample 佔比
+
+# 各交易所 maker/taker 費率（單邊）
+EXCHANGE_FEES = {
+    "binance":  {"maker": 0.0002, "taker": 0.0004},
+    "bybit":    {"maker": 0.0002, "taker": 0.00055},
+    "okx":      {"maker": 0.0002, "taker": 0.0005},
+    "coinbase": {"maker": 0.004,  "taker": 0.006},
+    "default":  {"maker": 0.0005, "taker": 0.001},
+}
+
+# 動態滑點參數
+SLIPPAGE_ATR_SCALE = 0.1        # ATR 比例因子：slippage = ATR/close * scale
+SLIPPAGE_LOW_VOLUME_MULT = 2.0  # 低成交量時滑點倍率
+VOLUME_PERCENTILE_THRESHOLD = 0.2  # 低於 20 分位即視為低量
+
+
+def _compute_dynamic_cost(
+    atr: np.ndarray,
+    close: np.ndarray,
+    volume: np.ndarray,
+    bar_idx: int,
+    exchange: str = "default",
+    order_type: str = "taker",
+) -> float:
+    """計算單根 K 棒的動態交易成本（滑點 + 手續費，單邊）
+
+    - 滑點基於 ATR/close 比率，低量時放大
+    - 手續費依交易所 maker/taker 費率
+    """
+    # 手續費
+    fees = EXCHANGE_FEES.get(exchange, EXCHANGE_FEES["default"])
+    fee = fees.get(order_type, fees["taker"])
+
+    # 動態滑點
+    if np.isnan(atr[bar_idx]) or close[bar_idx] <= 0:
+        slippage = DEFAULT_SLIPPAGE_PCT
+    else:
+        slippage = (atr[bar_idx] / close[bar_idx]) * SLIPPAGE_ATR_SCALE
+
+        # 低成交量加倍滑點
+        if bar_idx >= 20:
+            vol_window = volume[max(0, bar_idx - 20):bar_idx]
+            vol_pctile = np.percentile(vol_window, VOLUME_PERCENTILE_THRESHOLD * 100)
+            if volume[bar_idx] < vol_pctile:
+                slippage *= SLIPPAGE_LOW_VOLUME_MULT
+
+        # 設定地板和天花板
+        slippage = max(slippage, 0.0001)  # 最低 0.01%
+        slippage = min(slippage, 0.01)    # 最高 1%
+
+    return slippage + fee
 
 
 @dataclass
@@ -270,7 +321,7 @@ def _generate_warnings(
             f"⚠️ 此回測使用 {metrics['leverage']}x 槓桿。盈虧均按槓桿倍數放大，不含資金費率。"
         )
 
-    warnings.append("⚠️ 回測結果僅供參考，不含流動性衝擊、資金費率、極端行情等真實市場因素。實際交易請謹慎。")
+    warnings.append("⚠️ 回測結果僅供參考，已含動態滑點與手續費估算，但不含資金費率、極端行情流動性衝擊。實際交易請謹慎。")
     return warnings
 
 
@@ -287,6 +338,8 @@ def run_backtest(
     entry_logic: str = "AND",
     exit_logic: str = "AND",
     leverage: float = 1.0,
+    dynamic_cost: bool = True,
+    exchange: str = "default",
 ) -> BacktestResult:
     """
     執行向量化回測
@@ -297,6 +350,8 @@ def run_backtest(
         exit_conditions: 出場條件列表
         direction: "long" | "short"
         stop_loss_pct: 止損百分比（如 0.02 = 2%）
+        dynamic_cost: 啟用動態成本模型（基於 ATR/成交量），預設 True
+        exchange: 交易所名稱，用於查詢 maker/taker 費率
         take_profit_pct: 止盈百分比
         initial_capital: 初始資金
         leverage: 槓桿倍數（預設 1.0 = 無槓桿）
@@ -326,8 +381,31 @@ def run_backtest(
 
     # ─── 逐 bar 模擬 ───────────────────────────────────
     leverage = max(1.0, leverage)
-    cost_rate = slippage_pct + fee_pct
+    static_cost_rate = slippage_pct + fee_pct
     capital = initial_capital
+
+    # 預計算 ATR 和 volume 用於動態成本
+    volume = df["volume"].values.astype(float) if "volume" in df.columns else np.ones(len(close))
+    if dynamic_cost and "atr" in df.columns:
+        atr_arr = df["atr"].values.astype(float)
+        use_dynamic = True
+    elif dynamic_cost:
+        # 現場計算 ATR(14)
+        tr = np.maximum(
+            high - low,
+            np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1)))
+        )
+        tr[0] = high[0] - low[0]
+        atr_arr = pd.Series(tr).rolling(14).mean().values
+        use_dynamic = True
+    else:
+        atr_arr = np.full(len(close), np.nan)
+        use_dynamic = False
+
+    def _cost_at(bar_idx: int) -> float:
+        if use_dynamic:
+            return _compute_dynamic_cost(atr_arr, close, volume, bar_idx, exchange)
+        return static_cost_rate
     equity_arr = [capital]
     trades: list[Trade] = []
     in_position = False
@@ -341,6 +419,7 @@ def run_backtest(
     open_prices = df["open"].values.astype(float) if "open" in df.columns else close
 
     for i in range(1, len(close)):
+        cost_rate = _cost_at(i)
         if not in_position:
             if entry_mask[i]:
                 raw_entry = open_prices[i] if i < len(open_prices) else close[i]
@@ -459,7 +538,8 @@ def run_backtest(
             metrics["liquidation_count"] = liq_count
             metrics["liquidation_rate"] = round(liq_count / len(trades) * 100, 1)
 
-    # ─── In-Sample / Out-of-Sample 自動分割 ────────────
+    # ─── In-Sample / Out-of-Sample 時間制分割 ──────────
+    # 數據已按 timestamp 排序，position-based split 即為 time-based split
     oos_metrics = None
     split_idx = int(len(close) * (1 - OOS_RATIO))
     if split_idx > MIN_DATA_POINTS and (len(close) - split_idx) > 30:
@@ -472,6 +552,9 @@ def run_backtest(
             oos_metrics = _compute_metrics(oos_trades, oos_eq, len(close) - split_idx)
             oos_metrics["label"] = "out_of_sample"
             is_metrics["label"] = "in_sample"
+            # 標記分割時間點
+            is_metrics["period"] = f"{timestamps[0]} ~ {timestamps[split_idx - 1]}"
+            oos_metrics["period"] = f"{timestamps[split_idx]} ~ {timestamps[-1]}"
 
     # ─── 風險警告 ──────────────────────────────────────
     warnings = _generate_warnings(metrics, oos_metrics, trades)

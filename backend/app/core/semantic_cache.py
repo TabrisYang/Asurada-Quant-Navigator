@@ -14,7 +14,6 @@
 """
 
 import hashlib
-import shutil
 import sqlite3
 import time
 from datetime import datetime, timedelta
@@ -26,6 +25,7 @@ from loguru import logger
 from app.core.config.settings import settings
 from app.core import embedding_service
 from app.core.symbol_extractor import should_bypass_cache
+from app.core.base_db import BaseDBStore
 
 _HIGH_SIMILARITY_THRESHOLD = 0.92
 _SIMILARITY_THRESHOLD = 0.75
@@ -60,29 +60,18 @@ def _compute_data_fingerprint(
     return hashlib.md5(raw.encode()).hexdigest()[:10]
 
 
-class SemanticCache:
+class SemanticCache(BaseDBStore):
     """基於向量相似度的語意快取"""
 
     def __init__(self):
-        self._db_path = settings.db_path / "semantic_cache.db"
-        self._conn: Optional[sqlite3.Connection] = None
+        super().__init__("semantic_cache.db")
         self._init_db()
 
     def _init_db(self):
         try:
-            old_path = settings.data_path / "semantic_cache.db"
-            if old_path.exists() and old_path.resolve() != self._db_path.resolve():
-                if not self._db_path.exists():
-                    shutil.move(str(old_path), str(self._db_path))
-                    logger.info(f"遷移 DB: semantic_cache.db → {self._db_path}")
-                    for ext in ("-wal", "-shm"):
-                        aux = old_path.parent / f"semantic_cache.db{ext}"
-                        if aux.exists():
-                            shutil.move(str(aux), str(self._db_path.parent / f"semantic_cache.db{ext}"))
-
-            self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA busy_timeout=3000")
+            self._connect()
+            if not self._conn:
+                return
 
             self._conn.execute("""
                 CREATE TABLE IF NOT EXISTS vectors (
@@ -171,35 +160,42 @@ class SemanticCache:
             if not rows:
                 return None
 
-            best_id = None
-            best_sim = 0.0
-            best_answer = ""
-            best_created = 0.0
+            # 預先計算 data fingerprint（若有 chart_state）
+            current_fp = None
+            if chart_state:
+                current_fp = _compute_data_fingerprint(
+                    symbol, timeframe,
+                    chart_state.get("dataPoints", 0),
+                    chart_state.get("priceOverview", {}).get("lastTimestamp", ""),
+                    chart_state.get("priceOverview", {}).get("lastClose", 0.0),
+                )
 
+            # 先過濾不合格的行，再批量做向量運算
+            vec_dim = embedding_service.get_vector_dim()
+            valid_rows = []
+            valid_vecs = []
             for row_id, emb_blob, answer, cached_fp, is_recent, created_at in rows:
                 if is_recent and (now - created_at > _RECENT_TTL):
                     continue
-
-                if cached_fp and chart_state:
-                    current_fp = _compute_data_fingerprint(
-                        symbol, timeframe,
-                        chart_state.get("dataPoints", 0),
-                        chart_state.get("priceOverview", {}).get("lastTimestamp", ""),
-                        chart_state.get("priceOverview", {}).get("lastClose", 0.0),
-                    )
-                    if current_fp != cached_fp:
-                        continue
-
-                cached_vec = np.frombuffer(emb_blob, dtype=np.float32)
-                if cached_vec.shape[0] != embedding_service.get_vector_dim():
+                if cached_fp and current_fp and current_fp != cached_fp:
                     continue
+                cached_vec = np.frombuffer(emb_blob, dtype=np.float32)
+                if cached_vec.shape[0] != vec_dim:
+                    continue
+                valid_rows.append((row_id, answer, created_at))
+                valid_vecs.append(cached_vec)
 
-                sim = embedding_service.cosine_similarity(query_vec, cached_vec)
-                if sim > best_sim:
-                    best_sim = sim
-                    best_id = row_id
-                    best_answer = answer
-                    best_created = created_at
+            if not valid_vecs:
+                return None
+
+            # 批量 cosine similarity（矩陣運算，比逐一計算快 10-50 倍）
+            mat = np.vstack(valid_vecs)                # (N, dim)
+            query_norm = query_vec / (np.linalg.norm(query_vec) + 1e-10)
+            mat_norms = mat / (np.linalg.norm(mat, axis=1, keepdims=True) + 1e-10)
+            sims = mat_norms @ query_norm              # (N,)
+            best_idx = int(np.argmax(sims))
+            best_sim = float(sims[best_idx])
+            best_id, best_answer, best_created = valid_rows[best_idx]
 
             if best_sim < _SIMILARITY_THRESHOLD:
                 return None

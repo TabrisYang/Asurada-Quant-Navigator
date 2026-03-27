@@ -51,10 +51,9 @@ def _vectorized_divergence(price: pd.Series, indicator: pd.Series, lookback: int
     price_range = roll_price_max - roll_price_min
     safe_range = price_range.replace(0, np.nan)
 
-    # 價格在近期低位（低於 15 分位）
-    price_low_pctile = (price - roll_price_min) / safe_range
-    # 價格在近期高位（高於 85 分位）
-    price_high_pctile = price_low_pctile
+    # 價格在近期區間的百分位（0=最低, 1=最高）
+    # 用於底背離 <= 0.15 檢查 與 頂背離 >= 0.85 檢查
+    price_pctile = (price - roll_price_min) / safe_range
 
     # 指標沒有跟隨創新低/新高（5% 容差）
     ind_above_min = indicator > roll_ind_min * 1.05
@@ -63,8 +62,8 @@ def _vectorized_divergence(price: pd.Series, indicator: pd.Series, lookback: int
     valid = indicator.notna() & roll_ind_min.notna()
 
     divergence = pd.Series(0.0, index=price.index)
-    divergence[valid & (price_low_pctile <= 0.15) & ind_above_min] = 1.0
-    divergence[valid & (price_high_pctile >= 0.85) & ind_below_max] = -1.0
+    divergence[valid & (price_pctile <= 0.15) & ind_above_min] = 1.0
+    divergence[valid & (price_pctile >= 0.85) & ind_below_max] = -1.0
 
     return divergence
 

@@ -158,10 +158,11 @@ def compare_models(
                 "reason": str(e),
             })
 
-    # 排序：按 OOS AUC 降序
+    # 排序：綜合 OOS AUC 和 F1-score（各佔 50%）
     successful = [r for r in results if r["status"] == "success"]
     successful.sort(
-        key=lambda r: r["metrics"]["oos_auc"], reverse=True,
+        key=lambda r: (r["metrics"]["oos_auc"] + r["metrics"]["oos_f1"]) / 2,
+        reverse=True,
     )
     other = [r for r in results if r["status"] != "success"]
 
@@ -318,8 +319,12 @@ def _generate_recommendation(successful: list[dict]) -> str:
     best = successful[0]
     acc = best["metrics"]["oos_accuracy"]
     auc = best["metrics"]["oos_auc"]
+    f1 = best["metrics"]["oos_f1"]
+    reliability = best["metrics"].get("reliability_level", "unknown")
     name = best["model_name"]
-    parts = [f"{name} 表現最佳 (OOS AUC={auc:.3f}, Acc={acc:.1%})"]
+    parts = [f"{name} 表現最佳 (OOS AUC={auc:.3f}, F1={f1:.3f}, Acc={acc:.1%}, 可靠性={reliability})"]
+    if reliability in ("low", "unreliable"):
+        parts.append("⚠️ 模型可靠性不足，預測結果僅供參考")
     if len(successful) > 1:
         second = successful[1]
         gap = auc - second["metrics"]["oos_auc"]

@@ -80,6 +80,19 @@ async def update_prediction_note(pred_id: int, body: NoteUpdate):
     return {"status": "success", "id": pred_id}
 
 
+@router.delete("/clear")
+async def clear_predictions(
+    symbol: Optional[str] = Query(None, description="按幣種篩選，不填則清除全部"),
+):
+    """一鍵清除預測紀錄"""
+    count = prediction_tracker.clear_all(symbol=symbol)
+    return {
+        "status": "success",
+        "deleted": count,
+        "message": f"已清除 {count} 筆預測紀錄",
+    }
+
+
 @router.post("/review")
 async def generate_review(body: ReviewRequest):
     """AI 生成覆盤報告

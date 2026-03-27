@@ -100,7 +100,14 @@ class IndicatorRegistry:
             return None
 
         try:
-            return indicator.calculate_func(df, merged_params)
+            result = indicator.calculate_func(df, merged_params)
+            # Warmup 保護：將暖機期間的值設為 None，避免產生不可靠信號
+            if result and warmup > 0:
+                for key, values in result.items():
+                    if isinstance(values, list) and len(values) > warmup:
+                        for i in range(warmup):
+                            values[i] = None
+            return result
         except Exception as e:
             from loguru import logger
             logger.warning(f"指標 {indicator_id} 計算失敗: {e}")

@@ -10,10 +10,12 @@
 import asyncio
 import json
 import re
+import time
 import uuid
+from collections import defaultdict
 from typing import Optional
-from fastapi import APIRouter
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Request
+from fastapi.responses import StreamingResponse, JSONResponse
 from loguru import logger
 
 from app.core.llm.adapter import create_adapter
@@ -46,6 +48,23 @@ router = APIRouter()
 
 # 對話歷史最多保留的訊息數（避免 token 過多）
 MAX_HISTORY_MESSAGES = 20
+
+# ─── 簡易速率限制（每 IP 每分鐘最多 30 次 chat 請求）───
+_RATE_LIMIT_WINDOW = 60  # 秒
+_RATE_LIMIT_MAX = 30     # 每窗口最大請求數
+_rate_limit_store: dict[str, list[float]] = defaultdict(list)
+
+
+def _check_rate_limit(client_ip: str) -> bool:
+    """檢查是否超過速率限制，返回 True 表示允許"""
+    now = time.time()
+    timestamps = _rate_limit_store[client_ip]
+    # 清除過期記錄
+    _rate_limit_store[client_ip] = [t for t in timestamps if now - t < _RATE_LIMIT_WINDOW]
+    if len(_rate_limit_store[client_ip]) >= _RATE_LIMIT_MAX:
+        return False
+    _rate_limit_store[client_ip].append(now)
+    return True
 
 # 指標名稱到 indicator_id 的映射（用於自動偵測 LLM 文字中提到的指標）
 _INDICATOR_TEXT_MAP: dict[str, tuple[str, str]] = {
@@ -738,7 +757,7 @@ async def chat(request: ChatRequest):
 # ─── Streaming 端點（主要對話模式）────────────────
 
 @router.post("/stream")
-async def chat_stream(request: ChatRequest):
+async def chat_stream(request: ChatRequest, raw_request: Request):
     """
     處理 LLM 對話請求（Streaming 模式 + 對話歷史 + Function Call 二輪）
 
@@ -750,6 +769,14 @@ async def chat_stream(request: ChatRequest):
     5. 串流文字、function calls、chart updates、usage
     6. 發送 done 事件
     """
+
+    # 速率限制檢查
+    client_ip = raw_request.client.host if raw_request.client else "unknown"
+    if not _check_rate_limit(client_ip):
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "請求過於頻繁，請稍後再試（每分鐘上限 30 次）"},
+        )
 
     # 安全檢查
     if not check_input_safety(request.message):

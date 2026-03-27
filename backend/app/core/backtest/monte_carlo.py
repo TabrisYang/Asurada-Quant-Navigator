@@ -1,7 +1,10 @@
 """阿斯拉量化系統 — Monte Carlo 模擬
 
-打亂交易順序重新模擬 N 次，產生報酬率和回撤的分佈，
+使用 block bootstrap 重新模擬 N 次，產生報酬率和回撤的分佈，
 用於檢測策略穩定性和評估真實風險。
+
+Block bootstrap 保留連續交易的時序結構（波動率聚集），
+比完全隨機排列更貼近真實市場行為。
 """
 
 import numpy as np
@@ -13,14 +16,16 @@ def run_monte_carlo(
     initial_capital: float = 10000.0,
     n_simulations: int = 1000,
     confidence_levels: Optional[list[float]] = None,
+    block_size: int = 5,
 ) -> dict:
-    """執行 Monte Carlo 模擬。
+    """執行 Monte Carlo 模擬（Block Bootstrap）。
 
     Args:
         trade_pnl_pcts: 每筆交易的盈虧百分比列表（如 [0.05, -0.02, 0.08, ...]）
         initial_capital: 初始資金
         n_simulations: 模擬次數
         confidence_levels: 信賴區間（預設 [0.05, 0.25, 0.50, 0.75, 0.95]）
+        block_size: block bootstrap 的區塊大小（保留連續 N 筆交易的時序結構）
 
     Returns:
         dict: 包含分佈統計、信賴區間、破產機率等
@@ -37,12 +42,19 @@ def run_monte_carlo(
     pnls = np.array(trade_pnl_pcts)
     n_trades = len(pnls)
 
+    # Block bootstrap：將交易序列切成區塊，洗牌區塊順序（保留區塊內時序）
+    actual_block_size = min(block_size, max(1, n_trades // 3))
+    n_blocks = int(np.ceil(n_trades / actual_block_size))
+
     final_returns = np.empty(n_simulations)
     max_drawdowns = np.empty(n_simulations)
     ruin_count = 0
 
     for i in range(n_simulations):
-        shuffled = np.random.permutation(pnls)
+        # 隨機抽取 n_blocks 個區塊（有放回抽樣），拼接成完整序列
+        block_starts = np.random.randint(0, n_trades - actual_block_size + 1, size=n_blocks)
+        blocks = [pnls[s:s + actual_block_size] for s in block_starts]
+        shuffled = np.concatenate(blocks)[:n_trades]
 
         equity = np.empty(n_trades + 1)
         equity[0] = initial_capital

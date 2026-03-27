@@ -55,6 +55,8 @@ class CryptoDataEngine:
         self._metadata_path = self.data_dir / "sync_metadata.json"
         # 同步進度回呼（供 data_sync 路由使用）
         self._progress_callback: Optional[Callable] = None
+        # 每交易所並行限制（避免觸發 rate limit）
+        self._exchange_semaphores: dict[str, asyncio.Semaphore] = {}
 
     # ─────────────────────────────────────────────
     # 交易所管理
@@ -89,6 +91,15 @@ class CryptoDataEngine:
             except Exception:
                 pass
         self.exchanges.clear()
+
+    def _get_semaphore(self, exchange_id: str) -> asyncio.Semaphore:
+        """取得交易所專屬 semaphore（限制並行請求數）"""
+        if exchange_id not in self._exchange_semaphores:
+            # 根據 rate limit 設定並行度：delay 越大，並行度越低
+            delay = settings.exchange_rate_limits.get(exchange_id, 0.3)
+            max_concurrent = max(1, int(1.0 / delay))  # 0.2s → 5 並發, 0.3s → 3 並發
+            self._exchange_semaphores[exchange_id] = asyncio.Semaphore(max_concurrent)
+        return self._exchange_semaphores[exchange_id]
 
     # ─────────────────────────────────────────────
     # 數據抓取（含重試）
@@ -471,16 +482,19 @@ class CryptoDataEngine:
             range_end_str = datetime.utcfromtimestamp(range_end_ms / 1000).strftime('%Y-%m-%d')
             _report(f"時間段 {range_idx+1}/{len(fetch_ranges)}: {range_start_str} ~ {range_end_str}")
 
-            for i, exchange_id in enumerate(exchanges):
-                _report(f"  正在從 {exchange_id} 抓取 {symbol} {timeframe}... ({i+1}/{len(exchanges)})")
+            async def _fetch_exchange_all_pages(exchange_id: str) -> Optional[pd.DataFrame]:
+                """從單一交易所抓取所有分頁數據（受 semaphore 保護）"""
+                sem = self._get_semaphore(exchange_id)
+                _report(f"  正在從 {exchange_id} 抓取 {symbol} {timeframe}...")
                 current_since = range_since_ms
                 exchange_data = []
 
                 while current_since < range_end_ms:
-                    df = await self._fetch_from_exchange(
-                        exchange_id, symbol, timeframe, current_since,
-                        limit=settings.max_bars_per_request
-                    )
+                    async with sem:
+                        df = await self._fetch_from_exchange(
+                            exchange_id, symbol, timeframe, current_since,
+                            limit=settings.max_bars_per_request
+                        )
                     if df is None or df.empty:
                         break
 
@@ -493,10 +507,20 @@ class CryptoDataEngine:
 
                 if exchange_data:
                     combined = pd.concat(exchange_data, ignore_index=True)
-                    all_data.append(combined)
                     _report(f"    {exchange_id}: {len(combined)} 筆數據")
+                    return combined
+                return None
 
-                await asyncio.sleep(settings.exchange_switch_delay)
+            # 所有交易所並行抓取
+            results = await asyncio.gather(
+                *[_fetch_exchange_all_pages(eid) for eid in exchanges],
+                return_exceptions=True,
+            )
+            for result in results:
+                if isinstance(result, pd.DataFrame):
+                    all_data.append(result)
+                elif isinstance(result, Exception):
+                    logger.warning(f"交易所抓取異常: {result}")
 
         if not all_data:
             if existing_df is not None and not existing_df.empty:

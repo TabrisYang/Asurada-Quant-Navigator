@@ -30,9 +30,30 @@ class TrainResult:
     extra: dict[str, Any] = field(default_factory=dict)
 
     @property
+    def reliability_level(self) -> str:
+        """模型可靠性分級：high / medium / low / unreliable
+
+        - high:       OOS 準確率 > 55% 且樣本 ≥ 100
+        - medium:     OOS 準確率 > 55% 且樣本 ≥ 50，或 F1 > 0.55
+        - low:        OOS 準確率 52-55% 且樣本 ≥ 30（僅供參考）
+        - unreliable: 不達標
+        """
+        acc = self.oos_accuracy
+        f1 = self.oos_f1
+        n = self.n_oos_samples
+
+        if acc > 0.55 and n >= 100:
+            return "high"
+        if (acc > 0.55 and n >= 50) or (f1 > 0.55 and n >= 50):
+            return "medium"
+        if acc > 0.52 and n >= 30:
+            return "low"
+        return "unreliable"
+
+    @property
     def is_reliable(self) -> bool:
-        """OOS 準確率 > 52% 且樣本充足才視為可靠"""
-        return self.oos_accuracy > 0.52 and self.n_oos_samples >= 30
+        """向後相容：reliability_level 不為 unreliable 即視為可靠"""
+        return self.reliability_level != "unreliable"
 
     def to_dict(self) -> dict:
         return {
@@ -49,6 +70,7 @@ class TrainResult:
             "n_oos_samples": self.n_oos_samples,
             "train_time_ms": self.train_time_ms,
             "is_reliable": self.is_reliable,
+            "reliability_level": self.reliability_level,
         }
 
 

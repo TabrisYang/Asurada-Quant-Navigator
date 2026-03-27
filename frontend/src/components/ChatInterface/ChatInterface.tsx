@@ -110,7 +110,7 @@ export default function ChatInterface() {
       const data = await fetchChatHistory(15);
       setHistoryList(data.conversations || []);
     } catch {
-      // 靜默失敗
+      toast('載入對話歷史失敗', 'warning');
     } finally {
       setHistoryLoading(false);
     }
@@ -127,7 +127,7 @@ export default function ChatInterface() {
       setKnowledgeTotal(data.total || 0);
       setKnowledgeSymbols(data.symbols || []);
       setKnowledgeTypes(data.types || []);
-    } catch { /* silent */ }
+    } catch { toast('載入知識碎片失敗', 'warning'); }
     finally { setKnowledgeLoading(false); }
   }, []);
 
@@ -136,7 +136,7 @@ export default function ChatInterface() {
       await deleteFragment(id);
       setKnowledgeFragments(prev => prev.filter(f => f.id !== id));
       setKnowledgeTotal(prev => Math.max(0, prev - 1));
-    } catch { /* silent */ }
+    } catch { toast('刪除知識碎片失敗', 'error'); }
   }, []);
 
   // 恢復歷史對話
@@ -161,7 +161,7 @@ export default function ChatInterface() {
         setShowHistoryPanel(false);
       }
     } catch {
-      // 靜默失敗
+      toast('恢復對話失敗', 'error');
     }
   }, []);
 

@@ -1,17 +1,30 @@
 /** 阿斯拉量化系統 — 主應用組件 */
 
-import { Component, useState, useEffect, useRef } from 'react';
+import { Component, useState, useEffect, useRef, lazy, Suspense } from 'react';
 import type { ReactNode, ErrorInfo } from 'react';
-import ChartView from './components/ChartView/ChartView';
-import ChatInterface from './components/ChatInterface/ChatInterface';
-import IndicatorPanel from './components/IndicatorPanel/IndicatorPanel';
-import SettingsPanel from './components/SettingsPanel/SettingsPanel';
-import SyncPanel from './components/SyncPanel/SyncPanel';
 import TopBar from './components/TopBar';
 import OnboardingGuide, { useOnboarding } from './components/OnboardingGuide';
 import { ToastContainer } from './components/Toast';
 import { useChartStore } from './stores/chartStore';
 import { calculateIndicator } from './services/api';
+
+// Lazy load 重量級元件（Code Splitting）
+const ChartView = lazy(() => import('./components/ChartView/ChartView'));
+const ChatInterface = lazy(() => import('./components/ChatInterface/ChatInterface'));
+const IndicatorPanel = lazy(() => import('./components/IndicatorPanel/IndicatorPanel'));
+const SettingsPanel = lazy(() => import('./components/SettingsPanel/SettingsPanel'));
+const SyncPanel = lazy(() => import('./components/SyncPanel/SyncPanel'));
+
+// 共用載入骨架
+function LoadingSkeleton({ name }: { name: string }) {
+  return (
+    <div className="flex items-center justify-center h-full" style={{ background: 'var(--bg-secondary)' }}>
+      <span style={{ color: 'var(--text-secondary)', fontSize: '12px' }}>
+        {name} 載入中...
+      </span>
+    </div>
+  );
+}
 
 // ─── ErrorBoundary：捕獲子組件錯誤，避免整頁白屏/黑屏 ───
 interface EBProps { children: ReactNode; name: string }
@@ -137,7 +150,9 @@ function App() {
             }}
           >
             <ErrorBoundary name="指標面板">
-              <IndicatorPanel />
+              <Suspense fallback={<LoadingSkeleton name="指標面板" />}>
+                <IndicatorPanel />
+              </Suspense>
             </ErrorBoundary>
           </div>
         )}
@@ -145,7 +160,9 @@ function App() {
         {/* 中間：K 線圖表 */}
         <div data-guide="chart" className="flex-1 flex flex-col overflow-hidden">
           <ErrorBoundary name="K 線圖表">
-            <ChartView />
+            <Suspense fallback={<LoadingSkeleton name="K 線圖表" />}>
+              <ChartView />
+            </Suspense>
           </ErrorBoundary>
         </div>
 
@@ -162,7 +179,9 @@ function App() {
             }}
           >
             <ErrorBoundary name="AI 助手">
-              <ChatInterface />
+              <Suspense fallback={<LoadingSkeleton name="AI 助手" />}>
+                <ChatInterface />
+              </Suspense>
             </ErrorBoundary>
           </div>
         )}
@@ -206,14 +225,18 @@ function App() {
       {/* 設定面板（Modal） */}
       {showSettings && (
         <ErrorBoundary name="設定面板">
-          <SettingsPanel onClose={() => setShowSettings(false)} />
+          <Suspense fallback={<LoadingSkeleton name="設定面板" />}>
+            <SettingsPanel onClose={() => setShowSettings(false)} />
+          </Suspense>
         </ErrorBoundary>
       )}
 
       {/* 數據同步面板（Modal） */}
       {showSyncPanel && (
         <ErrorBoundary name="數據同步">
-          <SyncPanel />
+          <Suspense fallback={<LoadingSkeleton name="數據同步" />}>
+            <SyncPanel />
+          </Suspense>
         </ErrorBoundary>
       )}
 

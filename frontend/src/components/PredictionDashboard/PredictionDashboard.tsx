@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useChartStore } from '../../stores/chartStore';
 import {
   fetchPredictionStats, fetchActivePredictions, fetchPredictionHistory,
-  updatePredictionNote, generateReview,
+  updatePredictionNote, generateReview, clearPredictions,
 } from '../../services/api';
 
 interface PredictionItem {
@@ -18,9 +18,21 @@ interface PredictionItem {
   regime: string;
   indicators: string;
   created_at: string;
+  validated_at?: string;
   status: string;
   actual_outcome_pct: number | null;
   notes?: string;
+}
+
+/** 格式化 ISO 時間為台北時區 MM/DD HH:mm */
+function fmtTime(iso: string): string {
+  const d = new Date(iso);
+  return d.toLocaleString('zh-TW', {
+    timeZone: 'Asia/Taipei',
+    month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit',
+    hour12: false,
+  });
 }
 
 export default function PredictionDashboard() {
@@ -123,7 +135,7 @@ export default function PredictionDashboard() {
     return <div className="text-center py-8" style={{ color: 'var(--text-secondary)' }}>載入預測資料中...</div>;
   }
 
-  const totalPreds = stats?.total_predictions ?? 0;
+  const totalPreds = stats?.total ?? 0;
 
   return (
     <div className="space-y-4">
@@ -132,8 +144,8 @@ export default function PredictionDashboard() {
         <StatCard label="總預測數" value={totalPreds} />
         <StatCard
           label="加權勝率"
-          value={stats?.weighted_win_rate != null ? `${(stats.weighted_win_rate * 100).toFixed(1)}%` : 'N/A'}
-          color={stats?.weighted_win_rate >= 0.5 ? '#4ade80' : '#f87171'}
+          value={stats?.win_rate_weighted != null ? `${stats.win_rate_weighted.toFixed(1)}%` : 'N/A'}
+          color={stats?.win_rate_weighted >= 50 ? '#4ade80' : '#f87171'}
         />
         <StatCard label="命中目標" value={stats?.hit_target ?? 0} color="#4ade80" />
         <StatCard label="觸及止損" value={stats?.hit_stop ?? 0} color="#f87171" />
@@ -146,10 +158,10 @@ export default function PredictionDashboard() {
             <div className="text-xs mb-1" style={{ color: 'var(--text-secondary)' }}>做多勝率</div>
             <div className="text-lg font-bold" style={{ color: '#4ade80' }}>
               {directionStats.long?.win_rate != null
-                ? `${(directionStats.long.win_rate * 100).toFixed(1)}%`
+                ? `${directionStats.long.win_rate.toFixed(1)}%`
                 : 'N/A'}
               <span className="text-xs font-normal ml-1" style={{ color: 'var(--text-secondary)' }}>
-                ({directionStats.long?.total ?? 0} 筆)
+                ({directionStats.long?.samples ?? 0} 筆)
               </span>
             </div>
           </div>
@@ -157,10 +169,10 @@ export default function PredictionDashboard() {
             <div className="text-xs mb-1" style={{ color: 'var(--text-secondary)' }}>做空勝率</div>
             <div className="text-lg font-bold" style={{ color: '#f87171' }}>
               {directionStats.short?.win_rate != null
-                ? `${(directionStats.short.win_rate * 100).toFixed(1)}%`
+                ? `${directionStats.short.win_rate.toFixed(1)}%`
                 : 'N/A'}
               <span className="text-xs font-normal ml-1" style={{ color: 'var(--text-secondary)' }}>
-                ({directionStats.short?.total ?? 0} 筆)
+                ({directionStats.short?.samples ?? 0} 筆)
               </span>
             </div>
           </div>
@@ -228,7 +240,7 @@ export default function PredictionDashboard() {
                     </div>
                   )}
                   <div className="mt-1" style={{ color: 'var(--text-secondary)' }}>
-                    指標: {pred.indicators} | {pred.regime} | {new Date(pred.created_at).toLocaleDateString()}
+                    指標: {pred.indicators} | {pred.regime} | 入場: {fmtTime(pred.created_at)}
                   </div>
                   {/* 筆記區 */}
                   {editingNoteId === pred.id ? (
@@ -310,7 +322,10 @@ export default function PredictionDashboard() {
                   </div>
                 </div>
                 <div className="mt-1" style={{ color: 'var(--text-secondary)' }}>
-                  {pred.indicators} | {pred.regime} | {new Date(pred.created_at).toLocaleDateString()}
+                  {pred.indicators} | {pred.regime}
+                </div>
+                <div className="mt-0.5" style={{ color: 'var(--text-secondary)' }}>
+                  入場: {fmtTime(pred.created_at)}{pred.validated_at ? ` | 出場: ${fmtTime(pred.validated_at)}` : ''}
                 </div>
                 {/* 筆記區 */}
                 {editingNoteId === pred.id ? (
@@ -381,8 +396,8 @@ export default function PredictionDashboard() {
                   .map(([name, data]) => (
                     <tr key={name} style={{ borderTop: '1px solid var(--border-primary)' }}>
                       <td className="py-1.5" style={{ color: 'var(--text-primary)' }}>{name}</td>
-                      <td className="text-right py-1.5" style={{ color: data.win_rate >= 0.5 ? '#4ade80' : '#f87171' }}>
-                        {(data.win_rate * 100).toFixed(1)}%
+                      <td className="text-right py-1.5" style={{ color: data.win_rate >= 50 ? '#4ade80' : '#f87171' }}>
+                        {data.win_rate.toFixed(1)}%
                       </td>
                       <td className="text-right py-1.5" style={{ color: 'var(--text-secondary)' }}>
                         {data.samples}
@@ -415,6 +430,21 @@ export default function PredictionDashboard() {
           style={{ color: 'var(--accent-blue)', background: 'transparent' }}
         >
           重新載入
+        </button>
+        <button
+          onClick={async () => {
+            if (!confirm('確定要清除所有預測紀錄嗎？此操作無法復原。')) return;
+            try {
+              await clearPredictions();
+              loadData();
+            } catch (e: any) {
+              alert(`清除失敗: ${e?.response?.data?.detail || e?.message || '請確認後端已重啟'}`);
+            }
+          }}
+          className="text-xs px-3 py-1 rounded"
+          style={{ color: '#f87171', background: 'transparent' }}
+        >
+          清除全部紀錄
         </button>
       </div>
 

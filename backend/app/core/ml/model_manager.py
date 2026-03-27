@@ -125,13 +125,21 @@ class ModelManager:
                 )
             """)
             self._conn.commit()
+
+            # Migration: 新增 MFE/MAE 欄位（相容已存在的 DB）
+            for col in ("mfe_pct REAL", "mae_pct REAL"):
+                try:
+                    self._conn.execute(f"ALTER TABLE ml_predictions_log ADD COLUMN {col}")
+                except Exception:
+                    pass  # 欄位已存在
+            self._conn.commit()
         except Exception as e:
             logger.error(f"ML DB 初始化失敗: {e}")
 
     # ─── 設定管理 ──────────────────────────────
 
-    def get_settings(self) -> dict:
-        """取得使用者 ML 設定"""
+    def get_settings(self, symbol: str | None = None) -> dict:
+        """取得使用者 ML 設定（支援 per-symbol 覆蓋）"""
         result = dict(DEFAULT_ML_SETTINGS)
         try:
             rows = self._conn.execute("SELECT key, value FROM ml_settings").fetchall()
@@ -148,12 +156,27 @@ class ModelManager:
                         result[key] = float(val)
                     else:
                         result[key] = val
+
+            # per-symbol 覆蓋：key 格式 "model_id:{symbol}" 優先於全域 model_id
+            if symbol:
+                per_key = f"model_id:{symbol}"
+                row = self._conn.execute(
+                    "SELECT value FROM ml_settings WHERE key = ?", (per_key,),
+                ).fetchone()
+                if row:
+                    result["model_id"] = row["value"]
+                    result["_per_symbol"] = True
+
         except Exception as e:
             logger.debug(f"讀取 ML 設定失敗: {e}")
         return result
 
-    def update_settings(self, updates: dict) -> dict:
-        """更新使用者 ML 設定（含護欄驗證）"""
+    def update_settings(self, updates: dict, symbol: str | None = None) -> dict:
+        """更新使用者 ML 設定（含護欄驗證，支援 per-symbol）
+
+        若提供 symbol，則 model_id 會存為 "model_id:{symbol}" 鍵，
+        其餘設定仍存為全域。
+        """
         now = datetime.now().isoformat()
         warnings = []
 
@@ -171,14 +194,16 @@ class ModelManager:
                         val = hi
                         warnings.append(f"{key} 已調整至最大值 {hi}")
 
+            # per-symbol model_id
+            db_key = f"model_id:{symbol}" if (symbol and key == "model_id") else key
             self._conn.execute(
                 "INSERT OR REPLACE INTO ml_settings (key, value, updated_at) VALUES (?, ?, ?)",
-                (key, str(val), now),
+                (db_key, str(val), now),
             )
 
         self._conn.commit()
 
-        current = self.get_settings()
+        current = self.get_settings(symbol=symbol)
         if warnings:
             current["_warnings"] = warnings
         return current
@@ -420,7 +445,7 @@ class ModelManager:
         model_id: str | None = None,
     ) -> dict:
         """用已訓練的模型預測最新數據"""
-        user_settings = self.get_settings()
+        user_settings = self.get_settings(symbol=symbol)
         mid = model_id or user_settings["model_id"]
         threshold = user_settings["threshold"]
         feature_set = user_settings["feature_set"]
@@ -492,7 +517,7 @@ class ModelManager:
         - best: 從該 symbol/timeframe 所有已訓練模型中選 OOS AUC 最高的
         - vote / weighted_avg: 載入所有已訓練模型各自預測，再彙整
         """
-        user_settings = self.get_settings()
+        user_settings = self.get_settings(symbol=symbol)
         mode = user_settings["consensus_mode"]
 
         trained = self._get_distinct_trained_model_ids(symbol, timeframe)
@@ -571,6 +596,338 @@ class ModelManager:
             (symbol, timeframe),
         )
         self._conn.commit()
+
+    def _get_model_score(self, symbol: str, timeframe: str, model_id: str) -> float:
+        """取得模型的綜合評分 (oos_auc + oos_f1) / 2，用於冠軍挑戰者比較"""
+        row = self._conn.execute(
+            """SELECT oos_auc, oos_f1 FROM ml_models
+               WHERE symbol=? AND timeframe=? AND model_id=?
+               ORDER BY created_at DESC LIMIT 1""",
+            (symbol, timeframe, model_id),
+        ).fetchone()
+        if not row:
+            return 0.0
+        auc = row["oos_auc"] or 0.0
+        f1 = row["oos_f1"] or 0.0
+        return (auc + f1) / 2
+
+    def _rollback_latest_model(self, symbol: str, timeframe: str, model_id: str):
+        """刪除最新訓練的模型記錄和磁碟檔案（冠軍挑戰者：挑戰者落敗時使用）"""
+        row = self._conn.execute(
+            """SELECT id, model_path FROM ml_models
+               WHERE symbol=? AND timeframe=? AND model_id=?
+               ORDER BY created_at DESC LIMIT 1""",
+            (symbol, timeframe, model_id),
+        ).fetchone()
+        if not row:
+            return
+        # 刪除 DB 記錄
+        self._conn.execute("DELETE FROM ml_models WHERE id=?", (row["id"],))
+        self._conn.commit()
+        # 刪除磁碟檔案（若存在）
+        model_path = Path(row["model_path"]) if row["model_path"] else None
+        if model_path and model_path.exists():
+            shutil.rmtree(model_path, ignore_errors=True)
+
+    def auto_retrain_if_needed(
+        self, symbol: str, timeframe: str, df,
+    ) -> list[dict]:
+        """檢查是否需要自動重訓，採用冠軍挑戰者機制
+
+        在數據同步後呼叫。僅在 enable_mode != "off" 時生效。
+        訓練完成後比較新舊模型指標，只有新模型更好才保留。
+
+        Returns:
+            list of retrain results (可能為空)
+        """
+        user_settings = self.get_settings()
+        if user_settings["enabled"] == "off":
+            return []
+
+        trained_ids = self._get_distinct_trained_model_ids(symbol, timeframe)
+        if not trained_ids:
+            return []
+
+        results = []
+        for mid in trained_ids:
+            if self.should_retrain(symbol, timeframe, mid):
+                logger.info(f"自動重訓觸發: {symbol}/{timeframe}/{mid}")
+
+                # 記錄舊冠軍的分數
+                old_score = self._get_model_score(symbol, timeframe, mid)
+
+                try:
+                    result = self.train_model(df, symbol, timeframe, model_id=mid)
+                    result["auto_retrain"] = True
+
+                    if result.get("status") == "success":
+                        # 冠軍挑戰者比較
+                        new_score = self._get_model_score(symbol, timeframe, mid)
+
+                        if old_score > 0 and new_score < old_score:
+                            # 挑戰者落敗 — 回滾
+                            self._rollback_latest_model(symbol, timeframe, mid)
+                            result["champion_replaced"] = False
+                            result["champion_note"] = (
+                                f"新模型分數 {new_score:.4f} < 舊模型 {old_score:.4f}，"
+                                f"已回滾保留舊模型"
+                            )
+                            logger.info(
+                                f"冠軍挑戰者: {mid} 挑戰失敗 "
+                                f"(new={new_score:.4f} < old={old_score:.4f})，已回滾"
+                            )
+                        else:
+                            result["champion_replaced"] = True
+                            result["champion_note"] = (
+                                f"新模型分數 {new_score:.4f} >= 舊模型 {old_score:.4f}，"
+                                f"已替換為新冠軍"
+                            )
+                            logger.info(
+                                f"冠軍挑戰者: {mid} 新冠軍 "
+                                f"(new={new_score:.4f} >= old={old_score:.4f})"
+                            )
+                    else:
+                        logger.warning(f"自動重訓結果: {mid} → {result.get('status')}")
+
+                    results.append(result)
+                except Exception as e:
+                    logger.error(f"自動重訓失敗: {mid} — {e}")
+                    results.append({"model_id": mid, "status": "error", "message": str(e)})
+        return results
+
+    # ─── 預測驗證 ──────────────────────────
+
+    def validate_ml_predictions(self, symbol: str, timeframe: str, df) -> int:
+        """驗證已過期但未驗證的 ML 預測
+
+        比對預測時的價格與 forward_period bars 後的實際價格，
+        填入 actual_outcome 和 validated_at。
+
+        Returns:
+            驗證的預測數量
+        """
+        user_settings = self.get_settings()
+        forward_period = user_settings["forward_period"]
+
+        # 找出未驗證的預測
+        rows = self._conn.execute(
+            """SELECT id, direction, probability, predicted_at
+               FROM ml_predictions_log
+               WHERE symbol=? AND timeframe=? AND actual_outcome IS NULL
+               ORDER BY predicted_at ASC""",
+            (symbol, timeframe),
+        ).fetchall()
+
+        if not rows or df is None or len(df) == 0:
+            return 0
+
+        # 建立時間索引用於查找
+        if "timestamp" in df.columns:
+            timestamps = df["timestamp"].tolist()
+        elif "date" in df.columns:
+            timestamps = df["date"].tolist()
+        else:
+            timestamps = list(range(len(df)))
+
+        close_prices = df["close"].tolist() if "close" in df.columns else []
+        high_prices = df["high"].tolist() if "high" in df.columns else close_prices
+        low_prices = df["low"].tolist() if "low" in df.columns else close_prices
+        if not close_prices:
+            return 0
+
+        validated = 0
+        now_str = datetime.now().isoformat()
+
+        for row in rows:
+            predicted_at = row["predicted_at"]
+
+            # 找到預測時間點在 df 中的位置
+            pred_idx = None
+            try:
+                pred_dt = datetime.fromisoformat(predicted_at)
+                for i, ts in enumerate(timestamps):
+                    if isinstance(ts, (int, float)):
+                        bar_dt = datetime.fromtimestamp(ts / 1000 if ts > 1e12 else ts)
+                    else:
+                        bar_dt = datetime.fromisoformat(str(ts))
+                    if bar_dt >= pred_dt:
+                        pred_idx = i
+                        break
+            except (ValueError, TypeError):
+                continue
+
+            if pred_idx is None:
+                continue
+
+            target_idx = pred_idx + forward_period
+            if target_idx >= len(close_prices):
+                continue
+
+            entry_price = close_prices[pred_idx]
+            exit_price = close_prices[target_idx]
+
+            if entry_price <= 0:
+                continue
+
+            # 計算實際漲跌幅 %
+            actual_pct = ((exit_price - entry_price) / entry_price) * 100
+
+            # 計算 MFE/MAE（參考 prediction_validator.py 邏輯）
+            window_highs = high_prices[pred_idx:target_idx + 1]
+            window_lows = low_prices[pred_idx:target_idx + 1]
+            direction = row["direction"]
+
+            if direction == "long":
+                mfe_pct = ((max(window_highs) - entry_price) / entry_price) * 100
+                mae_pct = ((min(window_lows) - entry_price) / entry_price) * 100
+            elif direction == "short":
+                mfe_pct = ((entry_price - min(window_lows)) / entry_price) * 100
+                mae_pct = ((entry_price - max(window_highs)) / entry_price) * 100
+            else:
+                mfe_pct = 0.0
+                mae_pct = 0.0
+
+            self._conn.execute(
+                """UPDATE ml_predictions_log
+                   SET actual_outcome=?, validated_at=?, mfe_pct=?, mae_pct=?
+                   WHERE id=?""",
+                (round(actual_pct, 4), now_str, round(mfe_pct, 4), round(mae_pct, 4), row["id"]),
+            )
+            validated += 1
+
+        if validated > 0:
+            self._conn.commit()
+            logger.info(f"已驗證 {validated} 筆 ML 預測 ({symbol}/{timeframe})")
+
+        return validated
+
+    @staticmethod
+    def _wilson_interval(successes: int, total: int, z: float = 1.96) -> tuple[float, float]:
+        """Wilson score 信心區間（95%）"""
+        if total == 0:
+            return (0.0, 0.0)
+        p = successes / total
+        denom = 1 + z * z / total
+        center = (p + z * z / (2 * total)) / denom
+        margin = z * ((p * (1 - p) / total + z * z / (4 * total * total)) ** 0.5) / denom
+        return (round(max(center - margin, 0), 4), round(min(center + margin, 1), 4))
+
+    def get_prediction_accuracy(
+        self, symbol: str | None = None, model_id: str | None = None, limit: int = 200,
+    ) -> dict:
+        """取得 ML 預測準確率統計（支援按模型篩選、MFE/MAE、信心區間）"""
+        # 動態 WHERE 構建
+        conditions = ["actual_outcome IS NOT NULL"]
+        params: list = []
+        count_conditions = []
+        count_params: list = []
+
+        if symbol:
+            conditions.append("symbol=?")
+            params.append(symbol)
+            count_conditions.append("symbol=?")
+            count_params.append(symbol)
+        if model_id:
+            conditions.append("model_id=?")
+            params.append(model_id)
+            count_conditions.append("model_id=?")
+            count_params.append(model_id)
+
+        where = " AND ".join(conditions)
+        params.append(limit)
+
+        rows = self._conn.execute(
+            f"""SELECT model_id, direction, probability, actual_outcome, mfe_pct, mae_pct
+                FROM ml_predictions_log
+                WHERE {where}
+                ORDER BY predicted_at DESC LIMIT ?""",
+            params,
+        ).fetchall()
+
+        count_where = " AND ".join(count_conditions) if count_conditions else "1=1"
+        total_row = self._conn.execute(
+            f"SELECT COUNT(*) as cnt FROM ml_predictions_log WHERE {count_where}",
+            count_params,
+        ).fetchone()
+
+        total = total_row["cnt"] if total_row else 0
+        validated = len(rows)
+
+        if validated == 0:
+            return {
+                "total_predictions": total,
+                "validated": 0,
+                "direction_accuracy": None,
+                "avg_outcome_pct": None,
+                "message": "尚無已驗證的預測",
+            }
+
+        # 整體統計
+        correct = 0
+        outcomes = []
+        mfe_list = []
+        mae_list = []
+        by_model: dict[str, dict] = {}
+
+        for r in rows:
+            outcome = r["actual_outcome"]
+            outcomes.append(outcome)
+            mid = r["model_id"]
+
+            is_correct = (
+                (r["direction"] == "long" and outcome > 0)
+                or (r["direction"] == "short" and outcome < 0)
+            )
+            if is_correct:
+                correct += 1
+
+            if r["mfe_pct"] is not None:
+                mfe_list.append(r["mfe_pct"])
+            if r["mae_pct"] is not None:
+                mae_list.append(r["mae_pct"])
+
+            # 按模型分組
+            if mid not in by_model:
+                by_model[mid] = {"correct": 0, "total": 0, "outcomes": []}
+            by_model[mid]["total"] += 1
+            by_model[mid]["outcomes"].append(outcome)
+            if is_correct:
+                by_model[mid]["correct"] += 1
+
+        direction_accuracy = correct / validated
+        avg_outcome = sum(outcomes) / len(outcomes)
+        ci_low, ci_high = self._wilson_interval(correct, validated)
+
+        result = {
+            "total_predictions": total,
+            "validated": validated,
+            "direction_accuracy": round(direction_accuracy, 4),
+            "confidence_interval": [ci_low, ci_high],
+            "avg_outcome_pct": round(avg_outcome, 4),
+            "correct_count": correct,
+        }
+
+        if mfe_list:
+            result["avg_mfe_pct"] = round(sum(mfe_list) / len(mfe_list), 4)
+        if mae_list:
+            result["avg_mae_pct"] = round(sum(mae_list) / len(mae_list), 4)
+
+        # 按模型分組統計
+        model_stats = []
+        for mid, stats in by_model.items():
+            m_acc = stats["correct"] / stats["total"] if stats["total"] > 0 else 0
+            m_ci = self._wilson_interval(stats["correct"], stats["total"])
+            model_stats.append({
+                "model_id": mid,
+                "correct": stats["correct"],
+                "total": stats["total"],
+                "accuracy": round(m_acc, 4),
+                "confidence_interval": list(m_ci),
+                "avg_outcome_pct": round(sum(stats["outcomes"]) / len(stats["outcomes"]), 4),
+            })
+        result["by_model"] = sorted(model_stats, key=lambda x: x["accuracy"], reverse=True)
+
+        return result
 
     def get_model_status(
         self, symbol: str, timeframe: str, model_id: str | None = None,

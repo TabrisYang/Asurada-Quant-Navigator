@@ -8,8 +8,9 @@ import { useChartStore } from '../../stores/chartStore';
 import {
   fetchMLModels, fetchMLSettings, updateMLSettings,
   trainMLModel, compareMLModels, predictML,
-  fetchMLStatus, fetchTrainedModels,
+  fetchTrainedModels,
   fetchMLPerformanceHistory, checkMLHealth,
+  fetchMLPredictionAccuracy,
   type MLModel, type MLSettings,
 } from '../../services/api';
 
@@ -62,6 +63,18 @@ type SubTab = 'settings' | 'train' | 'compare' | 'status' | 'monitor';
 
 export default function MLPanel() {
   const [subTab, setSubTab] = useState<SubTab>('settings');
+  const [showGuide, setShowGuide] = useState(() => {
+    return localStorage.getItem('asura_ml_guide_dismissed') !== 'true';
+  });
+  const [hasModels, setHasModels] = useState<boolean | null>(null);
+  const [expandedStep, setExpandedStep] = useState<number | null>(null);
+
+  // 檢查是否有已訓練模型
+  useEffect(() => {
+    fetchTrainedModels().then((res) => {
+      setHasModels((res.models || []).length > 0);
+    }).catch(() => setHasModels(false));
+  }, []);
 
   const tabs: { key: SubTab; label: string }[] = [
     { key: 'settings', label: '設定' },
@@ -73,6 +86,63 @@ export default function MLPanel() {
 
   return (
     <div>
+      {/* 新手引導卡片 */}
+      {showGuide && hasModels === false && (
+        <div style={{
+          padding: '12px 14px', borderRadius: 8, marginBottom: 14,
+          background: 'rgba(88,166,255,0.08)', border: '1px solid rgba(88,166,255,0.25)',
+          fontSize: 12, lineHeight: 1.7,
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+            <span style={{ fontWeight: 700, color: 'var(--accent-blue)', fontSize: 13 }}>
+              ML 模型使用指南
+            </span>
+            <button
+              onClick={() => { setShowGuide(false); localStorage.setItem('asura_ml_guide_dismissed', 'true'); }}
+              style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 14 }}
+            >x</button>
+          </div>
+          <div style={{ color: 'var(--text-primary)' }}>
+            {[
+              { title: 'Step 1 — 先到「同步」面板抓取至少 90 天的歷史數據（建議 180 天以上）',
+                why: 'ML 模型需要足夠的歷史樣本才能學到有意義的模式。樣本太少會導致過擬合（模型背住歷史但無法預測未來）。180 天以上能覆蓋多種市場狀態（趨勢/盤整/反轉），讓模型更穩健。' },
+              { title: 'Step 2 — 切到「模型比較」分頁，一鍵訓練全部模型，系統會自動找出最佳模型',
+                why: '不同模型（LightGBM、XGBoost、RF、LSTM 等）擅長捕捉不同的市場特徵。透過同時比較所有模型的 OOS（樣本外）表現，避免只依賴單一演算法的偏差，找到最適合當前幣對的模型。' },
+              { title: 'Step 3 — 在「設定」分頁確認啟用模式為「自動」，同步新資料時會自動重訓',
+                why: '市場狀態會隨時間改變（regime change），模型的預測能力會逐漸衰退。自動重訓搭配「冠軍挑戰者」機制，確保只有表現更好的新模型才會取代舊的，防止靜默退化。' },
+              { title: 'Step 4 — 到「監控」分頁追蹤預測準確率，定期檢查模型是否退化',
+                why: '即使有自動重訓，仍需人工監控。監控面板提供 MFE/MAE（最大有利/不利偏移）、Wilson 信心區間等統計，幫助你判斷模型是否真正有效，還是只是運氣好。' },
+            ].map((step, i) => (
+              <div key={i} style={{ marginBottom: 4 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <strong style={{ whiteSpace: 'nowrap' }}>{step.title}</strong>
+                  <button
+                    onClick={() => setExpandedStep(expandedStep === i ? null : i)}
+                    style={{
+                      background: 'none', border: 'none', cursor: 'pointer', fontSize: 11,
+                      color: 'var(--accent-blue)', whiteSpace: 'nowrap', padding: 0,
+                    }}
+                  >{expandedStep === i ? '收起' : '為什麼？'}</button>
+                </div>
+                {expandedStep === i && (
+                  <div style={{
+                    marginTop: 4, marginBottom: 4, marginLeft: 12, padding: '6px 10px',
+                    borderRadius: 6, fontSize: 11, lineHeight: 1.6,
+                    background: 'rgba(88,166,255,0.05)', color: 'var(--text-secondary)',
+                    borderLeft: '2px solid rgba(88,166,255,0.3)',
+                  }}>
+                    {step.why}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+          <div style={{ marginTop: 8, color: 'var(--text-secondary)', fontSize: 11 }}>
+            模型訓練完成後，聊天分析時會自動注入 ML 預測結果作為參考依據。
+          </div>
+        </div>
+      )}
+
       {/* 子分頁 */}
       <div style={{ display: 'flex', gap: '4px', marginBottom: '14px' }}>
         {tabs.map(t => (
@@ -701,23 +771,51 @@ function CompareTab() {
       {error && <div style={{ ...S.err, marginTop: '10px' }}>{error}</div>}
 
       {/* 比較結果 */}
-      {result && result.status === 'success' && <CompareResultCard result={result} />}
+      {result && result.status === 'success' && <CompareResultCard result={result} symbol={symbol} />}
     </div>
   );
 }
 
 
-function CompareResultCard({ result }: { result: any }) {
+function CompareResultCard({ result, symbol }: { result: any; symbol: string }) {
   const ranking: any[] = result.ranking || [];
   const consensus: any[] = result.feature_consensus || [];
   const rec = result.recommendation || {};
+  const [setDefault, setSetDefault] = useState(false);
+  const [defaultMsg, setDefaultMsg] = useState('');
+
+  const handleSetAsDefault = async () => {
+    if (!rec.model_id) return;
+    setSetDefault(true);
+    try {
+      await updateMLSettings({ model_id: rec.model_id, symbol });
+      setDefaultMsg(`已將 ${rec.model_name} 設為 ${symbol} 預設模型`);
+    } catch {
+      setDefaultMsg('設定失敗');
+    } finally {
+      setSetDefault(false);
+    }
+  };
 
   return (
     <div style={{ marginTop: '12px' }}>
       {/* 推薦 */}
       {rec.model_name && (
-        <div style={{ ...S.ok, fontWeight: 500 }}>
-          推薦：{rec.reason}
+        <div style={{ ...S.ok, fontWeight: 500, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <span>推薦：{rec.reason}</span>
+          {!defaultMsg && (
+            <button
+              onClick={handleSetAsDefault}
+              disabled={setDefault}
+              style={{
+                padding: '3px 10px', borderRadius: 4, fontSize: 11, cursor: 'pointer',
+                background: '#3fb950', color: '#fff', border: 'none', whiteSpace: 'nowrap',
+              }}
+            >
+              {setDefault ? '設定中...' : `設為 ${symbol} 預設`}
+            </button>
+          )}
+          {defaultMsg && <span style={{ fontSize: 11 }}>{defaultMsg}</span>}
         </div>
       )}
 
@@ -1060,21 +1158,24 @@ interface HistoryPoint {
 }
 
 function MonitorTab() {
-  const symbol = useChartStore((s) => s.chartState.symbol);
-  const timeframe = useChartStore((s) => s.chartState.timeframe);
+  const symbol = useChartStore((s) => s.symbol);
+  const timeframe = useChartStore((s) => s.timeframe);
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [health, setHealth] = useState<any>(null);
+  const [accuracy, setAccuracy] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [histRes, healthRes] = await Promise.all([
+      const [histRes, healthRes, accRes] = await Promise.all([
         fetchMLPerformanceHistory(symbol || undefined),
         symbol ? checkMLHealth(symbol, timeframe || '4h') : Promise.resolve({ status: 'no_model' }),
+        fetchMLPredictionAccuracy(symbol || undefined),
       ]);
       setHistory(histRes.history || []);
       setHealth(healthRes);
+      setAccuracy(accRes);
     } catch { /* ignore */ } finally {
       setLoading(false);
     }
@@ -1119,6 +1220,95 @@ function MonitorTab() {
       ) : (
         <div style={{ textAlign: 'center', padding: 16, color: 'var(--text-secondary)' }}>
           需要至少 2 次訓練記錄才能顯示趨勢圖
+        </div>
+      )}
+
+      {/* 預測準確率 */}
+      {accuracy && accuracy.validated > 0 && (
+        <div style={{
+          marginBottom: 12, padding: '10px 12px', borderRadius: 8,
+          background: 'var(--bg-tertiary)',
+        }}>
+          <div style={{ color: 'var(--text-secondary)', marginBottom: 8, fontWeight: 600 }}>
+            預測準確率
+          </div>
+          <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: 8 }}>
+            <div>
+              <span style={{ color: 'var(--text-secondary)' }}>方向正確率：</span>
+              <span style={{
+                fontWeight: 700,
+                color: accuracy.direction_accuracy >= 0.55 ? '#4ade80'
+                  : accuracy.direction_accuracy >= 0.50 ? '#facc15' : '#f87171',
+              }}>
+                {(accuracy.direction_accuracy * 100).toFixed(1)}%
+              </span>
+              {accuracy.confidence_interval && (
+                <span style={{ color: 'var(--text-tertiary)', fontSize: 10, marginLeft: 4 }}>
+                  (95% CI: {(accuracy.confidence_interval[0] * 100).toFixed(0)}-{(accuracy.confidence_interval[1] * 100).toFixed(0)}%)
+                </span>
+              )}
+            </div>
+            <div>
+              <span style={{ color: 'var(--text-secondary)' }}>已驗證：</span>
+              <span style={{ color: 'var(--text-primary)' }}>
+                {accuracy.validated} / {accuracy.total_predictions} 筆
+              </span>
+            </div>
+            <div>
+              <span style={{ color: 'var(--text-secondary)' }}>平均漲跌：</span>
+              <span style={{
+                color: accuracy.avg_outcome_pct >= 0 ? '#4ade80' : '#f87171',
+              }}>
+                {accuracy.avg_outcome_pct >= 0 ? '+' : ''}{accuracy.avg_outcome_pct.toFixed(2)}%
+              </span>
+            </div>
+          </div>
+          {/* MFE / MAE */}
+          {(accuracy.avg_mfe_pct != null || accuracy.avg_mae_pct != null) && (
+            <div style={{ display: 'flex', gap: 16, marginBottom: 8 }}>
+              {accuracy.avg_mfe_pct != null && (
+                <div>
+                  <span style={{ color: 'var(--text-secondary)' }}>平均 MFE：</span>
+                  <span style={{ color: '#4ade80' }}>+{accuracy.avg_mfe_pct.toFixed(2)}%</span>
+                </div>
+              )}
+              {accuracy.avg_mae_pct != null && (
+                <div>
+                  <span style={{ color: 'var(--text-secondary)' }}>平均 MAE：</span>
+                  <span style={{ color: '#f87171' }}>{accuracy.avg_mae_pct.toFixed(2)}%</span>
+                </div>
+              )}
+            </div>
+          )}
+          {/* 按模型統計 */}
+          {accuracy.by_model && accuracy.by_model.length > 1 && (
+            <div style={{ marginTop: 4 }}>
+              <div style={{ color: 'var(--text-secondary)', marginBottom: 4, fontSize: 11 }}>按模型統計</div>
+              {accuracy.by_model.map((m: any) => (
+                <div key={m.model_id} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 2 }}>
+                  <span style={{ color: 'var(--text-primary)', minWidth: 80 }}>{m.model_id}</span>
+                  <span style={{
+                    fontWeight: 600,
+                    color: m.accuracy >= 0.55 ? '#4ade80' : m.accuracy >= 0.50 ? '#facc15' : '#f87171',
+                  }}>
+                    {(m.accuracy * 100).toFixed(1)}%
+                  </span>
+                  <span style={{ color: 'var(--text-tertiary)', fontSize: 10 }}>
+                    ({m.correct}/{m.total},
+                    CI: {(m.confidence_interval[0] * 100).toFixed(0)}-{(m.confidence_interval[1] * 100).toFixed(0)}%)
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      {accuracy && accuracy.validated === 0 && accuracy.total_predictions > 0 && (
+        <div style={{
+          marginBottom: 12, padding: '10px 12px', borderRadius: 8,
+          background: 'var(--bg-tertiary)', color: 'var(--text-secondary)',
+        }}>
+          已有 {accuracy.total_predictions} 筆預測，同步新資料後將自動驗證準確率
         </div>
       )}
 

@@ -156,79 +156,105 @@ export async function streamChatMessage(
     },
   };
 
-  try {
-    const response = await fetch('/api/chat/stream', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+  const MAX_RETRIES = 2;
+  const RETRY_DELAYS = [2000, 5000]; // 2s, 5s exponential backoff
 
-    if (!response.ok) {
-      const errText = await response.text();
-      wrappedCallbacks.onError?.(`伺服器錯誤 (${response.status}): ${errText}`);
-      if (!doneEmitted) { doneEmitted = true; callbacks.onDone?.(); }
-      return;
-    }
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const response = await fetch('/api/chat/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
 
-    const reader = response.body?.getReader();
-    if (!reader) {
-      wrappedCallbacks.onError?.('瀏覽器不支援 Streaming');
-      if (!doneEmitted) { doneEmitted = true; callbacks.onDone?.(); }
-      return;
-    }
+      if (!response.ok) {
+        const errText = await response.text();
+        // 4xx 錯誤不重試（用戶端問題）
+        if (response.status >= 400 && response.status < 500) {
+          wrappedCallbacks.onError?.(`伺服器錯誤 (${response.status}): ${errText}`);
+          if (!doneEmitted) { doneEmitted = true; callbacks.onDone?.(); }
+          return;
+        }
+        // 5xx 錯誤可重試
+        if (attempt < MAX_RETRIES) {
+          wrappedCallbacks.onStatus?.(`連線異常，${RETRY_DELAYS[attempt] / 1000}s 後重試...`);
+          await new Promise(r => setTimeout(r, RETRY_DELAYS[attempt]));
+          continue;
+        }
+        wrappedCallbacks.onError?.(`伺服器錯誤 (${response.status}): ${errText}`);
+        if (!doneEmitted) { doneEmitted = true; callbacks.onDone?.(); }
+        return;
+      }
 
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let currentEvent = '';
+      const reader = response.body?.getReader();
+      if (!reader) {
+        wrappedCallbacks.onError?.('瀏覽器不支援 Streaming');
+        if (!doneEmitted) { doneEmitted = true; callbacks.onDone?.(); }
+        return;
+      }
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let currentEvent = '';
 
-      buffer += decoder.decode(value, { stream: true });
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
+        buffer += decoder.decode(value, { stream: true });
 
-      for (const line of lines) {
-        if (line.startsWith('event: ')) {
-          currentEvent = line.slice(7).trim();
-        } else if (line.startsWith('data: ')) {
-          const dataStr = line.slice(6);
-          try {
-            const data = JSON.parse(dataStr);
-            _handleSSEEvent(currentEvent, data, wrappedCallbacks);
-          } catch {
-            // ignore
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            currentEvent = line.slice(7).trim();
+          } else if (line.startsWith('data: ')) {
+            const dataStr = line.slice(6);
+            try {
+              const data = JSON.parse(dataStr);
+              _handleSSEEvent(currentEvent, data, wrappedCallbacks);
+            } catch {
+              // ignore
+            }
+            currentEvent = '';
           }
-          currentEvent = '';
         }
       }
-    }
 
-    // 處理 buffer 中殘餘的事件
-    if (buffer.trim()) {
-      const remaining = buffer.split('\n');
-      for (const line of remaining) {
-        if (line.startsWith('event: ')) {
-          currentEvent = line.slice(7).trim();
-        } else if (line.startsWith('data: ')) {
-          try {
-            const data = JSON.parse(line.slice(6));
-            _handleSSEEvent(currentEvent, data, wrappedCallbacks);
-          } catch {
-            // ignore
+      // 處理 buffer 中殘餘的事件
+      if (buffer.trim()) {
+        const remaining = buffer.split('\n');
+        for (const line of remaining) {
+          if (line.startsWith('event: ')) {
+            currentEvent = line.slice(7).trim();
+          } else if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              _handleSSEEvent(currentEvent, data, wrappedCallbacks);
+            } catch {
+              // ignore
+            }
+            currentEvent = '';
           }
-          currentEvent = '';
         }
       }
+
+      // 成功完成，跳出重試迴圈
+      break;
+
+    } catch (err: unknown) {
+      if (attempt < MAX_RETRIES && !doneEmitted) {
+        wrappedCallbacks.onStatus?.(`網路中斷，${RETRY_DELAYS[attempt] / 1000}s 後重試...`);
+        await new Promise(r => setTimeout(r, RETRY_DELAYS[attempt]));
+        continue;
+      }
+      callbacks.onError?.((err as Error)?.message || '網路連線失敗');
     }
-  } catch (err: unknown) {
-    callbacks.onError?.((err as Error)?.message || '網路連線失敗');
-  } finally {
-    if (!doneEmitted) {
-      callbacks.onDone?.();
-    }
+  }
+
+  if (!doneEmitted) {
+    callbacks.onDone?.();
   }
 }
 
@@ -712,7 +738,9 @@ export interface MLSettings {
   target_direction: string;
   target_threshold: number;
   lookback_window: number;
+  symbol?: string;
   _warnings?: string[];
+  _per_symbol?: boolean;
 }
 
 export async function fetchMLModels(): Promise<MLModel[]> {
@@ -800,6 +828,13 @@ export async function checkMLHealth(symbol: string, timeframe: string = '4h') {
   return res.data;
 }
 
+export async function fetchMLPredictionAccuracy(symbol?: string) {
+  const params: Record<string, string> = {};
+  if (symbol) params.symbol = symbol;
+  const res = await api.get('/ml/prediction-accuracy', { params });
+  return res.data;
+}
+
 // ===== 預測追蹤 API =====
 
 export async function fetchPredictionStats(symbol?: string, days?: number) {
@@ -836,6 +871,13 @@ export async function generateReview(startDate?: string, endDate?: string, symbo
   if (endDate) body.end_date = endDate;
   if (symbol) body.symbol = symbol;
   const res = await api.post('/predictions/review', body, { timeout: 120000 });
+  return res.data;
+}
+
+export async function clearPredictions(symbol?: string) {
+  const params: Record<string, string> = {};
+  if (symbol) params.symbol = symbol;
+  const res = await api.delete('/predictions/clear', { params });
   return res.data;
 }
 

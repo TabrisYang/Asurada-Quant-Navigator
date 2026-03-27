@@ -49,6 +49,7 @@ class MLSettingsUpdate(BaseModel):
     target_direction: Optional[str] = None
     target_threshold: Optional[float] = None
     lookback_window: Optional[int] = None
+    symbol: Optional[str] = None  # per-symbol 覆蓋用
 
 
 class TrainRequest(BaseModel):
@@ -88,25 +89,28 @@ async def list_models():
 
 
 @router.get("/settings")
-async def get_settings():
-    """讀取使用者 ML 設定"""
+async def get_settings(
+    symbol: Optional[str] = Query(None, description="幣對（取得 per-symbol 覆蓋）"),
+):
+    """讀取使用者 ML 設定（支援 per-symbol 覆蓋）"""
     from app.core.ml.model_manager import model_manager
     return {
         "status": "success",
-        "settings": model_manager.get_settings(),
+        "settings": model_manager.get_settings(symbol=symbol),
     }
 
 
 @router.put("/settings")
 async def update_settings(body: MLSettingsUpdate):
-    """更新使用者 ML 設定"""
+    """更新使用者 ML 設定（支援 per-symbol）"""
     from app.core.ml.model_manager import model_manager
 
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    symbol = updates.pop("symbol", None)  # 提取 symbol，不傳入 settings
     if not updates:
         raise HTTPException(400, "沒有提供任何要更新的設定")
 
-    result = model_manager.update_settings(updates)
+    result = model_manager.update_settings(updates, symbol=symbol)
     return {"status": "success", "settings": result}
 
 
@@ -244,6 +248,18 @@ async def get_performance_history(
     from app.core.ml.model_manager import model_manager
     history = model_manager.get_performance_history(symbol, model_id, limit)
     return {"status": "success", "history": history}
+
+
+@router.get("/prediction-accuracy")
+async def get_prediction_accuracy(
+    symbol: Optional[str] = Query(None, description="按幣種篩選"),
+    model_id: Optional[str] = Query(None, description="按模型篩選"),
+    limit: int = Query(200, ge=10, le=1000),
+):
+    """取得 ML 預測準確率統計（支援 MFE/MAE、按模型統計、Wilson 信心區間）"""
+    from app.core.ml.model_manager import model_manager
+    result = model_manager.get_prediction_accuracy(symbol, model_id, limit)
+    return {"status": "success", **result}
 
 
 @router.get("/health")

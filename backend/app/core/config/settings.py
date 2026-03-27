@@ -1,5 +1,6 @@
 """阿斯拉量化系統 — 全域設定"""
 
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -17,6 +18,10 @@ class Settings(BaseSettings):
     # 資料路徑
     data_dir: str = "./data"
 
+    # 資料庫（預設 SQLite；生產環境可設為 PostgreSQL URL）
+    # 例如: postgresql://user:pass@localhost:5432/asura
+    database_url: Optional[str] = None
+
     # LLM 預設供應商
     default_llm_provider: str = "openai"
 
@@ -29,8 +34,11 @@ class Settings(BaseSettings):
     # 日誌
     log_level: str = "INFO"
 
-    # CORS
-    cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
+    # CORS（支援環境變數 CORS_ORIGINS 覆蓋，逗號分隔）
+    cors_origins: list[str] = [
+        o.strip()
+        for o in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:3000").split(",")
+    ]
 
     # 數據抓取
     default_exchanges: list[str] = ["binance", "bybit", "okx", "coinbase"]
@@ -75,6 +83,11 @@ class Settings(BaseSettings):
         path = Path(self.data_dir)
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+    @property
+    def use_postgres(self) -> bool:
+        """是否使用 PostgreSQL"""
+        return bool(self.database_url and self.database_url.startswith("postgresql"))
 
     @property
     def db_path(self) -> Path:

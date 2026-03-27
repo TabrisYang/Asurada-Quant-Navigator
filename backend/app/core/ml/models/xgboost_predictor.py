@@ -73,7 +73,7 @@ class XGBoostPredictor(BasePredictor):
             min_child_weight=cfg["min_child_weight"],
             gamma=cfg["gamma"],
             random_state=cfg["random_state"],
-            scale_pos_weight=pw if pw and pw > 1.5 else 1.0,
+            scale_pos_weight=pw if pw and pw > 1.0 else 1.0,
             eval_metric="logloss",
             verbosity=0,
             n_jobs=-1,

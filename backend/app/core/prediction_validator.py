@@ -131,24 +131,35 @@ def _validate_one(pred: dict, now: datetime) -> str:
                 hit_stop_idx = i
 
     # 判定結果：先碰到哪個就算哪個
+    hit_idx = None
     if hit_target_idx is not None and hit_stop_idx is not None:
         if hit_target_idx <= hit_stop_idx:
             status = "hit_target"
+            hit_idx = hit_target_idx
             note = f"先觸及目標價（第 {hit_target_idx+1} 根K線），之後也觸及止損"
         else:
             status = "hit_stop"
+            hit_idx = hit_stop_idx
             note = f"先觸及止損（第 {hit_stop_idx+1} 根K線），之後也觸及目標"
     elif hit_target_idx is not None:
         status = "hit_target"
+        hit_idx = hit_target_idx
         note = f"觸及目標價（第 {hit_target_idx+1} 根K線）"
     elif hit_stop_idx is not None:
         status = "hit_stop"
+        hit_idx = hit_stop_idx
         note = f"觸及止損（第 {hit_stop_idx+1} 根K線）"
     elif is_expired:
         status = "expired"
         note = f"持倉期結束，最終盈虧 {final_pct:+.2f}%"
     else:
         return "still_active"
+
+    # 取得實際觸及的 K 線時間（非驗證程式執行時間）
+    hit_at = None
+    if hit_idx is not None and "timestamp" in df.columns:
+        ts = df.iloc[hit_idx]["timestamp"]
+        hit_at = str(ts)
 
     prediction_tracker.update_validation(
         pred["id"],
@@ -157,6 +168,7 @@ def _validate_one(pred: dict, now: datetime) -> str:
         max_favorable_pct=round(mfe_pct, 2),
         max_adverse_pct=round(mae_pct, 2),
         note=note,
+        hit_at=hit_at,
     )
     logger.info(f"預測 #{pred['id']} {pred['symbol']} {direction}: {status} (MFE={mfe_pct:+.1f}% MAE={mae_pct:+.1f}%)")
     return status

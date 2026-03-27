@@ -4,7 +4,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { useChartStore } from '../../stores/chartStore';
 import { runFactorScan, triggerPreview } from '../../services/api';
 import { toast } from '../Toast';
-import type { FactorScanResult, FactorScanItem, StrategyTier, StrategyTierCondition, TriggerCondition } from '../../services/api';
+import type { FactorScanResult, FactorScanItem, StrategyTierCondition, TriggerCondition } from '../../services/api';
 
 type TierKey = 'strict' | 'moderate' | 'loose';
 
@@ -806,7 +806,7 @@ function FactorCustomizer({ result, externalConds, expanded, setExpanded }: {
   const [conditions, setConditions] = useState<EditableCond[]>([]);
   const [triggerInfo, setTriggerInfo] = useState<{ count: number; total: number; pct: number; lastTime?: string } | null>(null);
   const [previewing, setPreviewing] = useState(false);
-  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
+  const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   // 接收從 tier 按鈕載入的條件
   useEffect(() => {

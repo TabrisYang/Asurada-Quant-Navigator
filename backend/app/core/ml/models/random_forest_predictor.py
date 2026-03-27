@@ -66,7 +66,7 @@ class RandomForestPredictor(BasePredictor):
             min_samples_leaf=cfg["min_samples_leaf"],
             max_features=cfg["max_features"],
             random_state=cfg["random_state"],
-            class_weight="balanced" if pw and pw > 1.5 else None,
+            class_weight="balanced",
             n_jobs=-1,
         )
 

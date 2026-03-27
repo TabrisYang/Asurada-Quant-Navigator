@@ -9,16 +9,15 @@
 """
 
 import json
-import shutil
 import sqlite3
 import uuid
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Optional
 
 from loguru import logger
 
 from app.core.config.settings import settings
+from app.core.base_db import BaseDBStore
 
 # 對話保留天數（改為 60 天 — 蒸餾後原始資料仍保留一段時間供參考）
 _RETENTION_DAYS = 60
@@ -27,31 +26,19 @@ _RETENTION_DAYS = 60
 _MAX_MESSAGES_PER_CONVERSATION = 200
 
 
-class ChatHistoryStore:
+class ChatHistoryStore(BaseDBStore):
     """對話歷史持久化存儲（SQLite）"""
 
     def __init__(self):
-        self._db_path = settings.db_path / "chat_history.db"
-        self._conn: Optional[sqlite3.Connection] = None
+        super().__init__("chat_history.db")
         self._init_db()
 
     def _init_db(self):
         """初始化資料庫和表結構"""
         try:
-            # 自動遷移：舊版扁平結構 → 新版 db/ 子目錄
-            old_path = settings.data_path / "chat_history.db"
-            if old_path.exists() and old_path.resolve() != self._db_path.resolve():
-                if not self._db_path.exists():
-                    shutil.move(str(old_path), str(self._db_path))
-                    logger.info(f"遷移 DB: chat_history.db → {self._db_path}")
-                    for ext in ("-wal", "-shm"):
-                        aux = old_path.parent / f"chat_history.db{ext}"
-                        if aux.exists():
-                            shutil.move(str(aux), str(self._db_path.parent / f"chat_history.db{ext}"))
-
-            self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA busy_timeout=3000")
+            self._connect()
+            if not self._conn:
+                return
 
             # 對話主表
             self._conn.execute("""

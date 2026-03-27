@@ -17,6 +17,7 @@ import numpy as np
 from loguru import logger
 
 from app.core.config.settings import settings
+from app.utils.timezone import taipei_now
 
 _PREDICTIONS_PATTERN = re.compile(
     r"---PREDICTIONS---\s*\n(.*?)(?:\n---END_PREDICTIONS---|$)",
@@ -151,7 +152,7 @@ class PredictionTracker:
     ) -> int:
         """存入一筆預測，返回 id。"""
         self._ensure_db()
-        now = datetime.now()
+        now = taipei_now()
         hours = prediction["timeframe_hours"]
         expires = now + timedelta(hours=hours)
 
@@ -228,9 +229,14 @@ class PredictionTracker:
         max_favorable_pct: float,
         max_adverse_pct: float,
         note: str = "",
+        hit_at: str | None = None,
     ):
-        """更新預測的驗證結果。"""
+        """更新預測的驗證結果。
+
+        hit_at: 實際觸及目標/止損的 K 線時間。若未提供則用當前時間。
+        """
         self._ensure_db()
+        validated_time = hit_at if hit_at else taipei_now().isoformat()
         self._conn.execute(
             """UPDATE predictions
                SET status=?, validated_at=?, actual_outcome_pct=?,
@@ -238,7 +244,7 @@ class PredictionTracker:
                WHERE id=?""",
             (
                 status,
-                datetime.now().isoformat(),
+                validated_time,
                 actual_outcome_pct,
                 max_favorable_pct,
                 max_adverse_pct,
@@ -247,6 +253,20 @@ class PredictionTracker:
             ),
         )
         self._conn.commit()
+
+    def clear_all(self, symbol: Optional[str] = None) -> int:
+        """清除所有預測紀錄。若提供 symbol 則只清除該幣對。"""
+        self._ensure_db()
+        if symbol:
+            cursor = self._conn.execute(
+                "DELETE FROM predictions WHERE symbol = ?", (symbol,),
+            )
+        else:
+            cursor = self._conn.execute("DELETE FROM predictions")
+        self._conn.commit()
+        count = cursor.rowcount
+        logger.info(f"已清除 {count} 筆預測紀錄" + (f"（{symbol}）" if symbol else ""))
+        return count
 
     def get_stats(
         self,
