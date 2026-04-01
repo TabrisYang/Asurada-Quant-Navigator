@@ -19,6 +19,9 @@ scipy>=1.11.0
 # 加密貨幣交易所 API
 ccxt>=4.4.0
 
+# 台股數據
+yfinance>=1.2.0
+
 # LLM 供應商 SDK
 openai>=1.50.0
 anthropic>=0.37.0

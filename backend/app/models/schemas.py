@@ -258,6 +258,52 @@ class SyncStatus(BaseModel):
     status: str = "not_synced"
 
 
+class SMCRequest(BaseModel):
+    """SMC 訂單流分析請求"""
+    symbol: str = "BTC/USDT"
+    timeframe: Timeframe = Timeframe.D1
+    htf: Optional[str] = None
+    lookback: int = Field(default=120, ge=30, le=500)
+
+
+class ScenarioRequest(BaseModel):
+    """情境預測請求"""
+    symbol: str = "BTC/USDT"
+    timeframe: Timeframe = Timeframe.D1
+    forward_bars: int = Field(default=5, ge=1, le=30)
+
+
+class ScenarioSignal(BaseModel):
+    """情境支撐訊號"""
+    name: str
+    value: Optional[float] = None
+    interpretation: str = ""
+
+
+class ScenarioItem(BaseModel):
+    """單一情境"""
+    label: str
+    direction: str                     # "bullish" / "neutral" / "bearish"
+    probability: float
+    probability_pct: str
+    price_target: dict[str, float]     # {"low": ..., "high": ...}
+    timeframe_bars: int
+    supporting_signals: list[dict[str, Any]] = Field(default_factory=list)
+    invalidation: Optional[str] = None
+    risk_level: str = "medium"
+
+
+class ScenarioResponse(BaseModel):
+    """情境預測回應"""
+    symbol: str
+    timeframe: str
+    current_price: float
+    scenarios: list[ScenarioItem]
+    signal_sources: dict[str, Any]
+    generated_at: str
+    data_points: int
+
+
 class ErrorResponse(BaseModel):
     """錯誤回應"""
     error: str

@@ -413,6 +413,32 @@ async def get_system_settings():
     return {"status": "ok", "settings": load_system_settings()}
 
 
+@router.post("/clear-session-cache")
+async def clear_session_cache():
+    """清除 Claude CLI 的 session 快取，釋放磁碟空間並重置 prompt cache"""
+    import asyncio
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "claude", "--clear-conversation-history",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+        if proc.returncode == 0:
+            return {"status": "ok", "message": "Session 快取已清除"}
+        else:
+            err = stderr.decode().strip() if stderr else "未知錯誤"
+            logger.warning(f"清除 session cache 失敗: {err}")
+            return {"status": "ok", "message": f"清除指令已執行（returncode={proc.returncode}）"}
+    except FileNotFoundError:
+        raise HTTPException(status_code=400, detail="未安裝 Claude CLI，無法清除 session cache")
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="清除 session cache 超時")
+    except Exception as e:
+        logger.error(f"清除 session cache 失敗: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.put("/system-settings")
 async def update_system_settings(body: dict):
     """更新系統通用設定"""

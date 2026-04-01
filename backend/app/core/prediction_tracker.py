@@ -33,7 +33,25 @@ _PREDICTION_LINE = re.compile(
     r"confidence=(high|medium|low)\s+"
     r"regime=(\S+)\s+"
     r"indicators=([\w,]+)"
+    r"(?:\s+invalidation=(.+))?"
 )
+
+
+def _sanitize_prediction_block(block: str) -> str:
+    """預處理預測區塊，提高正則匹配容錯性。"""
+    # 移除數字中的逗號：83,500 → 83500
+    block = re.sub(r"(\d),(\d)", r"\1\2", block)
+    # direction / confidence 統一小寫
+    block = re.sub(r"direction:(\w+)", lambda m: f"direction:{m.group(1).lower()}", block)
+    block = re.sub(r"confidence=(\w+)", lambda m: f"confidence={m.group(1).lower()}", block)
+    # 指標列表去空格：RSI, MACD → RSI,MACD
+    block = re.sub(
+        r"indicators=([\w,\s]+?)(\s+invalidation=|\s*$)",
+        lambda m: f"indicators={m.group(1).replace(' ', '')}{m.group(2)}",
+        block,
+        flags=re.MULTILINE,
+    )
+    return block
 
 
 def parse_predictions(llm_response: str) -> list[dict]:
@@ -42,7 +60,7 @@ def parse_predictions(llm_response: str) -> list[dict]:
     if not match:
         return []
 
-    block = match.group(1)
+    block = _sanitize_prediction_block(match.group(1))
     results = []
     for m in _PREDICTION_LINE.finditer(block):
         try:
@@ -58,6 +76,7 @@ def parse_predictions(llm_response: str) -> list[dict]:
                 "confidence": m.group(6),
                 "regime": m.group(7),
                 "indicators": m.group(8),
+                "invalidation": m.group(9) or "",
             })
         except (ValueError, IndexError) as e:
             logger.warning(f"解析預測行失敗: {e}")
@@ -141,6 +160,22 @@ class PredictionTracker:
             )
         except sqlite3.OperationalError:
             pass  # 欄位已存在
+
+        # 遷移：加入 invalidation 欄位（若不存在）
+        try:
+            self._conn.execute(
+                "ALTER TABLE predictions ADD COLUMN invalidation TEXT DEFAULT ''"
+            )
+        except sqlite3.OperationalError:
+            pass  # 欄位已存在
+
+        # 遷移：加入 milestones 欄位（若不存在）
+        try:
+            self._conn.execute(
+                "ALTER TABLE predictions ADD COLUMN milestones TEXT DEFAULT ''"
+            )
+        except sqlite3.OperationalError:
+            pass  # 欄位已存在
         self._conn.commit()
 
     def store(
@@ -156,12 +191,27 @@ class PredictionTracker:
         hours = prediction["timeframe_hours"]
         expires = now + timedelta(hours=hours)
 
+        # 多時間框架矛盾檢測
+        existing = self.get_active(symbol)
+        conflicts = [
+            p for p in existing
+            if p["direction"] != prediction["direction"]
+        ]
+        if conflicts:
+            conflict_info = ", ".join(
+                f"{p['timeframe']} {p['direction']}" for p in conflicts
+            )
+            logger.warning(
+                f"預測方向衝突: 新={prediction['direction']} {timeframe} "
+                f"vs 現有={conflict_info}（{symbol}）"
+            )
+
         cursor = self._conn.execute(
             """INSERT INTO predictions
                (symbol, timeframe, direction, entry_price, target_price, stop_price,
-                timeframe_hours, confidence, regime, indicators, source_question,
-                created_at, expires_at, status)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')""",
+                timeframe_hours, confidence, regime, indicators, invalidation,
+                source_question, created_at, expires_at, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')""",
             (
                 symbol, timeframe,
                 prediction["direction"],
@@ -172,6 +222,7 @@ class PredictionTracker:
                 prediction["confidence"],
                 prediction["regime"],
                 prediction["indicators"],
+                prediction.get("invalidation", ""),
                 source_question,
                 now.isoformat(),
                 expires.isoformat(),
@@ -276,7 +327,7 @@ class PredictionTracker:
     ) -> dict:
         """計算預測績效統計（帶時間衰減權重）。"""
         self._ensure_db()
-        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        cutoff = (taipei_now() - timedelta(days=days)).isoformat()
         query = "SELECT * FROM predictions WHERE status != 'active' AND created_at > ?"
         params: list = [cutoff]
         if symbol:
@@ -291,7 +342,7 @@ class PredictionTracker:
             return {"total": 0, "message": "尚無已驗證的預測記錄"}
 
         preds = [dict(r) for r in rows]
-        now = datetime.now()
+        now = taipei_now()
         decay_lambda = 0.02  # half-life ~35 days
 
         hit_target_w = 0.0
@@ -338,10 +389,10 @@ class PredictionTracker:
         win_rate = hit_target_w / total_w if total_w > 0 else 0
         outcomes_arr = np.array(outcomes) if outcomes else np.array([0])
 
-        # indicator win rates (only those with ≥3 samples)
+        # indicator win rates (≥1 sample, low-sample marked)
         indicator_stats = {}
         for ind, total in indicator_total.items():
-            if total >= 3:
+            if total >= 1:
                 wins = indicator_wins.get(ind, 0)
                 indicator_stats[ind] = {
                     "win_rate": round(wins / total * 100, 1),
@@ -379,7 +430,7 @@ class PredictionTracker:
     ) -> dict[str, dict]:
         """取得多/空方向各自的勝率與樣本數。"""
         self._ensure_db()
-        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        cutoff = (taipei_now() - timedelta(days=days)).isoformat()
         query = "SELECT direction, status FROM predictions WHERE status != 'active' AND created_at > ?"
         params: list = [cutoff]
         if symbol:

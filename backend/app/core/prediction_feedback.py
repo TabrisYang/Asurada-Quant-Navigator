@@ -117,7 +117,25 @@ def generate_feedback_prompt(
         if tier_low:
             lines.append(f"指標可靠度 ★：{', '.join(tier_low)}")
         if tier_high:
-            lines.append(f"→ 優先使用 ★★★ 指標，★ 指標需搭配其他驗證")
+            lines.append(f"→ 規則：★ 指標禁止作為主要訊號，必須由 ★★★ 指標主導決策")
+
+        # Alpha 衰退預警：比較 30 天 vs 90 天指標勝率
+        recent_stats = prediction_tracker.get_stats(symbol=symbol, days=30)
+        recent_ind = recent_stats.get("indicator_performance", {})
+        if recent_ind and recent_stats["total"] >= 3:
+            decay_alerts = []
+            for ind, data90 in ind_perf.items():
+                if data90["samples"] < 3:
+                    continue
+                r30 = recent_ind.get(ind)
+                if r30 and r30["samples"] >= 2:
+                    drop = data90["win_rate"] - r30["win_rate"]
+                    if drop >= 15:
+                        decay_alerts.append(
+                            f"{ind}(90天{data90['win_rate']}%→近30天{r30['win_rate']}%↓{drop:.0f}pp)"
+                        )
+            if decay_alerts:
+                lines.append(f"⚠️ Alpha衰退: {', '.join(decay_alerts)} — 建議降權或暫停使用")
 
     # 信心校準
     conf_cal = global_stats.get("confidence_calibration", {})

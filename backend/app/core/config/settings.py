@@ -46,6 +46,10 @@ class Settings(BaseSettings):
         "BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT",
         "ADA/USDT", "AVAX/USDT", "LINK/USDT", "DOT/USDT", "MATIC/USDT",
     ]
+    default_tw_symbols: list[str] = [
+        "2330/TWD", "2317/TWD", "2454/TWD", "2412/TWD", "3008/TWD",
+        "2881/TWD", "2882/TWD", "1301/TWD", "2308/TWD", "2303/TWD",
+    ]
     default_timeframes: list[str] = ["15m", "1h", "4h", "1d", "1w"]
     default_fetch_days: int = 90
     anomaly_threshold: float = 0.005  # 0.5%

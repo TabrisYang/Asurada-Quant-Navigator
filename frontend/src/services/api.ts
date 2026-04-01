@@ -865,11 +865,14 @@ export async function updatePredictionNote(predId: number, note: string) {
   return res.data;
 }
 
-export async function generateReview(startDate?: string, endDate?: string, symbol?: string) {
+export async function generateReview(
+  startDate?: string, endDate?: string, symbol?: string, sessionId?: string,
+) {
   const body: Record<string, string> = {};
   if (startDate) body.start_date = startDate;
   if (endDate) body.end_date = endDate;
   if (symbol) body.symbol = symbol;
+  if (sessionId) body.session_id = sessionId;
   const res = await api.post('/predictions/review', body, { timeout: 120000 });
   return res.data;
 }
@@ -879,6 +882,65 @@ export async function clearPredictions(symbol?: string) {
   if (symbol) params.symbol = symbol;
   const res = await api.delete('/predictions/clear', { params });
   return res.data;
+}
+
+// ===== 自動調整 =====
+
+export async function fetchAdjustments(symbol?: string) {
+  const params: Record<string, string> = {};
+  if (symbol) params.symbol = symbol;
+  const res = await api.get('/predictions/adjustments', { params });
+  return res.data;
+}
+
+export async function overrideAdjustment(adjId: number, value?: number) {
+  const res = await api.put(`/predictions/adjustments/${adjId}/override`, { value });
+  return res.data;
+}
+
+export async function recalculateAdjustments(symbol?: string) {
+  const params: Record<string, string> = {};
+  if (symbol) params.symbol = symbol;
+  const res = await api.post('/predictions/adjustments/recalculate', null, { params });
+  return res.data;
+}
+
+// ===== 情境預測 =====
+
+export async function fetchScenarios(symbol: string, timeframe: string = '1d', forwardBars: number = 5) {
+  const res = await api.post('/scenario/predict', {
+    symbol,
+    timeframe,
+    forward_bars: forwardBars,
+  });
+  return res.data;
+}
+
+export async function fetchLatestScenarios(symbol: string, timeframe: string = '1d') {
+  const res = await api.get(`/scenario/latest/${encodeURIComponent(symbol)}`, {
+    params: { timeframe },
+  });
+  return res.data;
+}
+
+// ===== SMC 訂單流分析 =====
+
+export async function fetchSMCAnalysis(symbol: string, timeframe: string = '1d', lookback: number = 120) {
+  const res = await api.post('/smc/analyze', { symbol, timeframe, lookback });
+  return res.data;
+}
+
+export async function fetchLatestSMC(symbol: string, timeframe: string = '1d') {
+  const res = await api.get(`/smc/latest/${encodeURIComponent(symbol)}`, {
+    params: { timeframe },
+  });
+  return res.data;
+}
+
+export function exportSMCCsv(symbol: string, timeframe: string = '1d') {
+  const encodedSymbol = encodeURIComponent(symbol);
+  const baseUrl = api.defaults.baseURL || '/api';
+  window.open(`${baseUrl}/smc/export-csv/${encodedSymbol}?timeframe=${timeframe}`, '_blank');
 }
 
 // ===== 系統通用設定 =====
@@ -891,6 +953,13 @@ export async function fetchSystemSettings(): Promise<Record<string, unknown>> {
 export async function updateSystemSettings(updates: Record<string, unknown>): Promise<Record<string, unknown>> {
   const res = await api.put('/config/system-settings', updates);
   return res.data.settings;
+}
+
+// ===== Session 快取管理 =====
+
+export async function clearSessionCache(): Promise<string> {
+  const res = await api.post('/config/clear-session-cache');
+  return res.data.message;
 }
 
 // ===== 健康檢查 =====

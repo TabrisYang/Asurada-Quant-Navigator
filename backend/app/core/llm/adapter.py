@@ -621,9 +621,21 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
 
     # ── 共用 ──
 
+    # Round 2 只需要這 3 個繪圖/指標函式（chat.py L1133-1136 已過濾）
+    _R2_ALLOWED_FUNCTIONS = {"annotate_chart", "draw_pattern", "manage_indicator"}
+
     @staticmethod
-    def _format_tools_for_prompt() -> str:
-        """將 FUNCTION_DEFINITIONS 轉成文字，注入 system prompt"""
+    def _format_tools_for_prompt(r2_mode: bool = False) -> str:
+        """將 FUNCTION_DEFINITIONS 轉成文字，注入 system prompt。
+        r2_mode=True 時只包含繪圖相關函式，大幅減少 token。
+        """
+        funcs = FUNCTION_DEFINITIONS
+        if r2_mode:
+            funcs = [
+                fd for fd in FUNCTION_DEFINITIONS
+                if (fd.get("function", fd)).get("name", "") in ClaudeSubscriptionAdapter._R2_ALLOWED_FUNCTIONS
+            ]
+
         lines = [
             "\n\n【可用工具 — Function Call】",
             "當你需要執行操作時，用以下 XML 格式呼叫工具：",
@@ -631,7 +643,7 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
             "",
             "可用函式列表：",
         ]
-        for i, fd in enumerate(FUNCTION_DEFINITIONS, 1):
+        for i, fd in enumerate(funcs, 1):
             func = fd.get("function", fd)
             name = func.get("name", "")
             desc = func.get("description", "")
@@ -648,7 +660,10 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
                     req_mark = " (必填)" if pname in required else ""
                     enum_str = f", 可選值: {enum_vals}" if enum_vals else ""
                     lines.append(f"   - {pname} ({ptype}{req_mark}): {pdesc}{enum_str}")
-        lines.append("\n重要：你必須主動呼叫這些工具來獲取真實數據，不要憑空猜測。")
+        if r2_mode:
+            lines.append("\n你只能使用以上列出的工具來標記圖表和管理指標。")
+        else:
+            lines.append("\n重要：你必須主動呼叫這些工具來獲取真實數據，不要憑空猜測。")
         return "\n".join(lines)
 
     def _build_system_message(
@@ -656,11 +671,19 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
         chart_state: Optional[dict] = None,
         system_prompt: Optional[str] = None,
         include_tools: bool = True,
+        r2_mode: bool = False,
     ) -> str:
-        """覆寫父類：附加工具定義文字"""
+        """覆寫父類：附加工具定義文字。r2_mode=True 時只附加繪圖函式。"""
         prompt = super()._build_system_message(chart_state, system_prompt)
         if include_tools:
-            prompt += self._format_tools_for_prompt()
+            prompt += self._format_tools_for_prompt(r2_mode=r2_mode)
+        else:
+            # Round 3：工具已執行完畢，指示 LLM 直接生成文字分析
+            prompt += (
+                "\n\n【重要提示】所有工具呼叫已在前面的步驟中執行完畢，數據結果已包含在對話歷史中。"
+                "你現在的任務是：根據已獲得的數據和計算結果，用文字詳細回答使用者的問題。"
+                "不要再嘗試呼叫任何工具或函式，直接提供分析結論、關鍵數據解讀和交易建議。"
+            )
         return prompt
 
     def _build_user_prompt(self, messages: list[dict]) -> str:
@@ -712,6 +735,7 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
         force_text: bool = False,
         system_prompt: Optional[str] = None,
         chart_screenshot: Optional[str] = None,
+        r2_mode: bool = False,
     ) -> LLMResponse:
         """使用 stream-json 模式逐行讀取，避免整體 timeout"""
         import os
@@ -719,7 +743,7 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
 
         try:
             sys_prompt = self._build_system_message(
-                chart_state, system_prompt, include_tools=not force_text,
+                chart_state, system_prompt, include_tools=not force_text, r2_mode=r2_mode,
             )
             user_prompt = self._build_user_prompt(messages)
 
@@ -735,10 +759,11 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
                     "--include-partial-messages",
                     "--model", self.model,
                     "--system-prompt-file", sys_prompt_file,
-                    "--no-session-persistence",
+                    # "--no-session-persistence",  # 啟用 prompt caching 加速連續對話
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    limit=1024 * 1024,  # 1MB buffer（預設 64KB，長回應會溢出）
                 )
 
                 proc.stdin.write(user_prompt.encode("utf-8"))
@@ -810,13 +835,14 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
 
     async def chat_stream(
         self, messages: list[dict], chart_state: Optional[dict] = None, system_prompt: Optional[str] = None,
+        r2_mode: bool = False,
     ):
         """真正的 streaming — 逐 chunk yield 文字"""
         import os
         import tempfile
 
         try:
-            sys_prompt = self._build_system_message(chart_state, system_prompt)
+            sys_prompt = self._build_system_message(chart_state, system_prompt, r2_mode=r2_mode)
             user_prompt = self._build_user_prompt(messages)
 
             with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
@@ -831,10 +857,11 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
                     "--include-partial-messages",
                     "--model", self.model,
                     "--system-prompt-file", sys_prompt_file,
-                    "--no-session-persistence",
+                    # "--no-session-persistence",  # 啟用 prompt caching 加速連續對話
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    limit=1024 * 1024,  # 1MB buffer（預設 64KB，長回應會溢出）
                 )
 
                 proc.stdin.write(user_prompt.encode("utf-8"))

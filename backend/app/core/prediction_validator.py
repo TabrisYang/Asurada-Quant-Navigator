@@ -9,6 +9,8 @@ from typing import Optional
 
 from loguru import logger
 
+from app.utils.timezone import taipei_now
+
 from app.core.prediction_tracker import prediction_tracker
 from app.data.fetchers.crypto_engine import crypto_engine
 
@@ -30,7 +32,7 @@ def validate_all_active() -> dict:
     if not active:
         return {"validated": 0, "message": "沒有待驗證的預測"}
 
-    now = datetime.now()
+    now = taipei_now()
     validated_count = 0
     results = {"hit_target": 0, "hit_stop": 0, "expired": 0, "still_active": 0, "no_data": 0}
 
@@ -52,6 +54,16 @@ def validate_all_active() -> dict:
         f"(命中={results['hit_target']}, 止損={results['hit_stop']}, "
         f"過期={results['expired']}, 仍活躍={results['still_active']})"
     )
+
+    # 驗證後觸發自動調整
+    if validated_count > 0:
+        try:
+            from app.core.auto_adjuster import run_adjustment_cycle
+            adj_result = run_adjustment_cycle()
+            results["adjustments"] = adj_result
+        except Exception as e:
+            logger.warning(f"[自動調整] 失敗: {e}")
+
     return {"validated": validated_count, **results}
 
 
@@ -61,7 +73,7 @@ def validate_for_symbol(symbol: str) -> dict:
     if not active:
         return {"validated": 0}
 
-    now = datetime.now()
+    now = taipei_now()
     count = 0
     for pred in active:
         try:
@@ -161,6 +173,16 @@ def _validate_one(pred: dict, now: datetime) -> str:
         ts = df.iloc[hit_idx]["timestamp"]
         hit_at = str(ts)
 
+    # 里程碑追蹤：25%/50%/75% 目標達成情況
+    milestones_str = ""
+    target_distance = abs(target - entry)
+    if target_distance > 0 and entry > 0:
+        target_pct = target_distance / entry * 100
+        m25 = mfe_pct >= target_pct * 0.25
+        m50 = mfe_pct >= target_pct * 0.50
+        m75 = mfe_pct >= target_pct * 0.75
+        milestones_str = f"25%={'Y' if m25 else 'N'} 50%={'Y' if m50 else 'N'} 75%={'Y' if m75 else 'N'}"
+
     prediction_tracker.update_validation(
         pred["id"],
         status=status,
@@ -170,5 +192,39 @@ def _validate_one(pred: dict, now: datetime) -> str:
         note=note,
         hit_at=hit_at,
     )
-    logger.info(f"預測 #{pred['id']} {pred['symbol']} {direction}: {status} (MFE={mfe_pct:+.1f}% MAE={mae_pct:+.1f}%)")
+
+    # 存儲里程碑數據
+    if milestones_str:
+        try:
+            prediction_tracker._ensure_db()
+            prediction_tracker._conn.execute(
+                "UPDATE predictions SET milestones=? WHERE id=?",
+                (milestones_str, pred["id"]),
+            )
+            prediction_tracker._conn.commit()
+        except Exception:
+            pass
+
+    # 自動教訓提取：高信心預測觸及止損 → 存入知識碎片
+    if status == "hit_stop" and pred.get("confidence") == "high":
+        try:
+            from app.core.knowledge_fragments import fragment_store
+            lesson = (
+                f"高信心{direction}預測觸及止損 | "
+                f"regime={pred.get('regime', '?')} | "
+                f"indicators={pred.get('indicators', '?')} | "
+                f"MFE={mfe_pct:+.1f}% MAE={mae_pct:+.1f}% | "
+                f"milestones={milestones_str}"
+            )
+            fragment_store.store_fragment(
+                content=lesson,
+                fragment_type="lesson",
+                symbol=pred["symbol"],
+                source_question="auto_validation",
+            )
+            logger.info(f"自動教訓提取: 預測 #{pred['id']} {lesson[:60]}...")
+        except Exception as le:
+            logger.debug(f"自動教訓提取失敗: {le}")
+
+    logger.info(f"預測 #{pred['id']} {pred['symbol']} {direction}: {status} (MFE={mfe_pct:+.1f}% MAE={mae_pct:+.1f}% {milestones_str})")
     return status

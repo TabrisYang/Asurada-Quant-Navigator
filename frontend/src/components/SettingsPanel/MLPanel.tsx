@@ -57,6 +57,29 @@ function NumInput({ value, onCommit, min, max, step, disabled, style }: {
   );
 }
 
+/** 參數說明 tooltip — hover ⓘ 顯示說明 */
+function Tip({ text }: { text: string }) {
+  const [show, setShow] = useState(false);
+  return (
+    <span className="relative inline-block ml-1"
+      onMouseEnter={() => setShow(true)} onMouseLeave={() => setShow(false)}>
+      <span style={{ color: 'var(--text-tertiary)', cursor: 'help', fontSize: 11 }}>ⓘ</span>
+      {show && (
+        <div style={{
+          position: 'absolute', left: 0, top: '100%', zIndex: 50,
+          width: 220, padding: '8px 10px', borderRadius: 6,
+          background: 'var(--bg-primary)', border: '1px solid var(--border-color)',
+          boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+          fontSize: 11, lineHeight: 1.6, color: 'var(--text-secondary)',
+          pointerEvents: 'none',
+        }}>
+          {text}
+        </div>
+      )}
+    </span>
+  );
+}
+
 type SubTab = 'settings' | 'train' | 'compare' | 'status' | 'monitor';
 
 /* ═══════════════════════════════════════════ */
@@ -86,8 +109,8 @@ export default function MLPanel() {
 
   return (
     <div>
-      {/* 新手引導卡片 */}
-      {showGuide && hasModels === false && (
+      {/* 新手引導卡片（可收合，始終可見） */}
+      {showGuide && (
         <div style={{
           padding: '12px 14px', borderRadius: 8, marginBottom: 14,
           background: 'rgba(88,166,255,0.08)', border: '1px solid rgba(88,166,255,0.25)',
@@ -254,7 +277,7 @@ function SettingsTab() {
 
       {/* 啟用模式 */}
       <div style={{ marginBottom: '12px' }}>
-        <label style={S.label}>啟用模式</label>
+        <label style={S.label}>啟用模式 <Tip text="auto = 有新數據時自動重訓並注入分析；on = 手動訓練但結果會注入分析；off = 完全關閉 ML 功能" /></label>
         <div style={{ display: 'flex', gap: '8px' }}>
           {(['auto', 'on', 'off'] as const).map(mode => (
             <button key={mode} onClick={() => save({ enabled: mode })} disabled={saving} style={S.btn(settings.enabled === mode)}>
@@ -266,7 +289,7 @@ function SettingsTab() {
 
       {/* 模型選擇 */}
       <div style={{ marginBottom: '12px' }}>
-        <label style={S.label}>預測模型</label>
+        <label style={S.label}>預測模型 <Tip text="LightGBM 速度快適合入門；LSTM / Transformer 適合捕捉時序規律但訓練較慢" /></label>
         <select value={settings.model_id || 'lightgbm'} onChange={e => save({ model_id: e.target.value })} style={S.input}>
           {models.map(m => (
             <option key={m.id} value={m.id} disabled={!m.available}>
@@ -281,7 +304,7 @@ function SettingsTab() {
         <label style={{ ...S.label, fontWeight: 600, color: 'var(--text-primary)', fontSize: '13px', marginBottom: '8px' }}>前兆模式辨識</label>
         <div style={S.row}>
           <div>
-            <label style={S.label}>預測方向</label>
+            <label style={S.label}>預測方向 <Tip text="訓練模型預測「上漲」還是「下跌」。選 up 則模型學習上漲前的特徵模式，選 down 則學習下跌前的模式" /></label>
             <div style={{ display: 'flex', gap: '6px' }}>
               {(['up', 'down'] as const).map(d => (
                 <button key={d} onClick={() => save({ target_direction: d })} disabled={saving}
@@ -304,7 +327,7 @@ function SettingsTab() {
             </div>
           </div>
           <div>
-            <label style={S.label}>幅度門檻</label>
+            <label style={S.label}>幅度門檻 <Tip text="漲/跌超過多少 % 才算「有效移動」。門檻越高，信號越少但越準確；越低信號多但雜訊也多" /></label>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <input type="range" min="0.5" max="15" step="0.5"
                 value={Math.round((settings.target_threshold || 0.03) * 100 * 10) / 10}
@@ -318,12 +341,12 @@ function SettingsTab() {
         </div>
         <div style={S.row}>
           <div>
-            <label style={S.label}>回看窗口（K 線數）</label>
+            <label style={S.label}>回看窗口（K 線數） <Tip text="模型觀察過去幾根 K 線的特徵來做判斷。太短資訊不足，太長會包含過期雜訊" /></label>
             <NumInput value={settings.lookback_window || 7} min={3} max={30} step={1}
               onCommit={v => save({ lookback_window: v })} style={S.input} />
           </div>
           <div>
-            <label style={S.label}>預測期數（K 線數）</label>
+            <label style={S.label}>預測期數（K 線數） <Tip text="預測未來幾根 K 線內是否達到門檻。期數短 = 短線交易，期數長 = 波段交易" /></label>
             <NumInput value={settings.forward_period || 5} min={1} max={100} step={1}
               onCommit={v => save({ forward_period: v })} style={S.input} />
           </div>
@@ -336,7 +359,7 @@ function SettingsTab() {
       {/* 採用門檻 + 共識 */}
       <div style={S.row}>
         <div>
-          <label style={S.label}>信心採用門檻</label>
+          <label style={S.label}>信心採用門檻 <Tip text="模型預測機率要超過此值才會被採用。60% 是平衡點，調高會減少信號但提高準確率" /></label>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <input type="range" min="52" max="85" step="1"
               value={Math.round((settings.threshold || 0.6) * 100)}
@@ -352,7 +375,7 @@ function SettingsTab() {
       {/* 共識 + 解釋 */}
       <div style={S.row}>
         <div>
-          <label style={S.label}>多模型共識</label>
+          <label style={S.label}>多模型共識 <Tip text="best = 只用最佳模型；vote = 多模型投票表決；weighted = 按準確率加權平均。多模型共識更穩健但需先訓練多個模型" /></label>
           <select value={settings.consensus_mode || 'best'} onChange={e => save({ consensus_mode: e.target.value })} style={S.input}>
             <option value="best">最佳單模型</option>
             <option value="vote">多數投票</option>
@@ -360,7 +383,7 @@ function SettingsTab() {
           </select>
         </div>
         <div>
-          <label style={S.label}>顯示 ML 解釋</label>
+          <label style={S.label}>顯示 ML 解釋 <Tip text="開啟後 AI 分析報告中會顯示模型認為最重要的驅動特徵及其數值" /></label>
           <button onClick={() => save({ show_explanation: !settings.show_explanation })}
             style={{
               ...S.input, cursor: 'pointer', textAlign: 'center',
@@ -390,7 +413,7 @@ function SettingsTab() {
           <div style={{ marginTop: '12px' }}>
             <div style={S.row}>
               <div>
-                <label style={S.label}>特徵集</label>
+                <label style={S.label}>特徵集 <Tip text="compact = 8 個基礎特徵（快）；standard = 15 個（推薦）；full = 25+ 個（慢但能捕捉更多模式）" /></label>
                 <select value={settings.feature_set || 'standard'} onChange={e => save({ feature_set: e.target.value })} style={S.input}>
                   <option value="compact">精簡 (8 特徵)</option>
                   <option value="standard">標準 (15 特徵)</option>
@@ -398,26 +421,26 @@ function SettingsTab() {
                 </select>
               </div>
               <div>
-                <label style={S.label}>訓練窗口</label>
+                <label style={S.label}>訓練窗口 <Tip text="用多少根 K 線來訓練模型。500 根 4h K 線 ≈ 83 天。太少會過擬合，太多會包含過時行情" /></label>
                 <NumInput value={settings.train_window || 500} min={200} max={5000} step={50}
                   onCommit={v => save({ train_window: v })} style={S.input} />
               </div>
             </div>
             <div style={S.row}>
               <div>
-                <label style={S.label}>再訓練頻率（每 N 根）</label>
+                <label style={S.label}>再訓練頻率（每 N 根） <Tip text="每過幾根新 K 線就重新訓練一次。頻率高 = 適應快但耗資源；頻率低 = 穩定但可能過時" /></label>
                 <NumInput value={settings.retrain_interval || 50} min={10} max={500} step={10}
                   onCommit={v => save({ retrain_interval: v })} style={S.input} />
               </div>
               <div>
-                <label style={S.label}>最低樣本量</label>
+                <label style={S.label}>最低樣本量 <Tip text="歷史數據低於此值時不訓練模型，防止樣本太少導致過擬合" /></label>
                 <NumInput value={settings.min_samples || 500} min={100} max={5000} step={50}
                   onCommit={v => save({ min_samples: v })} style={S.input} />
               </div>
             </div>
             <div style={S.row}>
               <div>
-                <label style={S.label}>Walk Forward 驗證</label>
+                <label style={S.label}>Walk Forward 驗證 <Tip text="模擬真實交易的前進式驗證：用過去的數據訓練、未來的數據測試。強烈建議保持開啟，關閉會高估模型表現" /></label>
                 <button onClick={() => save({ walk_forward: !settings.walk_forward })}
                   style={{
                     ...S.input, cursor: 'pointer', textAlign: 'center',
@@ -429,7 +452,7 @@ function SettingsTab() {
                 </button>
               </div>
               <div>
-                <label style={S.label}>WF 窗口數</label>
+                <label style={S.label}>WF 窗口數 <Tip text="Walk Forward 切幾段來做前進式驗證。越多統計結果越穩定，但訓練時間越長" /></label>
                 <NumInput value={settings.wf_windows || 5} min={2} max={15} step={1}
                   onCommit={v => save({ wf_windows: v })} disabled={!settings.walk_forward} style={S.input} />
               </div>
@@ -639,7 +662,25 @@ function TrainResultCard({ result }: { result: any }) {
             color={diag.sample_feature_ratio < 15 ? '#e3a008' : '#3fb950'} />
         </div>
 
-        <div style={{ marginTop: '8px', fontSize: '11px', color: 'var(--text-tertiary)' }}>
+        {/* 白話解讀 */}
+        <div style={{
+          marginTop: '8px', padding: '6px 10px', borderRadius: 6, fontSize: 11, lineHeight: 1.6,
+          background: 'rgba(88,166,255,0.06)', borderLeft: '2px solid rgba(88,166,255,0.3)',
+          color: 'var(--text-secondary)',
+        }}>
+          {tr.oos_accuracy >= 0.58
+            ? '模型表現良好，預測結果具參考價值'
+            : tr.oos_accuracy >= 0.52
+              ? '模型有一定預測能力，建議搭配其他指標綜合判斷'
+              : '模型效果不佳，建議增加歷史數據量或嘗試其他模型'}
+          {diag.overfit_gap > 0.25
+            ? '。過擬合嚴重 — 模型記住了訓練數據的雜訊，實戰效果會打折扣'
+            : diag.overfit_gap > 0.15
+              ? '。有輕微過擬合，可增加數據量或降低特徵集來改善'
+              : '。泛化能力良好，訓練表現與實測接近'}
+        </div>
+
+        <div style={{ marginTop: '6px', fontSize: '11px', color: 'var(--text-tertiary)' }}>
           訓練樣本: {tr.n_train_samples} · 測試樣本: {tr.n_oos_samples} · 耗時: {tr.train_time_ms}ms
         </div>
 

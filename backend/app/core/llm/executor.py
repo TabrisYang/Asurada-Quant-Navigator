@@ -11,6 +11,14 @@ from loguru import logger
 
 from app.core.indicators import registry
 from app.data.fetchers.crypto_engine import crypto_engine
+from app.data.fetchers.tw_stock_engine import tw_stock_engine
+from app.utils.symbol import is_tw_stock
+
+
+def _load_local_data(symbol: str, timeframe: str, start: str = None, end: str = None):
+    """根據 symbol 類型選擇正確的數據引擎載入本地資料"""
+    engine = tw_stock_engine if is_tw_stock(symbol) else crypto_engine
+    return engine.load_local_data(symbol, timeframe, start, end)
 
 
 # ========== 安全過濾 ==========
@@ -42,6 +50,8 @@ ALLOWED_FUNCTIONS = {
     "run_quant_research",
     "optimize_indicator_params",
     "scan_conditional_probability",
+    "generate_scenarios",
+    "detect_smc_structure",
 }
 
 
@@ -96,7 +106,13 @@ async def execute_function_calls(
         try:
             if name == "query_chart_data":
                 result = await _exec_query_chart(args, default_symbol, default_timeframe)
-                chart_updates.update(result.get("chart_updates", {}))
+                cu = result.get("chart_updates", {})
+                if not chart_updates.get("symbol"):
+                    # 第一次查詢：設定圖表幣對
+                    chart_updates.update(cu)
+                else:
+                    # 多幣查詢：不覆蓋 symbol，避免圖表切換混亂
+                    chart_updates.setdefault("multi_symbol_data", []).append(cu)
                 results.append({"function": name, "result": result})
 
             elif name == "manage_indicator":
@@ -154,6 +170,14 @@ async def execute_function_calls(
                 result = await _exec_conditional_prob_scan(args, default_symbol, default_timeframe)
                 results.append({"function": name, "result": result})
 
+            elif name == "generate_scenarios":
+                result = await _exec_generate_scenarios(args, default_symbol, default_timeframe)
+                results.append({"function": name, "result": result})
+
+            elif name == "detect_smc_structure":
+                result = await _exec_detect_smc(args, default_symbol, default_timeframe)
+                results.append({"function": name, "result": result})
+
         except Exception as e:
             logger.error(f"執行 {name} 失敗: {e}")
             results.append({"function": name, "error": str(e)})
@@ -171,7 +195,7 @@ async def _exec_query_chart(args: dict, default_symbol: str, default_tf: str) ->
     start = args.get("start_date")
     end = args.get("end_date")
 
-    df = crypto_engine.load_local_data(symbol, timeframe, start, end)
+    df = _load_local_data(symbol, timeframe, start, end)
 
     result: dict[str, Any] = {
         "chart_updates": {
@@ -280,7 +304,7 @@ async def _exec_find_conditions(args: dict, default_symbol: str, default_tf: str
     start = args.get("start_date")
     end = args.get("end_date")
 
-    df = crypto_engine.load_local_data(symbol, timeframe, start, end)
+    df = _load_local_data(symbol, timeframe, start, end)
     if df.empty:
         return {"matched_periods": [], "summary": "找不到數據", "annotations": []}
 
@@ -336,15 +360,24 @@ async def _exec_find_conditions(args: dict, default_symbol: str, default_tf: str
     }
 
 
+_ANNOTATE_ALLOWED_TYPES = {"horizontal_line", "text_label"}
+
+
 def _exec_annotate(args: dict) -> list[dict]:
-    """執行 annotate_chart — 支援批量繪圖，回傳 annotation 列表"""
+    """執行 annotate_chart — 支援批量繪圖，回傳 annotation 列表。
+    白名單過濾：只允許 horizontal_line 和 text_label，
+    trend_line / highlight_range / vertical_line 一律丟棄。
+    """
     import uuid
     group_id = str(uuid.uuid4())[:8]
     group_name = args.get("group_name", "AI 標記")
 
-    def _build_one(a: dict) -> dict:
+    def _build_one(a: dict) -> dict | None:
+        ann_type = a.get("annotation_type", "horizontal_line")
+        if ann_type not in _ANNOTATE_ALLOWED_TYPES:
+            return None
         return {
-            "type": a.get("annotation_type", "highlight_range"),
+            "type": ann_type,
             "startTime": a.get("start_time"),
             "endTime": a.get("end_time"),
             "price": a.get("price"),
@@ -359,9 +392,10 @@ def _exec_annotate(args: dict) -> list[dict]:
 
     batch = args.get("annotations")
     if batch and isinstance(batch, list):
-        return [_build_one(item) for item in batch]
+        return [r for item in batch if (r := _build_one(item)) is not None]
 
-    return [_build_one(args)]
+    result = _build_one(args)
+    return [result] if result is not None else []
 
 
 def _exec_draw_pattern(args: dict) -> list[dict]:
@@ -493,9 +527,9 @@ async def _exec_compare_strategies(args: dict, default_symbol: str, default_tf: 
     end = args.get("end_date")
 
     _MIN_BARS = 60
-    df = crypto_engine.load_local_data(symbol, timeframe, start, end)
+    df = _load_local_data(symbol, timeframe, start, end)
     if len(df) < _MIN_BARS and (start or end):
-        df_full = crypto_engine.load_local_data(symbol, timeframe)
+        df_full = _load_local_data(symbol, timeframe)
         if len(df_full) >= _MIN_BARS:
             df = df_full
             logger.info(f"策略比較 [{symbol}]: 指定日期範圍數據不足，已自動擴大至全部本地數據（{len(df)} 根）")
@@ -556,9 +590,9 @@ async def _exec_backtest(args: dict, default_symbol: str, default_tf: str) -> di
     end = args.get("end_date")
 
     _MIN_BARS_BACKTEST = 60
-    df = crypto_engine.load_local_data(symbol, timeframe, start, end)
+    df = _load_local_data(symbol, timeframe, start, end)
     if len(df) < _MIN_BARS_BACKTEST and (start or end):
-        df_full = crypto_engine.load_local_data(symbol, timeframe)
+        df_full = _load_local_data(symbol, timeframe)
         if len(df_full) >= _MIN_BARS_BACKTEST:
             df = df_full
             logger.info(
@@ -611,9 +645,9 @@ async def _exec_analyze_event_patterns(args: dict, default_symbol: str, default_
     end = args.get("end_date")
 
     _min_bars_event = lookback + n_bars + 20
-    df = crypto_engine.load_local_data(symbol, timeframe, start, end)
+    df = _load_local_data(symbol, timeframe, start, end)
     if len(df) < _min_bars_event and (start or end):
-        df_full = crypto_engine.load_local_data(symbol, timeframe)
+        df_full = _load_local_data(symbol, timeframe)
         if len(df_full) >= _min_bars_event:
             df = df_full
             logger.info(f"事件分析 [{symbol}]: 指定日期範圍數據不足，已自動擴大至全部本地數據（{len(df)} 根）")
@@ -796,15 +830,15 @@ async def _exec_quant_research(args: dict, default_symbol: str, default_tf: str)
     leverage = args.get("leverage", 1.0)
 
     _MIN_BARS_RESEARCH = 100
-    df = crypto_engine.load_local_data(symbol, timeframe, start, end)
+    df = _load_local_data(symbol, timeframe, start, end)
     date_expanded = False
     if len(df) < _MIN_BARS_RESEARCH and (start or end):
-        df_full = crypto_engine.load_local_data(symbol, timeframe)
+        df_full = _load_local_data(symbol, timeframe)
         if len(df_full) >= _MIN_BARS_RESEARCH:
             df = df_full
             date_expanded = True
             logger.info(
-                f"量化研究 [{symbol}]: 指定日期範圍數據不足（{len(crypto_engine.load_local_data(symbol, timeframe, start, end))} 根），"
+                f"量化研究 [{symbol}]: 指定日期範圍數據不足（{len(_load_local_data(symbol, timeframe, start, end))} 根），"
                 f"已自動擴大至全部本地數據（{len(df)} 根）"
             )
     if df.empty or len(df) < _MIN_BARS_RESEARCH:
@@ -1026,7 +1060,7 @@ async def _exec_optimize_params(args: dict, default_symbol: str, default_tf: str
     indicator_ids = args.get("indicators")
     forward_bars = args.get("forward_bars", 5)
 
-    df = crypto_engine.load_local_data(symbol, timeframe, start, end)
+    df = _load_local_data(symbol, timeframe, start, end)
     if df.empty or len(df) < 200:
         return {"status": "error", "message": f"數據不足（{len(df)} 根 K 線），至少需要 200 根。請先同步更多歷史數據。"}
 
@@ -1055,7 +1089,12 @@ async def _exec_conditional_prob_scan(args: dict, default_symbol: str, default_t
     start = args.get("start_date")
     end = args.get("end_date")
 
-    df = crypto_engine.load_local_data(symbol, timeframe, start, end)
+    df = _load_local_data(symbol, timeframe, start, end)
+
+    # 未指定日期範圍時，預設使用最近 120 根 K 線，確保分析反映近期市場狀態
+    if start is None and end is None and df is not None and len(df) > 120:
+        df = df.tail(120).copy()
+
     if df.empty or len(df) < forward_bars + 50:
         return {"status": "error", "message": f"數據不足（{len(df)} 根 K 線），至少需要 {forward_bars + 50} 根。"}
 
@@ -1171,3 +1210,62 @@ async def _exec_conditional_prob_scan(args: dict, default_symbol: str, default_t
         },
         "warning": "條件機率不代表因果關係，高機率區間可能樣本較少。建議搭配其他分析交叉驗證。",
     }
+
+
+async def _exec_generate_scenarios(args: dict, default_symbol: str, default_tf: str) -> dict:
+    """產出三大情境預測 — 整合 ML、技術指標、歷史相似度、市場結構"""
+    from app.core.ml.scenario_predictor import scenario_predictor
+
+    symbol = args.get("symbol", default_symbol)
+    timeframe = args.get("timeframe", default_tf)
+    forward_bars = args.get("forward_bars", 5)
+
+    df = _load_local_data(symbol, timeframe)
+    if df is None or df.empty:
+        return {"status": "error", "message": f"找不到 {symbol} {timeframe} 的本地數據，請先同步"}
+    if len(df) < 30:
+        return {"status": "error", "message": f"數據不足（{len(df)} 根），需要至少 30 根 K 線"}
+
+    try:
+        result = scenario_predictor.predict_scenarios(
+            df=df, symbol=symbol, timeframe=timeframe, forward_bars=forward_bars,
+        )
+        return {"status": "success", **result.to_dict()}
+    except Exception as e:
+        return {"status": "error", "message": f"情境預測失敗: {str(e)}"}
+
+
+async def _exec_detect_smc(args: dict, default_symbol: str, default_tf: str) -> dict:
+    """SMC 訂單流結構分析 — BOS/CHoCH/FVG/Sweep/MTF 全量化計算"""
+    from app.core.ml.smc_detector import smc_detector
+
+    symbol = args.get("symbol", default_symbol)
+    timeframe = args.get("timeframe", default_tf)
+    lookback = args.get("lookback", 120)
+    htf_tf = args.get("htf")
+
+    df = _load_local_data(symbol, timeframe)
+    if df is None or df.empty:
+        return {"status": "error", "message": f"找不到 {symbol} {timeframe} 的本地數據，請先同步"}
+    if len(df) < 30:
+        return {"status": "error", "message": f"數據不足（{len(df)} 根），需要至少 30 根 K 線"}
+
+    # 載入 HTF 數據（多時區共振）
+    df_htf = None
+    if htf_tf:
+        df_htf = _load_local_data(symbol, htf_tf)
+    else:
+        # 自動推斷 HTF
+        _htf_map = {"15m": "1h", "1h": "4h", "4h": "1d", "1d": "1w"}
+        inferred_htf = _htf_map.get(timeframe)
+        if inferred_htf and inferred_htf != timeframe:
+            df_htf = _load_local_data(symbol, inferred_htf)
+
+    try:
+        result = smc_detector.detect(
+            df=df, symbol=symbol, timeframe=timeframe,
+            df_htf=df_htf, lookback=lookback,
+        )
+        return {"status": "success", **result.to_dict()}
+    except Exception as e:
+        return {"status": "error", "message": f"SMC 分析失敗: {str(e)}"}

@@ -46,7 +46,14 @@ def get_strategy(strategy_id: str) -> dict | None:
     return None
 
 
-def add_strategy(title: str, content: str, enabled: bool = True) -> dict:
+def add_strategy(
+    title: str,
+    content: str,
+    enabled: bool = True,
+    auto_inject: bool = False,
+    trigger: str = "manual",
+    prompt_module: str | None = None,
+) -> dict:
     strategies = _load_all()
     now = datetime.utcnow().isoformat()
     new = {
@@ -54,6 +61,9 @@ def add_strategy(title: str, content: str, enabled: bool = True) -> dict:
         "title": title,
         "content": content,
         "enabled": enabled,
+        "auto_inject": auto_inject,
+        "trigger": trigger,           # "analysis" / "all" / "manual"
+        "prompt_module": prompt_module,  # 對應 _PROMPT_MODULES 的 key
         "created_at": now,
         "updated_at": now,
     }
@@ -63,8 +73,15 @@ def add_strategy(title: str, content: str, enabled: bool = True) -> dict:
     return new
 
 
-def update_strategy(strategy_id: str, title: str | None = None,
-                    content: str | None = None, enabled: bool | None = None) -> dict | None:
+def update_strategy(
+    strategy_id: str,
+    title: str | None = None,
+    content: str | None = None,
+    enabled: bool | None = None,
+    auto_inject: bool | None = None,
+    trigger: str | None = None,
+    prompt_module: str | None = None,
+) -> dict | None:
     strategies = _load_all()
     for s in strategies:
         if s["id"] == strategy_id:
@@ -74,6 +91,12 @@ def update_strategy(strategy_id: str, title: str | None = None,
                 s["content"] = content
             if enabled is not None:
                 s["enabled"] = enabled
+            if auto_inject is not None:
+                s["auto_inject"] = auto_inject
+            if trigger is not None:
+                s["trigger"] = trigger
+            if prompt_module is not None:
+                s["prompt_module"] = prompt_module
             s["updated_at"] = datetime.utcnow().isoformat()
             _save_all(strategies)
             logger.info(f"更新自訂策略: {s['title']} ({strategy_id})")
@@ -204,3 +227,28 @@ def get_enabled_strategies_prompt() -> str:
         lines.append("")
 
     return "\n".join(lines)
+
+
+def get_auto_inject_modules(intents: set[str]) -> list[str]:
+    """根據當前意圖，回傳需要自動注入的 prompt 模組名
+
+    策略需同時滿足 enabled=True 且 auto_inject=True。
+    trigger 決定何時注入：
+    - "all": 所有對話都注入
+    - "analysis" / "smc" / ...: 僅當偵測到對應意圖時注入
+    - "manual": 不自動注入（僅在用戶明確提到關鍵字時由意圖系統觸發）
+    """
+    strategies = [s for s in _load_all() if s.get("enabled") and s.get("auto_inject")]
+    modules: list[str] = []
+    for s in strategies:
+        trigger = s.get("trigger", "manual")
+        module = s.get("prompt_module")
+        if not module:
+            continue
+        if trigger == "manual":
+            continue
+        if trigger == "all":
+            modules.append(module)
+        elif trigger in intents:
+            modules.append(module)
+    return modules

@@ -51,6 +51,17 @@ _INTENT_KEYWORDS: dict[str, list[str]] = {
         "條件機率", "conditional", "勝率最高",
         "什麼數值", "多少時", "在哪個區間", "最佳區間",
     ],
+    "scenario": [
+        "情境", "預測情境", "三種可能", "三個可能", "可能性", "情境分析",
+        "接下來", "未來走勢", "後續走勢", "scenario", "會怎麼走",
+        "預測", "三大", "最有可能",
+    ],
+    "smc": [
+        "訂單流", "SMC", "聰明錢", "smart money",
+        "BOS", "CHoCH", "流動性", "sweep",
+        "FVG", "失衡區", "order block",
+        "機構", "結構破壞", "結構轉折",
+    ],
 }
 
 
@@ -110,6 +121,27 @@ chart_state 中的 indicatorValues 包含系統精確計算的指標數值（最
 - 如果 indicatorValues 中沒有該指標，你必須先呼叫 manage_indicator 添加指標，或明確告知使用者「目前未啟用該指標，無法提供精確數值」。
 - 趨勢標籤（↑↓→）代表最近數根的變化方向，可直接引用。
 - 若 chart_state 中有 factorScanSummary，代表使用者最近執行了因子掃描。你必須參考該結果，在分析時引用具體的 IC 數據和有效因子，不要忽略它。
+
+【★★ 數據驅動分析規則 — 零模糊容忍】
+你的每一句分析結論都必須附帶「具體數值 + 判斷閾值 + 機制解釋」，絕對不可只說結論不給數據。
+
+❌ 禁止的模糊表述（違反此規則等同分析失敗）：
+- 「成交量出現反轉訊號」→ 沒說多少量、和什麼比較、為什麼算反轉
+- 「RSI 進入超買區」→ 沒說當前值、為什麼這個值算超買
+- 「支撐位附近」→ 沒說具體價位和計算依據
+- 「趨勢偏多」→ 沒說什麼指標、什麼數值、什麼門檻判定
+- 「量能萎縮」→ 沒說當前量、均量、萎縮比例
+
+✅ 正確的表述（每次必須做到）：
+- 「成交量 158,000（過去 20 根均量 92,000 的 1.72 倍），超過 1.5 倍均量閾值，符合放量標準。放量通常代表市場參與者增加，價格方向更具可信度。」
+- 「RSI = 73.2，超過超買閾值 70（RSI 14 週期設定）。超過 70 代表過去 14 根 K 線中上漲幅度佔比偏高，價格有均值回歸的統計傾向。」
+- 「支撐位 65,500（依據：BB 下軌 = 65,460，取整至百位）」
+- 「ADX = 32.1（> 25 門檻），+DI = 28.3 > -DI = 15.7，確認上升趨勢。ADX > 25 代表方向性動能顯著，+DI > -DI 表示上漲力量主導。」
+
+每次提到指標判斷時，必須回答三個問題：
+1. **當前值**是多少？（從 indicatorValues 精確引用）
+2. **判斷閾值**是多少？（標準閾值或你計算的數值）
+3. **為什麼**超過/低於這個閾值代表這個結論？（1-2 句機制解釋）
 
 【系統超能力 — 你必須主動運用】
 1. 工具調用：你具備直接操作圖表與獲取數據的能力（Function Call）。需要驗證假設時，主動呼叫函式，不要憑空猜測數據。
@@ -302,7 +334,14 @@ _PROMPT_MODULES["analysis_v2"] = """
 - 方向：看多 / 看空 / 中性 / 觀望
 - 強度：弱 / 中 / 強
 - 信心：來自因子一致性 + 近期有效性 + Regime 相容性
-- 推翻條件（Invalidation）：明確指出哪些條件發生將推翻本次判斷"""
+- 推翻條件（Invalidation）：明確指出哪些條件發生將推翻本次判斷
+
+【每個維度分析的輸出格式】
+每個分析維度的結論必須遵循「數值 → 閾值 → 機制」三段式：
+- 數值：當前指標的精確值（從 indicatorValues 讀取，禁止猜測）
+- 閾值：判斷標準是什麼（例如 RSI > 70、ADX > 25、量比 > 1.5 倍均量）
+- 機制：為什麼這個閾值有意義（1-2 句說明原理）
+不符合此格式的分析結論視為無效，不可出現在最終回答中。"""
 
 # ─── factor_validation（新增）─────────────────────────
 
@@ -321,11 +360,11 @@ _PROMPT_MODULES["factor_validation"] = """
 - ★ Weakening — 近期衰退跡象，應降權使用
 - ✗ Dead / Reversed — 已失效或方向反轉，必須排除
 
-【因子分級使用規則】
-- ★★★ → 可作為主要進出場依據
-- ★★ → 輔助確認
-- ★ → 僅供參考，不可單獨作為依據
-- ✗ → 即使符合條件也不可使用，必須提醒使用者該因子已衰退
+【因子分級使用規則 — 強制約束】
+- ★★★ → 可作為主要進出場依據，預測必須以 ★★★ 指標為主導
+- ★★ → 輔助確認，不可單獨作為進出場訊號
+- ★ → 禁止作為主要訊號。若你的預測主要基於 ★ 指標，你必須改用 ★★★ 指標重新分析
+- ✗ → 完全禁止使用。即使技術形態符合，也必須排除並明確告知使用者「該因子已衰退，不納入分析」
 
 若系統注入的「預測績效反饋」中某指標連續止損 ≥3 次 → 自動降為 ★。
 若某因子近期 IC 為負但長期為正 → 標記 Weakening 並警告 Regime 可能已改變。"""
@@ -348,6 +387,22 @@ _PROMPT_MODULES["risk_checklist"] = """
 10. ⚠️ 破產風險：Monte Carlo 破產概率 > 5% → 必須降低槓桿
 
 觸發 ≥3 項 → 結論必須偏向「僅適合研究，不適合實盤」或「僅適合小倉位試單」。"""
+
+# ─── auto_backtest（分析時自動回測）────────────────────────────
+
+_PROMPT_MODULES["auto_backtest"] = """
+【★★ 策略建議前的強制回測驗證】
+當你要給出包含具體進場/止損/目標的交易建議時，你「必須」先做以下驗證：
+
+1. 呼叫 run_backtest 或 compare_strategies，用你建議的進出場條件跑歷史回測
+2. 回測結果中必須檢查：勝率、盈虧比、最大回撤、交易次數
+3. 如果回測結果不佳（勝率 < 45% 或 Profit Factor < 1.2），必須調整策略或降低信心等級
+4. 報告中必須附上回測關鍵數據（勝率、PF、MDD、交易次數）
+5. 「必須」說明本次回測使用了多少根 K 線（回測樣本量），讓使用者了解數據基礎是否充足
+
+唯一例外：使用者只是問一般市場看法而不需要具體交易策略時，不需要回測。
+
+若 chart_state 中有校準數據（calibration），回測時「必須」使用校準後的最佳指標參數，而非教科書預設值。"""
 
 # ─── alpha_monitor（新增）────────────────────────────
 
@@ -408,34 +463,48 @@ _PROMPT_MODULES["output_full"] = """
 # ─── drawing（保留，微調）────────────────────────────
 
 _PROMPT_MODULES["drawing"] = """
-【重要：圖表繪圖規則】
-- 想在圖表上畫任何東西，你有兩個函式：
-  ① annotate_chart — 通用繪圖（支撐壓力線、趨勢線、高亮區間、文字標籤）。支援批量：用 annotations 陣列一次畫多條線。
-  ② draw_pattern — 型態繪圖（諧波、三角形、旗型等）。只需提供關鍵轉折點，系統自動連線和標注。
-- 必須設定 group_name（如「上升通道」「支撐壓力位」「Gartley」），讓使用者能在圖表面板中開關/刪除每組標記
-- 不要聲稱「已經畫出」卻沒有呼叫函式
-- 時間格式統一使用 YYYY-MM-DD HH:MM:SS
+【重要：圖表繪圖規則 — 極簡原則】
+你有兩個繪圖函式：
+  ① annotate_chart — 畫水平價格線（horizontal_line）
+  ② draw_pattern — 諧波型態繪圖（連接 X→A→B→C→D 五點）
+
+【嚴格限制：僅允許畫以下兩類，其餘一律禁止】
+
+1. **諧波型態**（僅限 Gartley / Bat / Butterfly / Crab / Shark）：
+   - 識別 5 個轉折點 X→A→B→C→D，驗證 Fibonacci 比例
+   - 呼叫 draw_pattern(pattern_name="Gartley", points=[X,A,B,C,D], bullish=true/false)
+   - 用 annotate_chart 在 D 點標示 PRZ（group_name="PRZ 反轉區"）
+   - 顏色：諧波=#f0b90b PRZ=#e040fb
+
+2. **關鍵價格水平線**（最多 5 條，用 annotate_chart 的 horizontal_line）：
+   - 做空止損（紅色 #f85149）：例如 text="做空止損 72,000"
+   - 最佳做空區（紅色 #f85149）：例如 text="最佳做空區 70,200"
+   - 參考中軌（灰色 #8b949e）：例如 text="BB 中軌 70,117"
+   - 最佳做多區（綠色 #3fb950）：例如 text="最佳做多區 65,500"
+   - 做多止損（綠色 #3fb950）：例如 text="做多止損 63,400"
+
+【完全禁止 — 任何情況下都不得使用】
+- 趨勢線（trend_line）— 系統會自動攔截，不會繪製
+- 高亮區間（highlight_range）— 系統會自動攔截，不會繪製
+- 垂直線（vertical_line）— 系統會自動攔截，不會繪製
+- 支撐壓力通道、三角形等非諧波圖形
+- annotate_chart 的 annotation_type 只能用 horizontal_line
+
+【格式要求】
+- 每條水平線的 text 必須包含「描述 + 精確價格數字」
+- group_name 統一使用「關鍵價位」或具體諧波名稱（如「Gartley」）
+- 時間格式：YYYY-MM-DD HH:MM:SS
 - 使用 chart_state 中的 ohlcv_summary 取得精確價格和時間
 
 【批量繪圖範例】
-畫支撐壓力位（一次呼叫 annotate_chart）：
-  group_name="支撐壓力位"
-  annotations=[
-    {annotation_type:"horizontal_line", price:95000, text:"壓力 95000", color:"#f85149"},
-    {annotation_type:"horizontal_line", price:88000, text:"支撐 88000", color:"#3fb950"}
-  ]
-
-【智慧繪圖策略】
-1. 精選原則：每次最多 3~5 組標記
-2. 優先順序：支撐/壓力位 > 趨勢線 > 型態邊界 > 進出場標記
-3. 顏色規範：支撐=#3fb950 壓力=#f85149 趨勢=#58a6ff 型態=#ff9800 進場=#3fb950 出場=#f85149 諧波=#f0b90b PRZ=#e040fb
-4. 主動畫出關鍵支撐/壓力/趨勢
-
-【諧波型態繪圖指南】
-1. 識別 5 個轉折點 X→A→B→C→D
-2. 驗證 Fibonacci 比例
-3. 呼叫 draw_pattern(pattern_name="Gartley", points=[X,A,B,C,D], bullish=true/false)
-4. 用 annotate_chart 在 D 點標示 PRZ（group_name="PRZ 反轉區"）"""
+group_name="關鍵價位"
+annotations=[
+  {annotation_type:"horizontal_line", price:72000, text:"做空止損 72,000", color:"#f85149"},
+  {annotation_type:"horizontal_line", price:70200, text:"最佳做空區 70,200", color:"#f85149"},
+  {annotation_type:"horizontal_line", price:70117, text:"BB 中軌 70,117", color:"#8b949e"},
+  {annotation_type:"horizontal_line", price:65500, text:"最佳做多區 65,500", color:"#3fb950"},
+  {annotation_type:"horizontal_line", price:63400, text:"做多止損 63,400", color:"#3fb950"}
+]"""
 
 # ─── event_analysis（保留）────────────────────────────
 
@@ -501,6 +570,9 @@ _PROMPT_MODULES["conditional_prob"] = """
 2. 統計每個區間後續 forward_bars 根 K 線漲/跌 ≥ target_pct 的機率
 3. 找出機率最高的區間，並計算相對於基線的提升幅度 (lift)
 
+重要：未指定日期範圍時，系統預設使用最近 120 根 K 線的數據，
+以確保分析結果反映當前市場環境。如用戶需要分析更長時間範圍，請主動指定 start_date。
+
 結果解讀：
 - best_range：機率最高的指標數值區間
 - best_prob_pct：該區間的條件機率
@@ -554,6 +626,42 @@ rsi, macd, bb, ema, sma, adx, supertrend, psar, stochrsi, roc, obv, rel_vol, vol
 
 # ─── teaching（教學模式）──────────────────────────
 
+_PROMPT_MODULES["scenario"] = """
+【情境預測 — generate_scenarios】
+當使用者詢問「未來走勢」「接下來會怎樣」「三種可能」「預測情境」等問題時，
+你**必須**呼叫 generate_scenarios 函式取得統計計算的情境預測，不可自行編造機率數字。
+
+使用方式：
+1. 呼叫 generate_scenarios（可指定 symbol, timeframe, forward_bars）
+2. 收到三個情境（看漲/中性/看跌），每個附帶統計機率、價格區間、支撐訊號
+3. 用自然語言解讀每個情境的含義，加入交易操作建議
+4. **嚴禁**修改或重新編造機率數字 — 直接引用系統回傳的百分比
+5. 可以補充判讀：哪個情境在當前環境最值得關注、失效條件觸發時的應對
+
+格式建議：
+- 每個情境用獨立段落呈現
+- 標註機率來源權重（ML / 技術指標 / 歷史相似度 / 市場結構）
+- 附上失效條件和風險等級"""
+
+_PROMPT_MODULES["smc"] = """
+【SMC 訂單流分析模式 — detect_smc_structure】
+你收到了後端 detect_smc_structure 函式的精確計算結果。請嚴格依照以下格式解讀：
+
+🎓 量化導師分析：
+- 引用 reasoning 欄位解釋市場結構邏輯（BOS/CHoCH 為何成立）
+- 引用 sweep_events 說明機構行為證據（成交量特徵）
+- 引用 parameters_used 披露使用的樣本數和閾值
+
+🎯 交易執行計劃：
+- 建議：引用 bias 欄位（BUY/SELL/WAIT/NO_TRADE）
+- Entry/SL/TP：直接引用計算值，不可自行推算
+- RR Ratio + 信心評等：引用 confidence 和 confidence_breakdown
+
+📝 思考題：
+- 根據當前結構，提出一個「如果結構失效」的假設性問題
+
+所有數值必須直接引用計算結果，禁止自行推算任何價格或比率。"""
+
 _PROMPT_MODULES["teaching"] = """
 【教學模式 — 面向學習者的解說】
 你目前處於教學模式。除了正常分析，你必須額外做到：
@@ -573,7 +681,7 @@ _INTENT_TO_MODULES: dict[str, list[str]] = {
     "general": [],
     "simple_query": [],
     "drawing": ["drawing"],
-    "analysis": ["regime_v2", "analysis_v2", "factor_validation", "output_lite", "drawing"],
+    "analysis": ["regime_v2", "analysis_v2", "factor_validation", "output_lite", "drawing", "backtest", "risk_checklist", "auto_backtest"],
     "backtest": ["regime_v2", "backtest", "risk_checklist"],
     "quant_research": [
         "regime_v2", "quant_research", "backtest",
@@ -582,6 +690,8 @@ _INTENT_TO_MODULES: dict[str, list[str]] = {
     "calibrate": ["calibrate"],
     "event_analysis": ["event_analysis"],
     "conditional_prob": ["conditional_prob"],
+    "scenario": ["scenario", "regime_v2", "analysis_v2"],
+    "smc": ["smc", "regime_v2", "drawing"],
 }
 
 
@@ -597,6 +707,15 @@ def assemble_system_prompt(intents: set[str], teaching_mode: bool = False) -> st
         for mod in _INTENT_TO_MODULES.get(intent, []):
             modules_needed.add(mod)
 
+    # 自動注入用戶設定的策略模組
+    try:
+        from app.core.user_strategies import get_auto_inject_modules
+        for mod in get_auto_inject_modules(intents):
+            if mod in _PROMPT_MODULES:
+                modules_needed.add(mod)
+    except Exception:
+        pass  # 策略庫尚未初始化時靜默忽略
+
     if teaching_mode:
         modules_needed.add("teaching")
 
@@ -604,9 +723,9 @@ def assemble_system_prompt(intents: set[str], teaching_mode: bool = False) -> st
     _MODULE_ORDER = (
         "teaching",
         "regime_v2", "analysis_v2", "factor_validation",
-        "risk_checklist", "alpha_monitor",
+        "auto_backtest", "risk_checklist", "alpha_monitor",
         "output_lite", "output_full",
-        "drawing", "event_analysis", "conditional_prob",
+        "drawing", "event_analysis", "conditional_prob", "scenario", "smc",
         "quant_research", "calibrate", "backtest",
     )
 
@@ -1150,6 +1269,61 @@ FUNCTION_DEFINITIONS = [
                     "end_date": {"type": "string", "description": "結束日期 YYYY-MM-DD"},
                 },
                 "required": ["indicators"],
+            },
+        },
+    },
+
+    # ── 情境預測 ──
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_scenarios",
+            "description": (
+                "三大情境預測：整合 ML 模型、技術指標、歷史相似度、市場結構，"
+                "產出三個最有可能的價格情境（看漲/中性/看跌），每個附帶統計計算的機率百分比。"
+                "適用場景：「未來走勢預測」「接下來會怎樣」「三種可能」「情境分析」。"
+                "所有機率由後端統計計算，非 LLM 生成。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "交易對，留空使用當前"},
+                    "timeframe": {"type": "string", "description": "時間級別，留空使用當前"},
+                    "forward_bars": {
+                        "type": "integer",
+                        "description": "預測有效期（K 線根數，預設 5）",
+                        "default": 5,
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+
+    # ── SMC 訂單流結構分析 ──
+    {
+        "type": "function",
+        "function": {
+            "name": "detect_smc_structure",
+            "description": (
+                "SMC 訂單流結構分析：偵測 BOS/CHoCH、Fair Value Gap、流動性 Sweep、"
+                "多時區共振（MTF Alignment），計算交易建議（BUY/SELL/WAIT）和信心分數。"
+                "適用場景：「訂單流分析」「SMC 結構」「聰明錢」「機構行為」「BOS/CHoCH」「流動性」。"
+                "所有結構判定由後端精確計算，非 LLM 推算。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "交易對，留空使用當前"},
+                    "timeframe": {"type": "string", "description": "時間框架，如 1h, 4h, 1d"},
+                    "htf": {"type": "string", "description": "高時區框架（可選，預設自動推斷）"},
+                    "lookback": {
+                        "type": "integer",
+                        "description": "回溯 K 線數量（預設 120）",
+                        "default": 120,
+                    },
+                },
+                "required": [],
             },
         },
     },

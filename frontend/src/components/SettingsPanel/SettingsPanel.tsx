@@ -13,7 +13,7 @@ import { useChartStore } from '../../stores/chartStore';
 import {
   configureLLM, testLLMConnection, discoverModels, exportKnowledgePDF,
   fetchStrategies, addStrategy, updateStrategy, deleteStrategy,
-  fetchSystemSettings, updateSystemSettings,
+  fetchSystemSettings, updateSystemSettings, clearSessionCache,
   type UserStrategy,
 } from '../../services/api';
 import { persistSession } from '../../services/session';
@@ -68,6 +68,23 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
     const next = !teachingMode;
     setTeachingMode(next);
     await updateSystemSettings({ teaching_mode: next }).catch(() => setTeachingMode(!next));
+  };
+
+  // 清除 Session 快取
+  const [clearingCache, setClearingCache] = useState(false);
+  const [cacheMsg, setCacheMsg] = useState('');
+  const handleClearCache = async () => {
+    setClearingCache(true);
+    setCacheMsg('');
+    try {
+      const msg = await clearSessionCache();
+      setCacheMsg(msg || '已清除');
+    } catch {
+      setCacheMsg('清除失敗，請稍後再試');
+    } finally {
+      setClearingCache(false);
+      setTimeout(() => setCacheMsg(''), 3000);
+    }
   };
 
   const selectedProvider = LLM_PROVIDERS.find((p) => p.id === llmConfig.provider);
@@ -559,6 +576,39 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
             </button>
           </div>
         </div>
+
+        {/* ===== 清除 Session 快取 ===== */}
+        {llmConfig.provider === 'claude_subscription' && (
+        <div className="mt-4 pt-4" style={{ borderTop: '1px solid var(--border-primary)' }}>
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
+                清除 Session 快取
+              </div>
+              <div className="text-xs mt-0.5" style={{ color: 'var(--text-secondary)' }}>
+                若遇到回應異常或想重置對話快取，可手動清除
+              </div>
+            </div>
+            <button
+              onClick={handleClearCache}
+              disabled={clearingCache}
+              className="px-3 py-1.5 text-xs rounded transition-colors"
+              style={{
+                backgroundColor: 'var(--bg-tertiary)',
+                color: 'var(--text-primary)',
+                opacity: clearingCache ? 0.5 : 1,
+              }}
+            >
+              {clearingCache ? '清除中...' : '清除快取'}
+            </button>
+          </div>
+          {cacheMsg && (
+            <div className="text-xs mt-2" style={{ color: 'var(--accent-green)' }}>
+              {cacheMsg}
+            </div>
+          )}
+        </div>
+        )}
         </>}
       </div>
     </div>

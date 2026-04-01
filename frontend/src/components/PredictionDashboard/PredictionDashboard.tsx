@@ -5,7 +5,9 @@ import { useChartStore } from '../../stores/chartStore';
 import {
   fetchPredictionStats, fetchActivePredictions, fetchPredictionHistory,
   updatePredictionNote, generateReview, clearPredictions,
+  fetchScenarios, fetchAdjustments, recalculateAdjustments,
 } from '../../services/api';
+import { loadPersistedSession } from '../../services/session';
 
 interface PredictionItem {
   id: number;
@@ -46,7 +48,16 @@ export default function PredictionDashboard() {
   const [activePreds, setActivePreds] = useState<PredictionItem[]>([]);
   const [historyPreds, setHistoryPreds] = useState<PredictionItem[]>([]);
   const [loading, setLoading] = useState(true);
-  const [viewTab, setViewTab] = useState<'active' | 'history' | 'indicators'>('active');
+  const [viewTab, setViewTab] = useState<'scenarios' | 'active' | 'history' | 'indicators' | 'adjustments'>('scenarios');
+
+  // 情境預測
+  const [scenarioData, setScenarioData] = useState<any>(null);
+  const [scenarioLoading, setScenarioLoading] = useState(false);
+  const [scenarioError, setScenarioError] = useState<string | null>(null);
+
+  // 自動調整
+  const [adjustments, setAdjustments] = useState<any[]>([]);
+  const [adjLoading, setAdjLoading] = useState(false);
 
   // 筆記編輯
   const [editingNoteId, setEditingNoteId] = useState<number | null>(null);
@@ -78,7 +89,43 @@ export default function PredictionDashboard() {
     }
   }, [chartSymbol]);
 
+  const loadScenarios = useCallback(async () => {
+    if (!chartSymbol) return;
+    setScenarioLoading(true);
+    setScenarioError(null);
+    try {
+      const timeframe = useChartStore.getState().timeframe || '1d';
+      const res = await fetchScenarios(chartSymbol, timeframe);
+      setScenarioData(res);
+    } catch (e: any) {
+      const msg = e?.response?.data?.detail || e?.message || '載入失敗';
+      setScenarioError(msg);
+    } finally {
+      setScenarioLoading(false);
+    }
+  }, [chartSymbol]);
+
+  const loadAdjustments = useCallback(async () => {
+    setAdjLoading(true);
+    try {
+      const res = await fetchAdjustments(chartSymbol || undefined);
+      setAdjustments(res.adjustments || []);
+    } catch { setAdjustments([]); }
+    finally { setAdjLoading(false); }
+  }, [chartSymbol]);
+
+  const handleRecalculate = async () => {
+    setAdjLoading(true);
+    try {
+      await recalculateAdjustments(chartSymbol || undefined);
+      await loadAdjustments();
+    } catch { /* ignore */ }
+    finally { setAdjLoading(false); }
+  };
+
   useEffect(() => { loadData(); }, [loadData]);
+  useEffect(() => { if (viewTab === 'scenarios') loadScenarios(); }, [viewTab, loadScenarios]);
+  useEffect(() => { if (viewTab === 'adjustments') loadAdjustments(); }, [viewTab, loadAdjustments]);
 
   const handleSaveNote = async (predId: number) => {
     setSavingNote(true);
@@ -99,7 +146,8 @@ export default function PredictionDashboard() {
     setReviewLoading(true);
     setShowReview(true);
     try {
-      const res = await generateReview(undefined, undefined, chartSymbol || undefined);
+      const session = loadPersistedSession();
+      const res = await generateReview(undefined, undefined, chartSymbol || undefined, session?.sessionId);
       setReviewReport(res.report || res.message || '生成失敗');
     } catch {
       setReviewReport('覆盤報告生成失敗，請確認 LLM 設定是否正確。');
@@ -190,21 +238,128 @@ export default function PredictionDashboard() {
 
       {/* ===== Sub-tabs ===== */}
       <div className="flex gap-2 border-b" style={{ borderColor: 'var(--border-primary)' }}>
-        {(['active', 'history', 'indicators'] as const).map((tab) => (
-          <button
-            key={tab}
-            onClick={() => setViewTab(tab)}
-            className="px-3 py-1.5 text-xs"
-            style={{
-              color: viewTab === tab ? 'var(--accent-blue)' : 'var(--text-secondary)',
-              borderBottom: viewTab === tab ? '2px solid var(--accent-blue)' : '2px solid transparent',
-              background: 'transparent',
-            }}
-          >
-            {tab === 'active' ? `進行中 (${activePreds.length})` : tab === 'history' ? `歷史記錄 (${historyPreds.length})` : '指標勝率'}
-          </button>
-        ))}
+        {(['scenarios', 'active', 'history', 'indicators', 'adjustments'] as const).map((tab) => {
+          const labels: Record<string, string> = {
+            scenarios: '情境預測',
+            active: `進行中 (${activePreds.length})`,
+            history: `歷史記錄 (${historyPreds.length})`,
+            indicators: '指標勝率',
+            adjustments: '自動調整',
+          };
+          return (
+            <button
+              key={tab}
+              onClick={() => setViewTab(tab)}
+              className="px-3 py-1.5 text-xs"
+              style={{
+                color: viewTab === tab ? 'var(--accent-blue)' : 'var(--text-secondary)',
+                borderBottom: viewTab === tab ? '2px solid var(--accent-blue)' : '2px solid transparent',
+                background: 'transparent',
+              }}
+            >
+              {labels[tab]}
+            </button>
+          );
+        })}
       </div>
+
+      {/* ===== 情境預測 ===== */}
+      {viewTab === 'scenarios' && (
+        <div className="space-y-3">
+          {scenarioLoading ? (
+            <div className="text-center py-8 text-xs" style={{ color: 'var(--text-secondary)' }}>
+              正在分析多源訊號，產出情境預測...
+            </div>
+          ) : scenarioError ? (
+            <div className="text-center py-6 space-y-2">
+              <div className="text-xs" style={{ color: '#f87171' }}>{scenarioError}</div>
+              <button
+                onClick={loadScenarios}
+                className="text-xs px-3 py-1 rounded"
+                style={{ background: 'var(--accent-blue)', color: '#fff' }}
+              >
+                重試
+              </button>
+            </div>
+          ) : scenarioData ? (
+            <>
+              <div className="text-xs px-1" style={{ color: 'var(--text-secondary)' }}>
+                {scenarioData.symbol} | 當前價格: {scenarioData.current_price} | 數據: {scenarioData.data_points} 根 K 線
+              </div>
+
+              {scenarioData.scenarios?.map((sc: any, i: number) => {
+                const arrow = sc.direction === 'bullish' ? '\u25B2' : sc.direction === 'bearish' ? '\u25BC' : '\u25AC';
+                const dirColor = sc.direction === 'bullish' ? '#4ade80' : sc.direction === 'bearish' ? '#f87171' : '#fbbf24';
+                const riskColor = sc.risk_level === 'low' ? '#4ade80' : sc.risk_level === 'high' ? '#f87171' : '#fbbf24';
+                return (
+                  <div key={i} className="rounded-lg p-3" style={{ background: 'var(--bg-tertiary)', borderLeft: `3px solid ${dirColor}` }}>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-sm font-bold" style={{ color: dirColor }}>
+                        {arrow} {sc.label} ({sc.probability_pct})
+                      </span>
+                      <span className="text-xs px-1.5 py-0.5 rounded" style={{ color: riskColor, border: `1px solid ${riskColor}` }}>
+                        {sc.risk_level === 'low' ? '低風險' : sc.risk_level === 'high' ? '高風險' : '中風險'}
+                      </span>
+                    </div>
+                    <div className="text-xs mb-1" style={{ color: 'var(--text-secondary)' }}>
+                      目標區間: {sc.price_target?.low} ~ {sc.price_target?.high}
+                    </div>
+                    {sc.invalidation && (
+                      <div className="text-xs mb-1" style={{ color: '#f87171' }}>
+                        失效條件: {sc.invalidation}
+                      </div>
+                    )}
+                    {sc.supporting_signals?.length > 0 && (
+                      <div className="mt-1 space-y-0.5">
+                        {sc.supporting_signals.map((sig: any, j: number) => (
+                          <div key={j} className="text-xs" style={{ color: 'var(--text-secondary)' }}>
+                            {'\u21B3'} {sig.name}: {sig.interpretation}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+
+              {/* 信心來源 */}
+              {scenarioData.signal_sources?.weights && (
+                <div className="rounded-lg p-3 text-xs" style={{ background: 'var(--bg-tertiary)' }}>
+                  <div className="mb-1 font-medium" style={{ color: 'var(--text-primary)' }}>信心來源權重</div>
+                  <div className="flex flex-wrap gap-2">
+                    {Object.entries(scenarioData.signal_sources.weights as Record<string, number>).map(([k, v]) => {
+                      const labels: Record<string, string> = { ml: 'ML 模型', technical: '技術指標', historical: '歷史相似度', regime: '市場結構' };
+                      return (
+                        <span key={k} className="px-2 py-0.5 rounded" style={{ background: 'var(--bg-secondary)', color: 'var(--text-secondary)' }}>
+                          {labels[k] || k}: {(v * 100).toFixed(0)}%
+                        </span>
+                      );
+                    })}
+                  </div>
+                  <div className="mt-1" style={{ color: 'var(--text-secondary)' }}>
+                    預測有效期: {scenarioData.scenarios?.[0]?.timeframe_bars || 5} 根 K 線 |
+                    生成時間: {scenarioData.generated_at}
+                  </div>
+                </div>
+              )}
+
+              <div className="flex justify-center">
+                <button
+                  onClick={loadScenarios}
+                  className="text-xs px-3 py-1 rounded"
+                  style={{ background: 'var(--accent-blue)', color: '#fff' }}
+                >
+                  重新分析
+                </button>
+              </div>
+            </>
+          ) : (
+            <div className="text-center py-6 text-xs" style={{ color: 'var(--text-secondary)' }}>
+              點擊上方分頁載入情境預測
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ===== 進行中的預測 ===== */}
       {viewTab === 'active' && (
@@ -382,33 +537,102 @@ export default function PredictionDashboard() {
       {viewTab === 'indicators' && (
         <div>
           {stats?.indicator_performance && Object.keys(stats.indicator_performance).length > 0 ? (
-            <table className="w-full text-xs">
-              <thead>
-                <tr style={{ color: 'var(--text-secondary)' }}>
-                  <th className="text-left py-1">指標</th>
-                  <th className="text-right py-1">勝率</th>
-                  <th className="text-right py-1">樣本數</th>
-                </tr>
-              </thead>
-              <tbody>
-                {Object.entries(stats.indicator_performance as Record<string, { win_rate: number; samples: number }>)
-                  .sort(([, a], [, b]) => b.win_rate - a.win_rate)
-                  .map(([name, data]) => (
-                    <tr key={name} style={{ borderTop: '1px solid var(--border-primary)' }}>
-                      <td className="py-1.5" style={{ color: 'var(--text-primary)' }}>{name}</td>
-                      <td className="text-right py-1.5" style={{ color: data.win_rate >= 50 ? '#4ade80' : '#f87171' }}>
-                        {data.win_rate.toFixed(1)}%
-                      </td>
-                      <td className="text-right py-1.5" style={{ color: 'var(--text-secondary)' }}>
-                        {data.samples}
-                      </td>
-                    </tr>
-                  ))}
-              </tbody>
-            </table>
+            <>
+              <table className="w-full text-xs">
+                <thead>
+                  <tr style={{ color: 'var(--text-secondary)' }}>
+                    <th className="text-left py-1">指標</th>
+                    <th className="text-right py-1">勝率</th>
+                    <th className="text-right py-1">樣本數</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {Object.entries(stats.indicator_performance as Record<string, { win_rate: number; samples: number }>)
+                    .sort(([, a], [, b]) => b.win_rate - a.win_rate)
+                    .map(([name, data]) => {
+                      const lowSample = data.samples < 3;
+                      return (
+                        <tr key={name} style={{ borderTop: '1px solid var(--border-primary)', opacity: lowSample ? 0.5 : 1 }}>
+                          <td className="py-1.5" style={{ color: 'var(--text-primary)' }}>
+                            {name}{lowSample ? ' *' : ''}
+                          </td>
+                          <td className="text-right py-1.5" style={{ color: data.win_rate >= 50 ? '#4ade80' : '#f87171' }}>
+                            {data.win_rate.toFixed(1)}%
+                          </td>
+                          <td className="text-right py-1.5" style={{ color: 'var(--text-secondary)' }}>
+                            {data.samples}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                </tbody>
+              </table>
+              <div className="text-right mt-1 text-xs" style={{ color: 'var(--text-secondary)', opacity: 0.6 }}>
+                * 樣本不足，僅供參考
+              </div>
+            </>
           ) : (
             <div className="text-center py-6 text-xs" style={{ color: 'var(--text-secondary)' }}>
               累積更多預測後即可顯示各指標的勝率排名
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ===== 自動調整規則 ===== */}
+      {viewTab === 'adjustments' && (
+        <div>
+          <div className="flex justify-between items-center mb-2">
+            <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>
+              系統根據預測績效自動生成的強制規則
+            </span>
+            <button
+              onClick={handleRecalculate}
+              disabled={adjLoading}
+              className="px-2 py-0.5 text-xs rounded"
+              style={{ background: 'var(--bg-tertiary)', color: 'var(--text-secondary)' }}
+            >
+              {adjLoading ? '計算中...' : '重新計算'}
+            </button>
+          </div>
+          {adjustments.length > 0 ? (
+            <div className="space-y-1">
+              {adjustments.map((adj: any) => {
+                const typeLabels: Record<string, string> = {
+                  indicator_weight: '指標權重',
+                  confidence_scale: '信心校準',
+                  direction_bias: '方向限制',
+                  risk_multiplier: '風險控制',
+                };
+                const isBoost = adj.value > 1;
+                const isSuppress = adj.value < 1;
+                const color = isBoost ? '#4ade80' : isSuppress ? '#f87171' : 'var(--text-secondary)';
+                return (
+                  <div
+                    key={adj.id}
+                    className="flex items-center justify-between py-1.5 px-2 rounded text-xs"
+                    style={{ background: 'var(--bg-tertiary)', borderLeft: `3px solid ${color}` }}
+                  >
+                    <div className="flex-1">
+                      <span style={{ color: 'var(--text-secondary)' }}>
+                        [{typeLabels[adj.adjustment_type] || adj.adjustment_type}]
+                      </span>{' '}
+                      <span style={{ color: 'var(--text-primary)' }}>{adj.key}</span>
+                      <span style={{ color, fontWeight: 600 }}> {adj.value}x</span>
+                      {adj.user_override ? (
+                        <span style={{ color: '#facc15', marginLeft: 4 }}>🔒</span>
+                      ) : null}
+                      <div className="mt-0.5" style={{ color: 'var(--text-secondary)', fontSize: '10px' }}>
+                        {adj.reason}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="text-center py-6 text-xs" style={{ color: 'var(--text-secondary)' }}>
+              {adjLoading ? '載入中...' : '尚無自動調整規則。累積足夠的已驗證預測後，系統將自動生成。'}
             </div>
           )}
         </div>

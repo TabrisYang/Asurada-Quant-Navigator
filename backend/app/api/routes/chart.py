@@ -4,6 +4,8 @@ from fastapi import APIRouter, HTTPException, Query
 from typing import Optional
 
 from app.data.fetchers.crypto_engine import crypto_engine
+from app.data.fetchers.tw_stock_engine import tw_stock_engine
+from app.utils.symbol import is_tw_stock
 from app.models.schemas import (
     ChartDataRequest,
     ChartDataResponse,
@@ -37,7 +39,7 @@ def _df_to_ohlcv_list(df) -> list[OHLCVData]:
 @router.get("/available/list")
 async def list_available_data():
     """列出所有本地可用的數據（必須在 {symbol} 路由之前）"""
-    return {"data": crypto_engine.list_available_data()}
+    return {"data": crypto_engine.list_available_data() + tw_stock_engine.list_available_data()}
 
 
 @router.get("/data")
@@ -48,7 +50,8 @@ async def get_chart_data(
     end_date: Optional[str] = Query(default=None),
 ):
     """取得指定幣種的 K 線數據（優先讀本地）。symbol 用 query param 避免 URL 斜線問題"""
-    df = crypto_engine.load_local_data(
+    engine = tw_stock_engine if is_tw_stock(symbol) else crypto_engine
+    df = engine.load_local_data(
         symbol=symbol,
         timeframe=timeframe.value,
         start_date=start_date,
@@ -65,7 +68,8 @@ async def get_chart_data(
 @router.post("/")
 async def query_chart_data(request: ChartDataRequest):
     """POST 方式取得 K 線數據"""
-    df = crypto_engine.load_local_data(
+    engine = tw_stock_engine if is_tw_stock(request.symbol) else crypto_engine
+    df = engine.load_local_data(
         symbol=request.symbol,
         timeframe=request.timeframe.value,
         start_date=request.start_date,

@@ -93,6 +93,38 @@ async def clear_predictions(
     }
 
 
+@router.get("/adjustments")
+async def get_adjustments(
+    symbol: Optional[str] = Query(None),
+):
+    """取得自動調整規則"""
+    from app.core.auto_adjuster import get_active_adjustments
+    adjustments = get_active_adjustments(symbol)
+    return {"status": "success", "adjustments": adjustments, "count": len(adjustments)}
+
+
+class AdjustmentOverride(BaseModel):
+    value: Optional[float] = None
+
+
+@router.put("/adjustments/{adj_id}/override")
+async def override_adjustment(adj_id: int, body: AdjustmentOverride):
+    """使用者手動覆蓋自動調整規則"""
+    from app.core.auto_adjuster import auto_adjuster
+    result = auto_adjuster.set_override(adj_id, body.value)
+    return {"status": "success", "adjustment": result}
+
+
+@router.post("/adjustments/recalculate")
+async def recalculate_adjustments(
+    symbol: Optional[str] = Query(None),
+):
+    """強制重新計算自動調整規則"""
+    from app.core.auto_adjuster import run_adjustment_cycle
+    result = run_adjustment_cycle(symbol)
+    return {"status": "success", "result": result}
+
+
 @router.post("/review")
 async def generate_review(body: ReviewRequest):
     """AI 生成覆盤報告
@@ -152,7 +184,7 @@ async def generate_review(body: ReviewRequest):
 
     try:
         from app.core.llm.adapter import create_adapter
-        from app.core.auth.key_manager import key_manager
+        from app.core.security.key_manager import key_manager
 
         provider = body.provider or "openai"
         api_key = body.api_key
@@ -179,6 +211,13 @@ async def generate_review(body: ReviewRequest):
         except Exception as e:
             logger.warning(f"覆盤教訓存入知識庫失敗: {e}")
 
+        # 覆盤後觸發自動調整
+        try:
+            from app.core.auto_adjuster import run_adjustment_cycle
+            run_adjustment_cycle(symbol=body.symbol)
+        except Exception as e:
+            logger.warning(f"覆盤後自動調整失敗: {e}")
+
         return {
             "status": "success",
             "report": report,
@@ -186,11 +225,79 @@ async def generate_review(body: ReviewRequest):
         }
     except Exception as e:
         logger.error(f"覆盤報告生成失敗: {e}")
+        # Fallback：生成模板報告（無需 LLM）
+        report = _generate_template_report(data)
         return {
-            "status": "error",
-            "message": f"LLM 生成覆盤報告失敗: {e}",
+            "status": "success",
+            "report": report,
             "summary": data["summary"],
+            "fallback": True,
         }
+
+
+def _generate_template_report(data: dict) -> str:
+    """無 LLM 時的 fallback 模板覆盤報告。"""
+    s = data["summary"]
+    preds = data["predictions"]
+
+    lines = [
+        "# 覆盤報告（自動模板）\n",
+        f"## 統計摘要",
+        f"- 總預測數: {s['total']}",
+        f"- 命中目標: {s['wins']} ({s['win_rate']}%)",
+        f"- 觸及止損: {s['losses']}",
+        f"- 到期未觸發: {s['expired']}\n",
+    ]
+
+    # 成功 / 失敗分類
+    hits = [p for p in preds if p["status"] == "hit_target"]
+    stops = [p for p in preds if p["status"] == "hit_stop"]
+
+    if hits:
+        lines.append("## 命中目標的預測")
+        for p in hits[:10]:
+            outcome = f"{p['actual_outcome_pct']:+.2f}%" if p.get("actual_outcome_pct") is not None else "N/A"
+            lines.append(
+                f"- {p['symbol']} {p['direction']} | "
+                f"信心:{p['confidence']} | 指標:{p['indicators']} | "
+                f"regime:{p['regime']} | 結果:{outcome}"
+            )
+
+    if stops:
+        lines.append("\n## 觸及止損的預測")
+        for p in stops[:10]:
+            outcome = f"{p['actual_outcome_pct']:+.2f}%" if p.get("actual_outcome_pct") is not None else "N/A"
+            mfe = f"{p['max_favorable_pct']:+.2f}%" if p.get("max_favorable_pct") is not None else "N/A"
+            lines.append(
+                f"- {p['symbol']} {p['direction']} | "
+                f"信心:{p['confidence']} | 指標:{p['indicators']} | "
+                f"regime:{p['regime']} | 結果:{outcome} | 最大有利:{mfe}"
+            )
+
+    # 指標統計
+    ind_count: dict[str, list[int, int]] = {}
+    for p in preds:
+        is_win = p["status"] == "hit_target"
+        for ind in (p.get("indicators") or "").split(","):
+            ind = ind.strip()
+            if not ind:
+                continue
+            if ind not in ind_count:
+                ind_count[ind] = [0, 0]
+            ind_count[ind][1] += 1
+            if is_win:
+                ind_count[ind][0] += 1
+
+    if ind_count:
+        lines.append("\n## 指標勝率統計")
+        sorted_inds = sorted(ind_count.items(), key=lambda x: x[1][0] / max(x[1][1], 1), reverse=True)
+        for ind, (wins, total) in sorted_inds:
+            wr = round(wins / total * 100, 1) if total > 0 else 0
+            tier = "★★★" if wr >= 55 else ("★★" if wr >= 40 else "★")
+            lines.append(f"- {tier} {ind}: {wr}% ({wins}/{total})")
+
+    lines.append("\n> 此報告為自動模板生成。如需更深入的 AI 分析，請先設定 LLM 金鑰。")
+    return "\n".join(lines)
 
 
 def _save_lessons_from_review(report: str, symbol: Optional[str] = None):

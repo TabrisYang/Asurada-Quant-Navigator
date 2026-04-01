@@ -14,7 +14,9 @@ from loguru import logger
 
 from app.core.config.settings import settings
 from app.data.fetchers.crypto_engine import crypto_engine
+from app.data.fetchers.tw_stock_engine import tw_stock_engine
 from app.models.schemas import DataSyncRequest, SyncTaskProgress
+from app.utils.symbol import is_tw_stock
 from app.utils.timezone import taipei_now, parse_date_string
 
 router = APIRouter()
@@ -66,15 +68,25 @@ async def _run_sync(request: DataSyncRequest, task_id: str):
                     def progress_cb(msg: str):
                         task.logs.append(msg)
 
-                    await crypto_engine.fetch_ohlcv(
-                        symbol=symbol,
-                        timeframe=tf.value,
-                        start_date=start_date,
-                        end_date=end_date,
-                        exchanges=request.exchanges,
-                        force_update=request.force_update,
-                        progress_callback=progress_cb,
-                    )
+                    if is_tw_stock(symbol):
+                        await tw_stock_engine.fetch_ohlcv(
+                            symbol=symbol,
+                            timeframe=tf.value,
+                            start_date=start_date,
+                            end_date=end_date,
+                            force_update=request.force_update,
+                            progress_callback=progress_cb,
+                        )
+                    else:
+                        await crypto_engine.fetch_ohlcv(
+                            symbol=symbol,
+                            timeframe=tf.value,
+                            start_date=start_date,
+                            end_date=end_date,
+                            exchanges=request.exchanges,
+                            force_update=request.force_update,
+                            progress_callback=progress_cb,
+                        )
                     task.logs.append(f"完成: {item_label}")
 
                     # ML: 遞增 bars 計數器
@@ -153,8 +165,9 @@ async def trigger_sync(request: DataSyncRequest, background_tasks: BackgroundTas
     - force_update 強制重新抓取
     - 至少 2 家交易所驗證
     """
-    # 驗證至少 2 家交易所
-    if len(request.exchanges) < 2:
+    # 驗證至少 2 家交易所（台股不需要）
+    has_crypto = any(not is_tw_stock(s) for s in request.symbols)
+    if has_crypto and len(request.exchanges) < 2:
         raise HTTPException(
             status_code=400,
             detail="至少需要選擇 2 家交易所以啟用五源投票機制"
@@ -203,7 +216,9 @@ async def trigger_sync(request: DataSyncRequest, background_tasks: BackgroundTas
 @router.get("/sync-status")
 async def get_sync_status():
     """取得總體同步狀態"""
-    available = crypto_engine.list_available_data()
+    crypto_data = crypto_engine.list_available_data()
+    tw_data = tw_stock_engine.list_available_data()
+    available = crypto_data + tw_data
     metadata = crypto_engine.get_metadata()
     running = [t.model_dump() for t in _sync_tasks.values() if t.status == "running"]
 
@@ -252,8 +267,9 @@ async def get_available_exchanges():
 
 @router.get("/available-symbols")
 async def get_available_symbols():
-    """取得可選擇的交易對列表"""
+    """取得可選擇的交易對列表（含加密貨幣和台股）"""
     return {
         "symbols": settings.default_symbols,
+        "tw_symbols": settings.default_tw_symbols,
         "custom_allowed": True,
     }

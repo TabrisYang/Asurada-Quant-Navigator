@@ -323,6 +323,10 @@ def _auto_calc_indicator_values(
         if df.empty or len(df) < 10:
             return chart_state
 
+        # 快取 DataFrame 供後續 ML 預測使用，避免重複載入
+        chart_state["_cached_df"] = df
+        chart_state["_cached_df_key"] = f"{symbol}_{timeframe}"
+
         auto_values = dict(chart_state.get("indicatorValues") or {})
 
         for ind_id in need_calc:
@@ -416,8 +420,13 @@ def _inject_ml_prediction(
             logger.debug(f"ML 未啟用: {reason}")
             return chart_state
 
-        from app.data.fetchers.crypto_engine import crypto_engine
-        df = crypto_engine.load_local_data(symbol, timeframe)
+        # 優先使用 _auto_calc_indicator_values 已載入的 DataFrame
+        cached_key = chart_state.get("_cached_df_key")
+        if cached_key == f"{symbol}_{timeframe}" and "_cached_df" in chart_state:
+            df = chart_state["_cached_df"]
+        else:
+            from app.data.fetchers.crypto_engine import crypto_engine
+            df = crypto_engine.load_local_data(symbol, timeframe)
         if df.empty or len(df) < 100:
             return chart_state
 
@@ -466,26 +475,62 @@ def _build_messages(
     if needs_deep_context:
         context_parts: list[str] = []
 
-        strategies_prompt = get_enabled_strategies_prompt()
-        if strategies_prompt:
-            context_parts.append(f"【使用者自訂分析方法論】\n{strategies_prompt}")
+        # 自動調整規則（最高優先級，插入最前面）
+        try:
+            from app.core.auto_adjuster import generate_hard_constraints
+            _hard_constraints = generate_hard_constraints(symbol=chart_symbol)
+            if _hard_constraints:
+                context_parts.append(_hard_constraints)
+        except Exception:
+            pass
 
-        distilled_context = knowledge_distiller.get_context_for_symbol(chart_symbol)
-        if distilled_context:
-            context_parts.append(f"【歷史分析記憶】\n{distilled_context}")
+        try:
+            strategies_prompt = get_enabled_strategies_prompt()
+            if strategies_prompt:
+                context_parts.append(f"【使用者自訂分析方法論】\n{strategies_prompt}")
+        except Exception as e:
+            logger.warning(f"策略 prompt 載入失敗: {e}")
+
+        try:
+            distilled_context = knowledge_distiller.get_context_for_symbol(chart_symbol)
+            if distilled_context:
+                context_parts.append(f"【歷史分析記憶】\n{distilled_context}")
+        except Exception as e:
+            logger.warning(f"蒸餾知識載入失敗: {e}")
 
         if _intents & {"analysis", "backtest", "quant_research"}:
-            _feedback_prompt = generate_feedback_prompt(symbol=chart_symbol)
-            if _feedback_prompt:
-                context_parts.append(f"【預測績效反饋】\n{_feedback_prompt}")
-            _active_summary = get_active_predictions_summary(chart_symbol)
-            if _active_summary:
-                context_parts.append(f"【進行中的預測】\n{_active_summary}")
+            try:
+                _current_regime = (request.chart_state or {}).get("regime")
+                if not _current_regime:
+                    _recent_active = prediction_tracker.get_active(chart_symbol)
+                    if _recent_active:
+                        _current_regime = _recent_active[0].get("regime")
+                _feedback_prompt = generate_feedback_prompt(
+                    symbol=chart_symbol, current_regime=_current_regime,
+                )
+                if _feedback_prompt:
+                    context_parts.append(f"【預測績效反饋】\n{_feedback_prompt}")
+            except Exception as e:
+                logger.warning(f"預測反饋載入失敗: {e}")
+
+            try:
+                _active_summary = get_active_predictions_summary(chart_symbol)
+                if _active_summary:
+                    context_parts.append(f"【進行中的預測】\n{_active_summary}")
+            except Exception as e:
+                logger.warning(f"活躍預測摘要載入失敗: {e}")
 
         if chart_symbol and (_intents & {"analysis", "backtest", "calibrate"}):
-            _calibration_prompt = format_calibration_for_prompt(chart_symbol)
-            if _calibration_prompt:
-                context_parts.append(f"【指標參數校準數據】\n{_calibration_prompt}")
+            try:
+                _calibration_prompt = format_calibration_for_prompt(chart_symbol)
+                if _calibration_prompt:
+                    context_parts.append(
+                        f"【★★ 指標參數校準數據 — 必須使用】\n"
+                        f"以下是根據歷史回測優化過的指標參數。你在分析中引用這些指標時，"
+                        f"「必須」使用校準後的最佳參數值，而非教科書預設值。\n{_calibration_prompt}"
+                    )
+            except Exception as e:
+                logger.warning(f"校準數據載入失敗: {e}")
 
         if rag_fragments:
             frag_texts = [
@@ -633,20 +678,34 @@ def _format_function_results(function_calls: list[dict], exec_result: dict) -> s
             # 格式化不同類型的結果
             if fname == "query_chart_data":
                 cu = r.get("chart_updates", {})
-                parts.append(f"結果: {cu.get('symbol', '?')} {cu.get('timeframe', '?')}，"
+                sym = cu.get("symbol", "?")
+                # 計算是否為多幣查詢（超過 1 個 query_chart_data）
+                chart_call_count = sum(1 for fc2 in function_calls if fc2.get("name") == "query_chart_data")
+                is_multi = chart_call_count > 1
+
+                parts.append(f"========== {sym} 價格數據 ==========")
+                parts.append(f"幣種: {sym}，時間框架: {cu.get('timeframe', '?')}，"
                              f"共 {cu.get('dataPoints', 0)} 根 K 線")
                 ps = r.get("price_summary")
                 if ps:
-                    parts.append(f"期間最高: {ps.get('period_high')} ({ps.get('period_high_date')})")
-                    parts.append(f"期間最低: {ps.get('period_low')} ({ps.get('period_low_date')})")
-                    parts.append(f"首日開盤: {ps.get('first_open')} ({ps.get('first_date')})")
-                    parts.append(f"最後收盤: {ps.get('last_close')} ({ps.get('last_date')})")
+                    parts.append(f"[{sym}] 期間最高: {ps.get('period_high')} ({ps.get('period_high_date')})")
+                    parts.append(f"[{sym}] 期間最低: {ps.get('period_low')} ({ps.get('period_low_date')})")
+                    parts.append(f"[{sym}] 首日開盤: {ps.get('first_open')} ({ps.get('first_date')})")
+                    parts.append(f"[{sym}] 最後收盤: {ps.get('last_close')} ({ps.get('last_date')})")
                     for mo in (ps.get("monthly_ohlc") or []):
-                        parts.append(f"  {mo['m']}: H={mo['h']} L={mo['l']} C={mo['c']}")
-                    for day in (ps.get("daily_ohlc") or []):
-                        parts.append(f"  {day['d']}: H={day['h']} L={day['l']} C={day['c']}")
-                    for c in (ps.get("candles") or []):
-                        parts.append(f"  {c['t']}: H={c['h']} L={c['l']} C={c['c']}")
+                        parts.append(f"  [{sym}] {mo['m']}: H={mo['h']} L={mo['l']} C={mo['c']}")
+                    daily = ps.get("daily_ohlc") or []
+                    if is_multi and len(daily) > 7:
+                        daily = daily[-7:]  # 多幣查詢時只保留最近 7 天，避免上下文過長混淆
+                        parts.append(f"  （{sym} 僅顯示最近 7 天）")
+                    for day in daily:
+                        parts.append(f"  [{sym}] {day['d']}: H={day['h']} L={day['l']} C={day['c']}")
+                    candles = ps.get("candles") or []
+                    if is_multi and len(candles) > 10:
+                        candles = candles[-10:]
+                        parts.append(f"  （{sym} 僅顯示最近 10 根 K 線）")
+                    for c in candles:
+                        parts.append(f"  [{sym}] {c['t']}: H={c['h']} L={c['l']} C={c['c']}")
             elif fname == "find_conditions":
                 parts.append(f"結果: 找到 {r.get('matched_periods', 0)} 個匹配時間點")
                 if r.get("summary"):
@@ -657,6 +716,53 @@ def _format_function_results(function_calls: list[dict], exec_result: dict) -> s
                 recs = r.get("recommended", [])
                 names = ", ".join(rec.get("name", rec.get("id", "?")) for rec in recs)
                 parts.append(f"推薦指標: {names}")
+            elif fname == "generate_scenarios":
+                parts.append(f"當前價格: {r.get('current_price', '?')}")
+                parts.append(f"數據量: {r.get('data_points', 0)} 根 K 線")
+                for sc in r.get("scenarios", []):
+                    arrow = {"bullish": "▲", "neutral": "▬", "bearish": "▼"}.get(sc.get("direction", ""), "●")
+                    parts.append(f"\n{arrow} {sc['label']} ({sc.get('probability_pct', '?')})")
+                    pt = sc.get("price_target", {})
+                    parts.append(f"  目標區間: {pt.get('low', '?')} ~ {pt.get('high', '?')}")
+                    parts.append(f"  風險: {sc.get('risk_level', '?')}")
+                    if sc.get("invalidation"):
+                        parts.append(f"  失效條件: {sc['invalidation']}")
+                    for sig in sc.get("supporting_signals", []):
+                        parts.append(f"  ↳ {sig.get('name', '?')}: {sig.get('interpretation', '')}")
+                sources = r.get("signal_sources", {})
+                w = sources.get("weights", {})
+                if w:
+                    w_str = ", ".join(f"{k}({v*100:.0f}%)" for k, v in w.items())
+                    parts.append(f"\n信心來源權重: {w_str}")
+            elif fname == "detect_smc_structure":
+                parts.append(f"📊 SMC 訂單流分析 — {r.get('symbol', '?')} {r.get('timeframe', '?')}")
+                parts.append(f"結構方向: HTF={r.get('trend_htf', '?')} / LTF={r.get('trend_ltf', '?')} / 共振={'✅' if r.get('mtf_aligned') else '❌'}")
+                parts.append(f"溢價/折價: {r.get('premium_discount', '?')} (Fib 0.5 = {r.get('fib_50', '?')})")
+                # BOS/CHoCH 事件
+                for evt in r.get("bos_points", []) + r.get("choch_points", []):
+                    if evt.get("filtered"):
+                        continue
+                    tag = "🔴" if evt.get("type") == "CHoCH" else "🔵"
+                    parts.append(f"  {tag} {evt['type']} @ {evt['price']} (量比 {evt.get('vol_ratio', '?')}x)")
+                # Sweep 事件
+                for sw in r.get("sweep_events", []):
+                    if not sw.get("filtered"):
+                        parts.append(f"  💧 {sw['type']} Sweep @ {sw['price']} (量比 {sw.get('vol_ratio', '?')}x)")
+                # FVG
+                unfilled_fvg = [f for f in r.get("fvg_zones", []) if not f.get("filled")]
+                if unfilled_fvg:
+                    parts.append(f"  未填補 FVG: {len(unfilled_fvg)} 個")
+                # 交易建議
+                bias = r.get("bias", "WAIT")
+                parts.append(f"\n建議: {bias}")
+                if r.get("entry"):
+                    parts.append(f"  Entry: {r['entry']} / SL: {r.get('stop_loss', '?')} / TP: {r.get('take_profit', '?')}")
+                    parts.append(f"  RR: {r.get('rr_ratio', '?')} / 信心: {r.get('confidence', '?')}%")
+                # 信心分項
+                bd = r.get("confidence_breakdown", {})
+                if bd:
+                    bd_str = ", ".join(f"{k}({v:+d})" for k, v in bd.items())
+                    parts.append(f"  評分明細: {bd_str}")
             elif fname == "scan_conditional_probability":
                 parts.append(f"目標: {r.get('target', '?')}")
                 parts.append(f"數據範圍: {r.get('data_range', '?')}，共 {r.get('total_bars', 0)} 根 K 線")
@@ -802,34 +908,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
         chat_history.save_message(conversation_id=conv_id, role="assistant", content=cached_answer)
         return StreamingResponse(cache_gen(), media_type="text/event-stream")
 
-    # ★ L2/L3 快取已停用回傳功能（投資分析時效性高，快取舊答案風險大於省 token 的好處）
-    # L2/L3 仍會「儲存」LLM 回答，用於知識碎片提取和蒸餾，但不再攔截使用者問題。
-    # 所有非 L1 知識問題一律走 LLM 即時分析。
-
-    # ★ L3.5 知識融合準備（中等相似度 0.75~0.92 → RAG 注入碎片，低 token）
-    _rag_context_fragments: list[dict] = []
-    semantic_match = semantic_cache.try_get_with_score(request.message, request.chart_state)
-    if semantic_match and semantic_match["similarity"] >= 0.75:
-        logger.info(
-            f"L3.5 語意匹配（中等置信度 {semantic_match['similarity']:.2%}）→ 作為 RAG 參考"
-        )
-
-    chart_symbol = (request.chart_state or {}).get("symbol", "")
-    mentioned_symbol = extract_symbol_from_text(request.message)
-    rag_symbol = mentioned_symbol or chart_symbol
-    if rag_symbol:
-        _rag_context_fragments = fragment_store.retrieve_relevant(
-            question=request.message,
-            symbol=rag_symbol,
-            top_k=5,
-            min_similarity=0.45,
-        )
-        if _rag_context_fragments:
-            logger.info(
-                f"L3.5 知識碎片命中 {len(_rag_context_fragments)} 筆 "
-                f"(最高相似度 {_rag_context_fragments[0]['similarity']:.2%})"
-            )
-
+    # ★ 輕量前置處理（< 50ms）：API key 解析 + adapter 建立
     provider, api_key, base_url, model_name = _resolve_api_key(request)
 
     if not api_key and provider not in ("ollama", "claude_subscription"):
@@ -848,33 +927,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
             yield _sse_event("done", {})
         return StreamingResponse(err_gen(), media_type="text/event-stream")
 
-    # ★ 意圖偵測 → 決定載入哪些 SYSTEM_PROMPT 模組與背景資料
-    _intents = detect_intents(request.message, mode=request.mode)
-    from app.api.routes.config import load_system_settings
-    _teaching = load_system_settings().get("teaching_mode", False)
-    _dynamic_prompt = assemble_system_prompt(_intents, teaching_mode=_teaching)
-    logger.info(f"意圖偵測: {_intents}, 教學模式={'ON' if _teaching else 'OFF'} → SYSTEM_PROMPT 模組已動態組裝")
-
-    # ★ 自動計算分析所需 + 使用者提到的指標值，注入 chart_state
-    request.chart_state = _auto_calc_indicator_values(request.message, request.chart_state, intents=_intents)
-
-    # ★ ML 增強：自動注入 ML 預測信號
-    request.chart_state = _inject_ml_prediction(request.chart_state, _intents)
-
-    messages = _build_messages(request, rag_fragments=_rag_context_fragments, intents=_intents)
     conversation_id = request.conversation_id or str(uuid.uuid4())
-
-    # ★ 保存使用者訊息到歷史
-    chart_symbol_for_save = (request.chart_state or {}).get("symbol")
-    chart_timeframe = (request.chart_state or {}).get("timeframe")
-    chart_timeframe_ctx = chart_timeframe or ""
-    chat_history.save_message(
-        conversation_id=conversation_id,
-        role="user",
-        content=request.message,
-        symbol=chart_symbol_for_save,
-        timeframe=chart_timeframe,
-    )
 
     _MAX_FINAL_TEXT = 50_000  # 累積文字最大長度（~50KB），防止記憶體爆炸
 
@@ -885,6 +938,99 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
 
         # 1. 立即告知前端「正在思考」
         yield _sse_event("thinking", {})
+        yield _sse_event("status", {"message": "正在準備分析環境..."})
+
+        # 2. 重量級前置處理（移入 streaming 內部，讓前端立即有回應）
+        # ★ L3.5 知識融合準備
+        _rag_context_fragments: list[dict] = []
+        try:
+            semantic_match = semantic_cache.try_get_with_score(request.message, request.chart_state)
+            if semantic_match and semantic_match["similarity"] >= 0.75:
+                logger.info(
+                    f"L3.5 語意匹配（中等置信度 {semantic_match['similarity']:.2%}）→ 作為 RAG 參考"
+                )
+        except Exception as e:
+            logger.warning(f"語意快取查詢失敗: {e}")
+
+        chart_symbol = (request.chart_state or {}).get("symbol", "")
+        try:
+            mentioned_symbol = extract_symbol_from_text(request.message)
+            rag_symbol = mentioned_symbol or chart_symbol
+            if rag_symbol:
+                _rag_context_fragments = fragment_store.retrieve_relevant(
+                    question=request.message,
+                    symbol=rag_symbol,
+                    top_k=5,
+                    min_similarity=0.45,
+                )
+                if _rag_context_fragments:
+                    logger.info(
+                        f"L3.5 知識碎片命中 {len(_rag_context_fragments)} 筆 "
+                        f"(最高相似度 {_rag_context_fragments[0]['similarity']:.2%})"
+                    )
+        except Exception as e:
+            logger.warning(f"知識碎片檢索失敗: {e}")
+
+        # ★ 意圖偵測 → prompt 組裝 → 指標計算 → ML 預測 → 訊息建構
+        try:
+            _intents = detect_intents(request.message, mode=request.mode)
+            from app.api.routes.config import load_system_settings
+            _teaching = load_system_settings().get("teaching_mode", False)
+            _dynamic_prompt = assemble_system_prompt(_intents, teaching_mode=_teaching)
+            logger.info(f"意圖偵測: {_intents}, 教學模式={'ON' if _teaching else 'OFF'} → SYSTEM_PROMPT 模組已動態組裝")
+
+            yield _sse_event("status", {"message": "正在載入分析數據..."})
+
+            # ★ 自動校準：分析意圖 + 該幣種無校準數據或已過期（>7天）→ 快速校準
+            if "analysis" in _intents and chart_symbol:
+                try:
+                    from pathlib import Path
+                    import time as _time
+                    _cal_path = Path(settings.db_path) / "calibration" / f"{chart_symbol}.json"
+                    _needs_cal = not _cal_path.exists()
+                    if not _needs_cal:
+                        _age_days = (_time.time() - _cal_path.stat().st_mtime) / 86400
+                        _needs_cal = _age_days > 7
+                    if _needs_cal:
+                        from app.core.backtest.parameter_optimizer import run_calibration
+                        chart_timeframe = (request.chart_state or {}).get("timeframe", "4h")
+                        _msg = "首次分析，正在校準指標參數..." if not _cal_path.exists() else "校準參數已過期，正在更新..."
+                        yield _sse_event("status", {"message": _msg})
+                        run_calibration(chart_symbol, chart_timeframe)
+                        logger.info(f"自動校準完成: {chart_symbol}")
+                except Exception as e:
+                    logger.warning(f"自動校準失敗（不影響分析）: {e}")
+
+            # ★ 自動計算分析所需 + 使用者提到的指標值，注入 chart_state
+            request.chart_state = _auto_calc_indicator_values(request.message, request.chart_state, intents=_intents)
+
+            # ★ ML 增強：自動注入 ML 預測信號
+            request.chart_state = _inject_ml_prediction(request.chart_state, _intents)
+
+            messages = _build_messages(request, rag_fragments=_rag_context_fragments, intents=_intents)
+        except Exception as e:
+            logger.exception(f"對話前置處理失敗: {e}")
+            yield _sse_event("error", {"error": f"系統初始化錯誤: {str(e)}"})
+            yield _sse_event("done", {})
+            return
+
+        # ★ 清理暫存的 DataFrame（不傳給 LLM）
+        if request.chart_state:
+            request.chart_state.pop("_cached_df", None)
+            request.chart_state.pop("_cached_df_key", None)
+
+        # ★ 保存使用者訊息到歷史
+        chart_symbol_for_save = (request.chart_state or {}).get("symbol")
+        chart_timeframe = (request.chart_state or {}).get("timeframe")
+        chart_timeframe_ctx = chart_timeframe or ""
+        chat_history.save_message(
+            conversation_id=conversation_id,
+            role="user",
+            content=request.message,
+            symbol=chart_symbol_for_save,
+            timeframe=chart_timeframe,
+        )
+
         yield _sse_event("status", {"message": "正在分析您的問題..."})
 
         try:
@@ -980,6 +1126,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                     _r2_task = asyncio.create_task(adapter.chat(
                         round2_messages, chart_state=request.chart_state,
                         system_prompt=_dynamic_prompt,
+                        r2_mode=True,
                     ))
                     _active_tasks.append(_r2_task)
                     _hb_sec = 0
@@ -1284,6 +1431,46 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                         except Exception as pe:
                             logger.warning(f"儲存預測失敗: {pe}")
                     logger.info(f"自動提取 {len(predictions)} 筆預測（{pred_symbol}）")
+
+                # ★ 追蹤 ML 預測（若存在）
+                ml_pred = (request.chart_state or {}).get("mlPrediction")
+                if ml_pred and isinstance(ml_pred, dict) and ml_pred.get("probability"):
+                    try:
+                        _ml_symbol = chart_symbol_for_save or ""
+                        _ml_tf = (request.chart_state or {}).get("timeframe", "4h")
+                        _ml_direction = ml_pred.get("direction", "long")
+                        _ml_prob = ml_pred.get("probability", 0.5)
+                        _ml_entry = (request.chart_state or {}).get("current_price", 0)
+                        # 根據方向估算目標/止損（±3%）
+                        if _ml_direction == "long":
+                            _ml_target = _ml_entry * 1.03
+                            _ml_stop = _ml_entry * 0.97
+                        else:
+                            _ml_target = _ml_entry * 0.97
+                            _ml_stop = _ml_entry * 1.03
+                        _ml_conf = "high" if _ml_prob >= 0.7 else ("medium" if _ml_prob >= 0.5 else "low")
+                        ml_pred_data = {
+                            "direction": _ml_direction,
+                            "entry_price": _ml_entry,
+                            "target_price": round(_ml_target, 2),
+                            "stop_price": round(_ml_stop, 2),
+                            "timeframe_hours": 24,
+                            "confidence": _ml_conf,
+                            "regime": ml_pred.get("regime", "unknown"),
+                            "indicators": "ml_model",
+                        }
+                        _ml_pid = prediction_tracker.store(
+                            symbol=_ml_symbol, timeframe=_ml_tf,
+                            prediction=ml_pred_data, source_question="ml_auto",
+                        )
+                        prediction_tracker._ensure_db()
+                        prediction_tracker._conn.execute(
+                            "UPDATE predictions SET ml_enhanced=1 WHERE id=?", (_ml_pid,)
+                        )
+                        prediction_tracker._conn.commit()
+                        logger.info(f"ML 預測已追蹤 #{_ml_pid}: {_ml_symbol} {_ml_direction}")
+                    except Exception as me:
+                        logger.warning(f"儲存 ML 預測失敗: {me}")
 
                 # ★ 順便驗證已到期的預測
                 try:

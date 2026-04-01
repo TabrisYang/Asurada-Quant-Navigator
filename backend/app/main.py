@@ -1,5 +1,6 @@
 """阿斯拉量化系統 — FastAPI 主程式"""
 
+import asyncio
 import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -8,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
-from app.api.routes import chat, chart, indicators, config, data_sync, export, factor_scan, ml, predictions
+from app.api.routes import chat, chart, indicators, config, data_sync, export, factor_scan, ml, predictions, scenario, smc
 from app.core.config.settings import settings
 from app.core.usage_tracker import usage_tracker
 from app.core.chat_history import chat_history
@@ -103,8 +104,23 @@ async def lifespan(app: FastAPI):
 
     threading.Thread(target=_background_init, daemon=True).start()
 
+    # 背景排程：每 2 小時自動驗證過期預測
+    async def _periodic_validation():
+        from app.core.prediction_validator import validate_all_active
+        while True:
+            await asyncio.sleep(7200)  # 2 小時
+            try:
+                result = validate_all_active()
+                if result.get("validated", 0) > 0:
+                    logger.info(f"[排程驗證] {result['validated']} 筆預測已驗證")
+            except Exception as e:
+                logger.error(f"[排程驗證] 失敗: {e}")
+
+    validation_task = asyncio.create_task(_periodic_validation())
+
     yield
 
+    validation_task.cancel()
     logger.info("👋 阿斯拉量化系統關閉")
 
 
@@ -134,6 +150,8 @@ app.include_router(export.router, prefix="/api/export", tags=["匯出"])
 app.include_router(factor_scan.router, prefix="/api/factor-scan", tags=["因子掃描"])
 app.include_router(ml.router, prefix="/api/ml", tags=["ML 增強"])
 app.include_router(predictions.router, prefix="/api/predictions", tags=["預測追蹤"])
+app.include_router(scenario.router, prefix="/api/scenario", tags=["情境預測"])
+app.include_router(smc.router, prefix="/api/smc", tags=["SMC 分析"])
 
 
 @app.get("/api/health")

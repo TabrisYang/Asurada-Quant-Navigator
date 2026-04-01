@@ -1,6 +1,6 @@
 /** 阿斯拉量化系統 — 主應用組件 */
 
-import { Component, useState, useEffect, useRef, lazy, Suspense } from 'react';
+import { Component, useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
 import type { ReactNode, ErrorInfo } from 'react';
 import TopBar from './components/TopBar';
 import OnboardingGuide, { useOnboarding } from './components/OnboardingGuide';
@@ -71,6 +71,39 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [chatExpanded, setChatExpanded] = useState(true);
   const [panelExpanded, setPanelExpanded] = useState(true);
+
+  // 對話面板寬度拖曳調整
+  const [chatWidth, setChatWidth] = useState(() => {
+    const saved = localStorage.getItem('asura_chat_width');
+    return saved ? Math.max(320, Math.min(700, Number(saved))) : 380;
+  });
+  const chatResizeRef = useRef({ dragging: false, startX: 0, startWidth: 0 });
+
+  const handleChatResizeMove = useCallback((e: MouseEvent) => {
+    const ref = chatResizeRef.current;
+    if (!ref.dragging) return;
+    const delta = ref.startX - e.clientX;
+    const newWidth = Math.max(320, Math.min(700, ref.startWidth + delta));
+    setChatWidth(newWidth);
+  }, []);
+
+  const handleChatResizeEnd = useCallback(() => {
+    chatResizeRef.current.dragging = false;
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    document.removeEventListener('mousemove', handleChatResizeMove);
+    document.removeEventListener('mouseup', handleChatResizeEnd);
+    setChatWidth((w) => { localStorage.setItem('asura_chat_width', String(w)); return w; });
+  }, [handleChatResizeMove]);
+
+  const handleChatResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    chatResizeRef.current = { dragging: true, startX: e.clientX, startWidth: chatWidth };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', handleChatResizeMove);
+    document.addEventListener('mouseup', handleChatResizeEnd);
+  }, [chatWidth, handleChatResizeMove, handleChatResizeEnd]);
   const { visible: showOnboarding, dismiss: dismissOnboarding } = useOnboarding();
 
   const symbol = useChartStore((s) => s.symbol);
@@ -166,23 +199,29 @@ function App() {
           </ErrorBoundary>
         </div>
 
-        {/* 右側：對話介面 */}
+        {/* 右側：對話介面（可拖曳左邊框調整寬度） */}
         {chatExpanded && (
-          <div
-            data-guide="chat"
-            className="flex flex-col border-l overflow-hidden"
-            style={{
-              width: '380px',
-              minWidth: '380px',
-              borderColor: 'var(--border-color)',
-              background: 'var(--bg-secondary)',
-            }}
-          >
-            <ErrorBoundary name="AI 助手">
-              <Suspense fallback={<LoadingSkeleton name="AI 助手" />}>
-                <ChatInterface />
-              </Suspense>
-            </ErrorBoundary>
+          <div className="relative flex" style={{ width: chatWidth, minWidth: 320 }}>
+            {/* 拖曳把手 */}
+            <div
+              onMouseDown={handleChatResizeStart}
+              className="absolute left-0 top-0 bottom-0 z-10"
+              style={{ width: 5, cursor: 'col-resize' }}
+            />
+            <div
+              data-guide="chat"
+              className="flex flex-col border-l overflow-hidden flex-1"
+              style={{
+                borderColor: 'var(--border-color)',
+                background: 'var(--bg-secondary)',
+              }}
+            >
+              <ErrorBoundary name="AI 助手">
+                <Suspense fallback={<LoadingSkeleton name="AI 助手" />}>
+                  <ChatInterface />
+                </Suspense>
+              </ErrorBoundary>
+            </div>
           </div>
         )}
       </div>

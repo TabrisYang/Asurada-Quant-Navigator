@@ -20,17 +20,39 @@ import {
   type SyncRequestParams,
 } from '../../services/api';
 
+// 資產類型
+type AssetType = 'crypto' | 'tw_stock';
+
 // 預設交易對
-const DEFAULT_SYMBOLS = [
+const DEFAULT_CRYPTO_SYMBOLS = [
   'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'DOGE/USDT',
   'ADA/USDT', 'AVAX/USDT', 'LINK/USDT', 'DOT/USDT', 'MATIC/USDT',
 ];
+
+const DEFAULT_TW_SYMBOLS = [
+  '2330/TWD', '2317/TWD', '2454/TWD', '2412/TWD', '3008/TWD',
+  '2881/TWD', '2882/TWD', '1301/TWD', '2308/TWD', '2303/TWD',
+];
+
+// 台股代碼對照名稱
+const TW_STOCK_NAMES: Record<string, string> = {
+  '2330/TWD': '台積電', '2317/TWD': '鴻海', '2454/TWD': '聯發科',
+  '2412/TWD': '中華電', '3008/TWD': '大立光', '2881/TWD': '富邦金',
+  '2882/TWD': '國泰金', '1301/TWD': '台塑', '2308/TWD': '台達電',
+  '2303/TWD': '聯電',
+};
 
 // 時間週期
 const ALL_TIMEFRAMES = [
   { value: '15m', label: '15 分鐘' },
   { value: '1h', label: '1 小時' },
   { value: '4h', label: '4 小時' },
+  { value: '1d', label: '1 天' },
+  { value: '1w', label: '1 週' },
+];
+
+// 台股支援的時間週期
+const TW_TIMEFRAMES = [
   { value: '1d', label: '1 天' },
   { value: '1w', label: '1 週' },
 ];
@@ -61,6 +83,7 @@ export default function SyncPanel() {
   const loadChartData = useChartStore((s) => s.loadChartData);
 
   // ===== 表單狀態 =====
+  const [assetType, setAssetType] = useState<AssetType>('crypto');
   const [selectedSymbols, setSelectedSymbols] = useState<string[]>(['BTC/USDT']);
   const [selectedTimeframes, setSelectedTimeframes] = useState<string[]>(['1d']);
   const [exchanges, setExchanges] = useState<ExchangeInfo[]>([]);
@@ -159,7 +182,7 @@ export default function SyncPanel() {
       setError('請至少選擇一個時間週期');
       return;
     }
-    if (selectedExchanges.length < 2) {
+    if (assetType === 'crypto' && selectedExchanges.length < 2) {
       setError('至少需要選擇 2 家交易所以啟用五源投票機制');
       return;
     }
@@ -199,17 +222,35 @@ export default function SyncPanel() {
   const addCustomSymbol = () => {
     const sym = customSymbol.trim().toUpperCase();
     if (!sym) return;
-    // 自動加斜線
     let normalized = sym;
-    if (!sym.includes('/')) {
-      if (sym.endsWith('USDT')) normalized = sym.slice(0, -4) + '/USDT';
-      else if (sym.endsWith('USD')) normalized = sym.slice(0, -3) + '/USD';
-      else normalized = sym + '/USDT';
+    if (assetType === 'tw_stock') {
+      // 台股：純數字 → 加 /TWD
+      const code = sym.replace(/\.TW.*$/i, '').replace(/\/TWD$/i, '');
+      normalized = code + '/TWD';
+    } else {
+      // 加密貨幣
+      if (!sym.includes('/')) {
+        if (sym.endsWith('USDT')) normalized = sym.slice(0, -4) + '/USDT';
+        else if (sym.endsWith('USD')) normalized = sym.slice(0, -3) + '/USD';
+        else normalized = sym + '/USDT';
+      }
     }
     if (!selectedSymbols.includes(normalized)) {
       setSelectedSymbols((prev) => [...prev, normalized]);
     }
     setCustomSymbol('');
+  };
+
+  // 切換資產類型
+  const switchAssetType = (type: AssetType) => {
+    setAssetType(type);
+    if (type === 'crypto') {
+      setSelectedSymbols(['BTC/USDT']);
+      setSelectedTimeframes(['1d']);
+    } else {
+      setSelectedSymbols(['2330/TWD']);
+      setSelectedTimeframes(['1d']);
+    }
   };
 
   // ===== 時間週期切換 =====
@@ -236,9 +277,11 @@ export default function SyncPanel() {
   };
 
   // ===== 快速選擇 =====
-  const selectAllSymbols = () => setSelectedSymbols([...DEFAULT_SYMBOLS]);
+  const currentDefaults = assetType === 'crypto' ? DEFAULT_CRYPTO_SYMBOLS : DEFAULT_TW_SYMBOLS;
+  const currentTimeframes = assetType === 'crypto' ? ALL_TIMEFRAMES : TW_TIMEFRAMES;
+  const selectAllSymbols = () => setSelectedSymbols([...currentDefaults]);
   const clearAllSymbols = () => setSelectedSymbols([]);
-  const selectAllTimeframes = () => setSelectedTimeframes(ALL_TIMEFRAMES.map((t) => t.value));
+  const selectAllTimeframes = () => setSelectedTimeframes(currentTimeframes.map((t) => t.value));
 
   return (
     <div
@@ -277,16 +320,43 @@ export default function SyncPanel() {
 
         {/* ===== 可捲動的內容 ===== */}
         <div className="flex-1 overflow-y-auto p-6 space-y-5">
+          {/* === 資產類型切換 === */}
+          <div>
+            <h3 className="text-sm font-semibold mb-2" style={{ color: 'var(--text-primary)' }}>
+              資產類型
+            </h3>
+            <div className="flex gap-2">
+              {([
+                { type: 'crypto' as AssetType, label: '加密貨幣' },
+                { type: 'tw_stock' as AssetType, label: '台股' },
+              ]).map(({ type, label }) => (
+                <button
+                  key={type}
+                  onClick={() => switchAssetType(type)}
+                  disabled={syncing}
+                  className="px-4 py-2 rounded-lg text-sm cursor-pointer transition-colors"
+                  style={{
+                    background: assetType === type ? 'var(--accent-blue)' : 'var(--bg-tertiary)',
+                    color: assetType === type ? '#fff' : 'var(--text-secondary)',
+                    opacity: syncing ? 0.5 : 1,
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+
           {/* === 交易對選擇 === */}
           <div>
             <h3 className="text-sm font-semibold mb-2" style={{ color: 'var(--text-primary)' }}>
-              交易對
+              {assetType === 'crypto' ? '交易對' : '股票代碼'}
               <span className="text-xs font-normal ml-2" style={{ color: 'var(--text-secondary)' }}>
                 已選 {selectedSymbols.length} 個
               </span>
             </h3>
             <div className="flex flex-wrap gap-1.5 mb-2">
-              {DEFAULT_SYMBOLS.map((sym) => (
+              {currentDefaults.map((sym) => (
                 <button
                   key={sym}
                   onClick={() => toggleSymbol(sym)}
@@ -300,12 +370,12 @@ export default function SyncPanel() {
                     opacity: syncing ? 0.5 : 1,
                   }}
                 >
-                  {sym}
+                  {sym}{TW_STOCK_NAMES[sym] ? ` ${TW_STOCK_NAMES[sym]}` : ''}
                 </button>
               ))}
               {/* 已選但不在預設列表的 */}
               {selectedSymbols
-                .filter((s) => !DEFAULT_SYMBOLS.includes(s))
+                .filter((s) => !currentDefaults.includes(s))
                 .map((sym) => (
                   <button
                     key={sym}
@@ -324,7 +394,7 @@ export default function SyncPanel() {
                 value={customSymbol}
                 onChange={(e) => setCustomSymbol(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && addCustomSymbol()}
-                placeholder="自訂交易對，如 PEPE/USDT"
+                placeholder={assetType === 'crypto' ? '自訂交易對，如 PEPE/USDT' : '輸入股票代碼，如 2330'}
                 disabled={syncing}
                 className="flex-1 px-3 py-1.5 rounded text-xs border-none outline-none"
                 style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)' }}
@@ -360,6 +430,11 @@ export default function SyncPanel() {
           <div>
             <h3 className="text-sm font-semibold mb-2" style={{ color: 'var(--text-primary)' }}>
               時間週期
+              {assetType === 'tw_stock' && (
+                <span className="text-xs font-normal ml-2" style={{ color: 'var(--text-secondary)' }}>
+                  台股僅支援日線 / 週線
+                </span>
+              )}
               <button
                 onClick={selectAllTimeframes}
                 disabled={syncing}
@@ -370,7 +445,7 @@ export default function SyncPanel() {
               </button>
             </h3>
             <div className="flex gap-2">
-              {ALL_TIMEFRAMES.map((tf) => (
+              {currentTimeframes.map((tf) => (
                 <button
                   key={tf.value}
                   onClick={() => toggleTimeframe(tf.value)}
@@ -458,8 +533,8 @@ export default function SyncPanel() {
             </div>
           </div>
 
-          {/* === 交易所選擇 === */}
-          <div>
+          {/* === 交易所選擇（台股不需要）=== */}
+          {assetType === 'crypto' && <div>
             <h3 className="text-sm font-semibold mb-2" style={{ color: 'var(--text-primary)' }}>
               交易所
               <span className="text-xs font-normal ml-2" style={{ color: 'var(--text-secondary)' }}>
@@ -509,7 +584,7 @@ export default function SyncPanel() {
                 </button>
               ))}
             </div>
-          </div>
+          </div>}
 
           {/* === 進階選項 === */}
           <div className="flex items-center gap-4">
@@ -532,10 +607,15 @@ export default function SyncPanel() {
             className="p-3 rounded-lg text-xs"
             style={{ background: 'var(--bg-tertiary)', color: 'var(--text-secondary)' }}
           >
-            將同步 <b style={{ color: 'var(--text-primary)' }}>{selectedSymbols.length}</b> 個交易對
+            將同步 <b style={{ color: 'var(--text-primary)' }}>{selectedSymbols.length}</b> 個{assetType === 'crypto' ? '交易對' : '股票'}
             × <b style={{ color: 'var(--text-primary)' }}>{selectedTimeframes.length}</b> 個週期
-            = <b style={{ color: 'var(--accent-blue)' }}>{selectedSymbols.length * selectedTimeframes.length}</b> 組數據，
-            使用 <b style={{ color: 'var(--text-primary)' }}>{selectedExchanges.length}</b> 家交易所
+            = <b style={{ color: 'var(--accent-blue)' }}>{selectedSymbols.length * selectedTimeframes.length}</b> 組數據
+            {assetType === 'crypto' && (
+              <>，使用 <b style={{ color: 'var(--text-primary)' }}>{selectedExchanges.length}</b> 家交易所</>
+            )}
+            {assetType === 'tw_stock' && (
+              <span>，數據源：Yahoo Finance</span>
+            )}
             {startDate && endDate && (
               <span>
                 ，日期範圍：{startDate.replace('T', ' ')} ~ {endDate.replace('T', ' ')}

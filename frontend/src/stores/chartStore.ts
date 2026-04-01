@@ -140,8 +140,15 @@ export const useChartStore = create<ChartStore>((set, get) => ({
       content: `__SYMBOL_SWITCH__${symbol}`,
       timestamp: new Date().toISOString(),
     };
+    // 台股只支援 1d/1w，自動切換時間框架
+    const isTwStock = symbol.endsWith('/TWD');
+    const unsupportedTf = ['15m', '1h', '4h'];
+    const newTimeframe = (isTwStock && unsupportedTf.includes(state.timeframe))
+      ? '1d' as Timeframe
+      : state.timeframe;
     return {
       symbol,
+      timeframe: newTimeframe,
       messages: [...state.messages, divider],
       conversationId: null,
       lastFactorScan: null,
