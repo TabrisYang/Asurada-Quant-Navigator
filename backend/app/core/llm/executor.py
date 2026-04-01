@@ -321,13 +321,20 @@ async def _exec_find_conditions(args: dict, default_symbol: str, default_tf: str
         op = cond.get("operator", ">")
         val = cond.get("value", 0)
 
-        if op == ">":     mask = values > val
-        elif op == "<":   mask = values < val
-        elif op == ">=":  mask = values >= val
-        elif op == "<=":  mask = values <= val
-        elif op == "==":  mask = values == val
-        elif op == "cross_above": mask = (values > val) & (values.shift(1) <= val)
-        elif op == "cross_below": mask = (values < val) & (values.shift(1) >= val)
+        if op == ">":
+            mask = values > val
+        elif op == "<":
+            mask = values < val
+        elif op == ">=":
+            mask = values >= val
+        elif op == "<=":
+            mask = values <= val
+        elif op == "==":
+            mask = values == val
+        elif op == "cross_above":
+            mask = (values > val) & (values.shift(1) <= val)
+        elif op == "cross_below":
+            mask = (values < val) & (values.shift(1) >= val)
         elif op == "between":
             mask = (values >= val) & (values <= cond.get("value2", val))
         else:
@@ -655,8 +662,6 @@ async def _exec_analyze_event_patterns(args: dict, default_symbol: str, default_
         return {"status": "error", "message": f"數據不足（需至少 {_min_bars_event} 根 K 線）。請先同步更多歷史數據。"}
 
     closes = df["close"].values
-    highs = df["high"].values
-    lows = df["low"].values
     volumes = df["volume"].values
     timestamps = df["timestamp"].values
 
@@ -813,7 +818,7 @@ async def _exec_quant_research(args: dict, default_symbol: str, default_tf: str)
     from app.core.backtest.monte_carlo import run_monte_carlo
     from app.core.backtest.walk_forward import run_walk_forward
     from app.core.backtest.factor_analysis import (
-        compute_factor_ic, compute_factor_correlation, run_factor_scan, SCANNABLE_INDICATORS,
+        compute_factor_ic, run_factor_scan, SCANNABLE_INDICATORS,
     )
     from app.core.backtest.position_sizing import calculate_dynamic_positions
 
@@ -1006,7 +1011,7 @@ def _generate_conclusion(report: dict) -> dict:
         findings.append(f"✅ Monte Carlo 驗證通過（獲利機率 {mc.get('profit_probability', 0)}%）")
     elif mc.get("status") == "success":
         score -= 10
-        findings.append(f"⚠️ Monte Carlo 未通過（25%分位報酬為負）")
+        findings.append("⚠️ Monte Carlo 未通過（25%分位報酬為負）")
     if mc.get("ruin_probability", 0) > 5:
         score -= 15
         findings.append(f"❌ 破產風險 {mc['ruin_probability']}%，建議降低槓桿")
@@ -1077,7 +1082,6 @@ async def _exec_optimize_params(args: dict, default_symbol: str, default_tf: str
 async def _exec_conditional_prob_scan(args: dict, default_symbol: str, default_tf: str) -> dict:
     """條件機率掃描：掃描指標數值區間，計算每個區間後續 N 根 K 線漲/跌 ≥ X% 的機率"""
     import numpy as np
-    import pandas as pd
 
     symbol = args.get("symbol", default_symbol)
     timeframe = args.get("timeframe", default_tf)

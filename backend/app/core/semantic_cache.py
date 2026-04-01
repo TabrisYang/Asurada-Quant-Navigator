@@ -14,7 +14,6 @@
 """
 
 import hashlib
-import sqlite3
 import time
 from datetime import datetime, timedelta
 from typing import Optional
@@ -22,7 +21,6 @@ from typing import Optional
 import numpy as np
 from loguru import logger
 
-from app.core.config.settings import settings
 from app.core import embedding_service
 from app.core.symbol_extractor import should_bypass_cache
 from app.core.base_db import BaseDBStore

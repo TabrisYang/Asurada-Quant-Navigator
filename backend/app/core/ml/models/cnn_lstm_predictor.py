@@ -276,7 +276,6 @@ def _make_sequences(
 
 class _CNNLSTMNet:
     def __new__(cls, n_features, cnn_filters, cnn_kernel_size, hidden_size, num_layers, dropout):
-        import torch
         import torch.nn as nn
 
         class CNNLSTMModel(nn.Module):

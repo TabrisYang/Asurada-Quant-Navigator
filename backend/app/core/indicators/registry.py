@@ -4,7 +4,7 @@
 新增指標只需建立計算函式並用 @register_indicator 裝飾。
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 import pandas as pd

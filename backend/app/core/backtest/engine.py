@@ -10,7 +10,6 @@ NumPy 向量化回測核心，支援：
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 from typing import Any, Optional
 

@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import shutil
 import sqlite3
-import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -18,7 +17,7 @@ import numpy as np
 from loguru import logger
 
 from app.core.config.settings import settings
-from app.core.ml.base import BasePredictor, PredictResult, TrainResult
+from app.core.ml.base import BasePredictor, TrainResult
 from app.core.ml.registry import model_registry
 from app.core.ml.feature_engineer import (
     build_features, build_latest_features, normalize_features, apply_normalization,

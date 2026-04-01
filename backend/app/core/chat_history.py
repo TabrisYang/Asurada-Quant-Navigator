@@ -9,14 +9,11 @@
 """
 
 import json
-import sqlite3
-import uuid
 from datetime import datetime, timedelta
 from typing import Optional
 
 from loguru import logger
 
-from app.core.config.settings import settings
 from app.core.base_db import BaseDBStore
 
 # 對話保留天數（改為 60 天 — 蒸餾後原始資料仍保留一段時間供參考）

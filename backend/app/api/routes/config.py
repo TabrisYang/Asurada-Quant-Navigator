@@ -1,6 +1,8 @@
 """阿斯拉量化系統 — 設定路由（含 API Key 安全管理 + 動態模型探測 + 用量追蹤 + 自訂策略庫）"""
 
+import json
 import re
+from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -8,12 +10,13 @@ from fastapi import APIRouter, HTTPException
 from loguru import logger
 from pydantic import BaseModel
 
+from app.core.config.settings import settings as _app_settings
 from app.core.llm.adapter import create_adapter
 from app.core.llm.model_discovery import discover_models
 from app.core.security.key_manager import key_manager
 from app.core.usage_tracker import usage_tracker
 from app.core import user_strategies
-from app.models.schemas import LLMConfigRequest, LLMProvider
+from app.models.schemas import LLMConfigRequest
 
 router = APIRouter()
 
@@ -93,7 +96,7 @@ async def configure_llm(request: LLMConfigRequest):
         "status": "ok",
         "provider": provider,
         "session_id": session_id,
-        "message": f"API Key 已加密儲存，session 有效期 24 小時",
+        "message": "API Key 已加密儲存，session 有效期 24 小時",
     }
 
 
@@ -386,10 +389,6 @@ async def delete_strategy(strategy_id: str):
 # ═══════════════════════════════════════════════════════
 #  系統通用設定（教學模式等）
 # ═══════════════════════════════════════════════════════
-
-import json
-from pathlib import Path
-from app.core.config.settings import settings as _app_settings
 
 _SYSTEM_SETTINGS_FILE = Path(_app_settings.db_path) / "system_settings.json"
 

@@ -3,7 +3,6 @@
 支援：日期範圍、細粒度進度追蹤、即時日誌、預估剩餘時間。
 """
 
-import asyncio
 import time
 from datetime import datetime, timedelta
 from typing import Optional

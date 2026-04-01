@@ -2,7 +2,6 @@
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from app.core.backtest.engine import run_backtest, BacktestResult
 

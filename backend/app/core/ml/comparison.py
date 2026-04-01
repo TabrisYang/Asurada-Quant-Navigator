@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -13,7 +12,6 @@ from loguru import logger
 
 from app.core.ml.registry import model_registry
 from app.core.ml.feature_engineer import build_features, normalize_features
-from app.core.ml.base import TrainResult
 
 
 def compare_models(

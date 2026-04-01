@@ -4,11 +4,8 @@
 報告結構：封面 → 執行摘要 → 各標的深度分析 → 關鍵價位表 → 附錄
 """
 
-import asyncio
 import io
-import json
 import os
-import re
 from datetime import datetime
 from typing import Optional
 from urllib.parse import quote
@@ -20,8 +17,6 @@ from loguru import logger
 from app.core.chat_history import chat_history
 from app.core.knowledge_distiller import knowledge_distiller
 from app.core.knowledge_fragments import fragment_store
-from app.core.semantic_cache import semantic_cache
-from app.core.usage_tracker import usage_tracker
 
 router = APIRouter()
 

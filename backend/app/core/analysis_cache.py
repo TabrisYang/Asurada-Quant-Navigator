@@ -10,7 +10,6 @@
 """
 
 import hashlib
-import json
 import shutil
 import sqlite3
 import time

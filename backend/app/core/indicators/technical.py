@@ -127,7 +127,7 @@ def calc_ema(df: pd.DataFrame, params: dict) -> dict[str, list]:
 )
 def calc_adx(df: pd.DataFrame, params: dict) -> dict[str, list]:
     period = int(params["period"])
-    high, low, close = df["high"], df["low"], df["close"]
+    high, low, _close = df["high"], df["low"], df["close"]
 
     plus_dm = high.diff().clip(lower=0)
     minus_dm = (-low.diff()).clip(lower=0)
@@ -991,7 +991,6 @@ def calc_market_structure(df: pd.DataFrame, params: dict) -> dict[str, list]:
 # 諧波型態偵測（Harmonic Patterns）
 # =============================================
 
-import math as _math
 
 # Fibonacci 比例容差 ±tolerance
 _HARMONIC_PATTERNS = {
@@ -1041,8 +1040,6 @@ def _find_zigzag_pivots(highs, lows, closes, deviation_pct: float = 5.0) -> list
     pivots: list[tuple[int, float, str]] = []
 
     last_pivot_type = ""
-    last_pivot_price = closes[0]
-    last_pivot_idx = 0
 
     hi_since = float(highs[0])
     hi_idx = 0
@@ -1051,22 +1048,20 @@ def _find_zigzag_pivots(highs, lows, closes, deviation_pct: float = 5.0) -> list
 
     for i in range(1, n):
         h = float(highs[i])
-        l = float(lows[i])
+        lo = float(lows[i])
 
         if h > hi_since:
             hi_since = h
             hi_idx = i
-        if l < lo_since:
-            lo_since = l
+        if lo < lo_since:
+            lo_since = lo
             lo_idx = i
 
         if last_pivot_type != "H":
-            if hi_since > 0 and (hi_since - l) / hi_since >= deviation:
+            if hi_since > 0 and (hi_since - lo) / hi_since >= deviation:
                 pivots.append((hi_idx, hi_since, "H"))
                 last_pivot_type = "H"
-                last_pivot_price = hi_since
-                last_pivot_idx = hi_idx
-                lo_since = l
+                lo_since = lo
                 lo_idx = i
                 hi_since = h
                 hi_idx = i
@@ -1075,11 +1070,9 @@ def _find_zigzag_pivots(highs, lows, closes, deviation_pct: float = 5.0) -> list
             if lo_since > 0 and (h - lo_since) / lo_since >= deviation:
                 pivots.append((lo_idx, lo_since, "L"))
                 last_pivot_type = "L"
-                last_pivot_price = lo_since
-                last_pivot_idx = lo_idx
                 hi_since = h
                 hi_idx = i
-                lo_since = l
+                lo_since = lo
                 lo_idx = i
 
     return pivots
@@ -1544,7 +1537,6 @@ def calc_leading_composite(df: pd.DataFrame, params: dict) -> dict[str, list]:
     rsi_period = int(params.get("rsi_period", 14))
     lookback = int(params.get("lookback", 30))
     close = df["close"]
-    n = len(df)
 
     # 1. 波動壓縮（布林帶寬度分位 <20%）
     sma = close.rolling(window=bb_period).mean()

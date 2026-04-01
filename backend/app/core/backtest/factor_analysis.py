@@ -191,7 +191,6 @@ def compute_derived_factors(df: pd.DataFrame) -> dict[str, np.ndarray]:
     rel_vol = _first_series(_safe_calc("rel_vol"))
     if rel_vol is not None:
         kernel = np.ones(5) / 5
-        padded = np.concatenate([np.full(4, np.nan), rel_vol])
         convolved = np.convolve(rel_vol, kernel, mode="full")[:n].copy()
         convolved[:4] = np.nan
         derived["vol_ratio_trend"] = convolved

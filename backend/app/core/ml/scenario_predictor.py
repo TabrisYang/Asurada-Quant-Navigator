@@ -343,7 +343,7 @@ def _detect_market_regime(df: pd.DataFrame) -> dict:
     sma50 = pd.Series(closes).rolling(50).mean().values
 
     recent_sma20_slope = (sma20[-1] - sma20[-5]) / sma20[-5] if sma20[-5] and not np.isnan(sma20[-5]) else 0
-    recent_sma50_slope = (sma50[-1] - sma50[-10]) / sma50[-10] if sma50[-10] and not np.isnan(sma50[-10]) else 0
+    _recent_sma50_slope = (sma50[-1] - sma50[-10]) / sma50[-10] if sma50[-10] and not np.isnan(sma50[-10]) else 0  # noqa: F841
 
     # 2. Higher highs / lower lows 判定
     highs = df["high"].values[-20:]

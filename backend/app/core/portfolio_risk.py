@@ -4,10 +4,9 @@
 使用現有 OHLCV 數據計算，無額外數據需求。
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
-from loguru import logger
 
 
 # ── 預設參數 ──────────────────────────────────────────

@@ -58,7 +58,7 @@ class RandomForestPredictor(BasePredictor):
         cfg = {**_DEFAULT_CONFIG, **(config or {})}
         self._feature_names = list(feature_names)
 
-        pw = cfg.pop("pos_weight", None)
+        cfg.pop("pos_weight", None)
         self._model = RandomForestClassifier(
             n_estimators=cfg["n_estimators"],
             max_depth=cfg["max_depth"],

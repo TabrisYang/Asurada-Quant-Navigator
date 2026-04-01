@@ -19,7 +19,7 @@ from loguru import logger
 
 from app.core.config.settings import settings
 from app.utils.symbol import get_coinbase_symbol, normalize_symbol, symbol_to_filename
-from app.utils.timezone import TAIPEI_TZ, UTC_TZ, utc_to_taipei, taipei_to_utc, parse_date_string
+from app.utils.timezone import TAIPEI_TZ, taipei_to_utc, parse_date_string
 
 
 # 時間週期對應的毫秒數
@@ -249,10 +249,6 @@ class CryptoDataEngine:
             # MACD (12, 26, 9)
             macd_result = ta.macd(df["close"], fast=12, slow=26, signal=9)
             if macd_result is not None:
-                macd_col = [c for c in macd_result.columns if "MACD_12" in c and "h" not in c.lower() and "s" not in c.lower()]
-                signal_col = [c for c in macd_result.columns if "MACDs" in c or "MACD_Signal" in c.lower()]
-                hist_col = [c for c in macd_result.columns if "MACDh" in c or "MACD_Hist" in c.lower()]
-
                 # pandas_ta 的 MACD 欄位命名: MACD_12_26_9, MACDh_12_26_9, MACDs_12_26_9
                 for col in macd_result.columns:
                     if col.startswith("MACD_"):
@@ -532,7 +528,7 @@ class CryptoDataEngine:
         merged = pd.concat(all_data, ignore_index=True)
 
         # 五源投票
-        _report(f"執行五源投票機制...")
+        _report("執行五源投票機制...")
         results = []
         for ts, group in merged.groupby("timestamp"):
             voting = self._calculate_voting(group)
@@ -570,7 +566,7 @@ class CryptoDataEngine:
             combined = new_df.sort_values("timestamp").reset_index(drop=True)
 
         # 計算技術指標
-        _report(f"計算技術指標...")
+        _report("計算技術指標...")
         combined = self._calculate_indicators(combined)
 
         # 儲存到 CSV

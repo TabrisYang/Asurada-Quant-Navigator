@@ -732,7 +732,7 @@ def _compute_ml_features(
     closes = df["close"].values
     highs = df["high"].values
     lows = df["low"].values
-    current = closes[-1]
+    _ = closes[-1]  # current price reference
 
     # Body/Wick Ratio（最後一根 K 線）
     body = abs(closes[-1] - df["open"].values[-1])

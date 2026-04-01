@@ -117,7 +117,7 @@ def generate_feedback_prompt(
         if tier_low:
             lines.append(f"指標可靠度 ★：{', '.join(tier_low)}")
         if tier_high:
-            lines.append(f"→ 規則：★ 指標禁止作為主要訊號，必須由 ★★★ 指標主導決策")
+            lines.append("→ 規則：★ 指標禁止作為主要訊號，必須由 ★★★ 指標主導決策")
 
         # Alpha 衰退預警：比較 30 天 vs 90 天指標勝率
         recent_stats = prediction_tracker.get_stats(symbol=symbol, days=30)

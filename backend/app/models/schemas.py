@@ -1,6 +1,5 @@
 """阿斯拉量化系統 — Pydantic 資料模型"""
 
-from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
 

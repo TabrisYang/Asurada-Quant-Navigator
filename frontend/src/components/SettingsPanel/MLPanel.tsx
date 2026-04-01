@@ -89,15 +89,7 @@ export default function MLPanel() {
   const [showGuide, setShowGuide] = useState(() => {
     return localStorage.getItem('asura_ml_guide_dismissed') !== 'true';
   });
-  const [hasModels, setHasModels] = useState<boolean | null>(null);
   const [expandedStep, setExpandedStep] = useState<number | null>(null);
-
-  // 檢查是否有已訓練模型
-  useEffect(() => {
-    fetchTrainedModels().then((res) => {
-      setHasModels((res.models || []).length > 0);
-    }).catch(() => setHasModels(false));
-  }, []);
 
   const tabs: { key: SubTab; label: string }[] = [
     { key: 'settings', label: '設定' },

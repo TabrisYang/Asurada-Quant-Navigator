@@ -7,10 +7,8 @@
 import asyncio
 import json
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Optional, Callable
 
-import numpy as np
 import pandas as pd
 import yfinance as yf
 from loguru import logger
@@ -18,7 +16,7 @@ from loguru import logger
 from app.core.config.settings import settings
 from app.data.fetchers.crypto_engine import CryptoDataEngine
 from app.utils.symbol import normalize_symbol, symbol_to_filename, symbol_to_yf_ticker
-from app.utils.timezone import TAIPEI_TZ, parse_date_string
+from app.utils.timezone import parse_date_string
 
 # yfinance 時間框架映射
 YF_TIMEFRAME_MAP = {

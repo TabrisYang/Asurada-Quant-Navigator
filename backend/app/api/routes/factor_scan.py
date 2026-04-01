@@ -3,7 +3,7 @@
 提供一鍵因子掃描功能，不經 LLM，直接計算並返回結果。
 """
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter
 from loguru import logger
 from pydantic import BaseModel
 from typing import Optional

@@ -537,7 +537,7 @@ def _build_messages(
                 f"• [{f['type']}] {f['content']}（相關度 {f['similarity']:.0%}）"
                 for f in rag_fragments
             ]
-            context_parts.append(f"【歷史分析經驗碎片】\n" + "\n".join(frag_texts))
+            context_parts.append("【歷史分析經驗碎片】\n" + "\n".join(frag_texts))
 
         if context_parts:
             merged = "\n\n---\n\n".join(context_parts)
@@ -921,9 +921,10 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
 
     try:
         adapter = create_adapter(provider=provider, api_key=api_key, model_name=model_name, base_url=base_url)
-    except Exception as e:
+    except Exception as exc:
+        _exc_msg = str(exc)
         async def err_gen():
-            yield _sse_event("error", {"error": f"無法連接 LLM: {str(e)}"})
+            yield _sse_event("error", {"error": f"無法連接 LLM: {_exc_msg}"})
             yield _sse_event("done", {})
         return StreamingResponse(err_gen(), media_type="text/event-stream")
 
@@ -986,7 +987,8 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                 try:
                     from pathlib import Path
                     import time as _time
-                    _cal_path = Path(settings.db_path) / "calibration" / f"{chart_symbol}.json"
+                    from app.core.config.settings import settings as _cal_settings
+                    _cal_path = Path(_cal_settings.db_path) / "calibration" / f"{chart_symbol}.json"
                     _needs_cal = not _cal_path.exists()
                     if not _needs_cal:
                         _age_days = (_time.time() - _cal_path.stat().st_mtime) / 86400

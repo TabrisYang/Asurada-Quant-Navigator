@@ -10,6 +10,16 @@ from fastapi import APIRouter, HTTPException
 from loguru import logger
 
 from app.core.indicators import registry
+from app.data.fetchers.crypto_engine import crypto_engine
+from app.data.fetchers.external import external_fetcher
+from app.models.schemas import (
+    IndicatorRequest,
+    IndicatorData,
+    ConditionSearchRequest,
+    ConditionSearchResponse,
+    MatchedPeriod,
+    DisplayMode,
+)
 
 # ─── 指標計算快取（LRU，最多 128 筆，TTL 5 分鐘）───────
 _CACHE_MAX = 128
@@ -42,17 +52,6 @@ def _cache_set(key: str, data: dict):
     _indicator_cache[key] = (time.time(), data)
     if len(_indicator_cache) > _CACHE_MAX:
         _indicator_cache.popitem(last=False)
-from app.data.fetchers.crypto_engine import crypto_engine
-from app.data.fetchers.external import external_fetcher
-from app.models.schemas import (
-    IndicatorRequest,
-    IndicatorData,
-    ConditionSearchRequest,
-    ConditionSearchResponse,
-    IndicatorListResponse,
-    MatchedPeriod,
-    DisplayMode,
-)
 
 router = APIRouter()
 

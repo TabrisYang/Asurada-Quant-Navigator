@@ -13,7 +13,7 @@ from typing import Any, AsyncGenerator, Optional
 from loguru import logger
 
 from app.core.config.settings import settings
-from app.core.llm.function_defs import FUNCTION_DEFINITIONS, SYSTEM_PROMPT, assemble_system_prompt
+from app.core.llm.function_defs import FUNCTION_DEFINITIONS, SYSTEM_PROMPT
 
 # 各 LLM 供應商統一超時（秒）— 從 settings 讀取，可透過 .env 覆蓋
 _LLM_TIMEOUT = settings.llm_timeout

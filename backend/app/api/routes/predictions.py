@@ -242,7 +242,7 @@ def _generate_template_report(data: dict) -> str:
 
     lines = [
         "# 覆盤報告（自動模板）\n",
-        f"## 統計摘要",
+        "## 統計摘要",
         f"- 總預測數: {s['total']}",
         f"- 命中目標: {s['wins']} ({s['win_rate']}%)",
         f"- 觸及止損: {s['losses']}",

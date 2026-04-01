@@ -1,12 +1,11 @@
 """阿斯拉量化系統 — 情境預測路由"""
 
 from fastapi import APIRouter, HTTPException, Query
-from typing import Optional
 
 from app.data.fetchers.crypto_engine import crypto_engine
 from app.data.fetchers.tw_stock_engine import tw_stock_engine
 from app.utils.symbol import is_tw_stock
-from app.models.schemas import ScenarioRequest, ScenarioResponse, Timeframe
+from app.models.schemas import ScenarioRequest
 from app.core.ml.scenario_predictor import scenario_predictor
 
 router = APIRouter()

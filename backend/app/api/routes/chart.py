@@ -1,6 +1,6 @@
 """阿斯拉量化系統 — K 線圖表數據路由"""
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Query
 from typing import Optional
 
 from app.data.fetchers.crypto_engine import crypto_engine
