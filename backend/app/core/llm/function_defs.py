@@ -75,6 +75,21 @@ _INTENT_KEYWORDS: dict[str, list[str]] = {
     "deep_phase3": [
         "完整分析三", "完整分析3", "全面分析三", "深度分析三",
     ],
+    "sector_analysis": [
+        "族群", "概念股", "板塊", "產業分析", "sector",
+        "半導體族群", "金融股", "航運股", "哪些族群",
+        "整個產業", "產業趨勢", "族群分析", "類股",
+        "哪些產業", "什麼產業", "什麼族群", "列出族群", "列出產業",
+        "可以分析哪些",
+        # 主要族群名稱
+        "半導體", "晶圓代工", "ic設計", "封測", "矽晶圓",
+        "金融", "電子代工", "ai概念", "ai伺服器", "ai晶片",
+        "航運", "鋼鐵", "生技", "綠能",
+        "汽車電子", "電動車", "車用零件",
+        "被動元件", "mlcc", "電源散熱", "網通",
+        "電信", "食品", "營建", "觀光", "面板", "pcb",
+        "記憶體", "蘋果供應鏈", "蘋概", "伺服器",
+    ],
 }
 
 
@@ -811,6 +826,37 @@ _PROMPT_MODULES["teaching"] = """
 5. **教學風格**：解說自然嵌入分析文字中，不要分成獨立的「教學段落」，讓使用者在實際分析中學習
 6. **延伸學習**：在分析結尾，提供 1-2 個可進一步探索的相關主題（例：「想深入了解 RSI 背離的應用，可以問我『什麼是 RSI 背離？如何用它判斷趨勢反轉？』」）"""
 
+# ─── sector_analysis（族群/概念股分析）─────────────────
+
+_PROMPT_MODULES["sector_analysis"] = """
+【台股族群/概念股分析 — analyze_sector / list_sectors】
+當使用者提到任何台股產業族群、概念股、板塊分析時，你「必須」呼叫 analyze_sector 函式。
+如果使用者不確定要分析哪個族群，或詢問「有哪些產業可以分析」「列出族群」等，
+先呼叫 list_sectors 列出完整清單讓使用者選擇。
+
+支援的族群（含子族群）：
+- 半導體（大類）→ 晶圓代工、IC設計、封測、記憶體、矽晶圓
+- AI概念股（大類）→ AI伺服器、AI晶片
+- 汽車電子（大類）→ 電動車、車用零件
+- 被動元件、電源散熱、網通
+- 金融、電子代工、航運、鋼鐵、生技醫療、綠能、電信、食品、營建、觀光餐飲、面板、PCB、蘋果供應鏈、伺服器概念
+也支援別名（如「ai」「蘋概股」「銀行股」「mlcc」「ev」「封裝測試」）。
+
+analyze_sector 函式會：
+1. 批次載入族群內所有個股的 OHLCV 數據
+2. 合成等權族群指數並計算技術指標（RSI、MACD、ADX、BB 等）
+3. 計算 Breadth 指標（站上 MA20/MA60 比例、上漲家數比例）
+4. 計算個股相對強弱（RS ratio）排名
+
+【輸出格式 — 嚴格按順序】
+1. 📊 族群指數趨勢（引用技術指標數據：RSI、MACD、均線位置）
+2. 📈 Breadth 分析（引用 pct_above_ma20、advancing_ratio 等數據）
+3. 🏆 個股相對強弱排名（列出前 5 強 + 最弱 2 檔，含 RS ratio）
+4. 💡 操作建議（基於族群趨勢 + breadth 一致性給出方向性建議）
+5. ⚠️ 風險提示
+
+你「禁止」不呼叫函式就空談族群趨勢。必須先取得真實數據再分析。"""
+
 
 # ═══════════════════════════════════════════════════════
 #  動態組裝
@@ -852,6 +898,9 @@ _INTENT_TO_MODULES: dict[str, list[str]] = {
         "quant_research", "calibrate", "alpha_monitor",
         "risk_checklist", "output_full", "output_deep_phase3",
     ],
+    "sector_analysis": [
+        "regime_v2", "sector_analysis", "output_lite", "risk_checklist",
+    ],
 }
 
 
@@ -888,6 +937,7 @@ def assemble_system_prompt(intents: set[str], teaching_mode: bool = False) -> st
         "output_deep_phase1", "output_deep_phase2", "output_deep_phase3",
         "drawing", "event_analysis", "conditional_prob", "scenario", "smc",
         "quant_research", "calibrate", "backtest",
+        "sector_analysis",
     )
 
     parts = [_PROMPT_CORE]
@@ -1490,6 +1540,59 @@ FUNCTION_DEFINITIONS = [
                     },
                 },
                 "required": [],
+            },
+        },
+    },
+    # ─── 族群/概念股分析 ───
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_sector",
+            "description": (
+                "分析台股特定產業族群/概念股的整體趨勢。"
+                "合成族群等權指數 → 技術分析（RSI/MACD/ADX/均線）→ Breadth（站上均線比例）"
+                "→ 個股相對強弱排名。"
+                "支援族群（含子族群）：半導體（晶圓代工/IC設計/封測/記憶體/矽晶圓）、"
+                "AI概念股（AI伺服器/AI晶片）、汽車電子（電動車/車用零件）、"
+                "被動元件、電源散熱、網通、金融、電子代工、航運、鋼鐵、生技醫療、綠能、"
+                "電信、食品、營建、觀光餐飲、面板、PCB、蘋果供應鏈、伺服器概念。"
+                "也支援別名（如「ai」「蘋概股」「mlcc」「ev」「封裝測試」）。"
+                "適用場景：「半導體族群趨勢」「AI概念股分析」「封測族群表現」「哪個族群最強」。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sector_name": {
+                        "type": "string",
+                        "description": "族群名稱，如「半導體」「AI概念股」「封測」「被動元件」「電動車」",
+                    },
+                    "timeframe": {
+                        "type": "string",
+                        "enum": ["1d", "1w"],
+                        "description": "時間週期（預設 1d）",
+                    },
+                    "lookback_days": {
+                        "type": "number",
+                        "description": "分析回看天數（預設 120）",
+                    },
+                },
+                "required": ["sector_name"],
+            },
+        },
+    },
+    # ─── 列出可用族群 ───
+    {
+        "type": "function",
+        "function": {
+            "name": "list_sectors",
+            "description": (
+                "列出所有可分析的台股產業族群/概念股清單。"
+                "當使用者詢問「有哪些族群可以分析」「列出產業」「支援什麼概念股」時呼叫。"
+                "回傳每個族群的名稱、成分股數量、來源（內建/自訂）。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
             },
         },
     },

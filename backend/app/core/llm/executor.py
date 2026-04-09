@@ -262,6 +262,12 @@ async def execute_function_calls(
                 elif name == "detect_smc_structure":
                     result = await _exec_detect_smc(args, default_symbol, default_timeframe)
                     return {"function": name, "result": result}
+                elif name == "analyze_sector":
+                    result = await _exec_analyze_sector(args)
+                    return {"function": name, "result": result}
+                elif name == "list_sectors":
+                    result = await _exec_list_sectors()
+                    return {"function": name, "result": result}
                 return {"function": name, "error": f"未知的並行函式: {name}"}
             except Exception as e:
                 logger.error(f"執行 {name} 失敗: {e}")
@@ -1475,3 +1481,33 @@ async def _exec_detect_smc(args: dict, default_symbol: str, default_tf: str) -> 
         return {"status": "success", **result.to_dict()}
     except Exception as e:
         return {"status": "error", "message": f"SMC 分析失敗: {str(e)}"}
+
+
+# ═══════════════════════════════════════════════════════
+#  族群分析
+# ═══════════════════════════════════════════════════════
+
+async def _exec_analyze_sector(args: dict) -> dict:
+    """台股族群/概念股分析"""
+    from app.core.sector_analyzer import analyze_sector
+
+    sector_name = args.get("sector_name", "")
+    timeframe = args.get("timeframe", "1d")
+    lookback_days = args.get("lookback_days", 120)
+
+    if not sector_name:
+        from app.data.tw_sectors import list_sectors
+        sectors = list_sectors()
+        return {
+            "status": "error",
+            "message": "請指定族群名稱",
+            "available_sectors": [s["name"] for s in sectors],
+        }
+
+    return await analyze_sector(sector_name, timeframe, lookback_days)
+
+
+async def _exec_list_sectors() -> dict:
+    """列出所有可分析的台股族群"""
+    from app.data.tw_sectors import list_sectors
+    return {"status": "success", "sectors": list_sectors()}
