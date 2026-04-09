@@ -35,6 +35,15 @@ api.interceptors.response.use(
   },
 );
 
+/** 從 Axios 錯誤中提取後端回傳的訊息，優先取 response.data 中的 message/detail */
+function extractErrorMessage(err: unknown, fallback: string): string {
+  const ax = err as Record<string, any>;
+  return ax?.response?.data?.message
+    || ax?.response?.data?.detail
+    || ax?.message
+    || fallback;
+}
+
 // ===== 圖表 API =====
 
 export async function fetchChartData(
@@ -110,9 +119,18 @@ export async function sendChatMessage(
 
 // ===== 對話 Streaming API =====
 
+export interface ProgressInfo {
+  percentage: number;
+  completed: number;
+  total: number;
+  current_task: string;
+  message: string;
+}
+
 export interface StreamCallbacks {
   onThinking?: () => void;
   onStatus?: (message: string) => void;
+  onProgress?: (progress: ProgressInfo) => void;
   onToken?: (content: string) => void;
   onFunctionCalls?: (calls: Array<{ name: string; arguments: Record<string, unknown> }>) => void;
   onChartUpdates?: (updates: Record<string, unknown>) => void;
@@ -271,6 +289,9 @@ function _handleSSEEvent(
       if (typeof data.message === 'string') {
         callbacks.onStatus?.(data.message);
       }
+      break;
+    case 'progress':
+      callbacks.onProgress?.(data as unknown as ProgressInfo);
       break;
     case 'token':
       if (typeof data.content === 'string') {
@@ -668,10 +689,10 @@ export interface StrategyTier {
 
 export async function runFactorScan(req: FactorScanRequest): Promise<FactorScanResult> {
   try {
-    const res = await api.post('/factor-scan/scan', req);
+    const res = await api.post('/factor-scan/scan', req, { timeout: 180_000 });
     return res.data;
   } catch (err: unknown) {
-    return { status: 'error', message: (err as Error)?.message || '因子掃描失敗' };
+    return { status: 'error', message: extractErrorMessage(err, '因子掃描失敗') };
   }
 }
 
@@ -702,7 +723,7 @@ export async function triggerPreview(
     const res = await api.post('/factor-scan/trigger-preview', { symbol, timeframe, conditions });
     return res.data;
   } catch (err: unknown) {
-    return { status: 'error', message: (err as Error)?.message || '預覽失敗',
+    return { status: 'error', message: extractErrorMessage(err, '預覽失敗'),
              trigger_count: 0, total_bars: 0, trigger_pct: 0, conditions_used: 0 };
   }
 }
@@ -877,6 +898,11 @@ export async function generateReview(
   return res.data;
 }
 
+export async function fetchReviewHistory(limit: number = 10) {
+  const res = await api.get('/predictions/reviews', { params: { limit: String(limit) } });
+  return res.data;
+}
+
 export async function clearPredictions(symbol?: string) {
   const params: Record<string, string> = {};
   if (symbol) params.symbol = symbol;
@@ -962,11 +988,124 @@ export async function clearSessionCache(): Promise<string> {
   return res.data.message;
 }
 
+// ===== 預警系統 =====
+
+export interface Alert {
+  id: number;
+  symbol: string;
+  timeframe: string;
+  alert_type: string;
+  direction: string;
+  confidence: string;
+  trigger_conditions?: string;
+  signal_score: number;
+  created_at: string;
+  expires_at: string;
+  status: string;
+  outcome_pct?: number;
+  move_probability?: number;
+  evidence_summary?: string;
+  probability_detail?: Record<string, { up_pct: number; down_pct: number; any_move_pct: number }>;
+  feature_attribution?: Array<{ feature: string; presence_in_hits: number; lift: number }>;
+}
+
+export async function fetchActiveAlerts(symbol?: string) {
+  const params = symbol ? { symbol } : {};
+  const res = await api.get('/alerts/active', { params });
+  return res.data;
+}
+
+export async function fetchAlertHistory(symbol?: string, limit = 50) {
+  const params: Record<string, unknown> = { limit };
+  if (symbol) params.symbol = symbol;
+  const res = await api.get('/alerts/history', { params });
+  return res.data;
+}
+
+export async function triggerManualScan() {
+  const res = await api.post('/alerts/scan', {}, { timeout: 120_000 });
+  return res.data;
+}
+
+export async function dismissAlert(alertId: number) {
+  const res = await api.post(`/alerts/dismiss/${alertId}`);
+  return res.data;
+}
+
+export async function fetchMovementProbability(symbol: string, timeframe = '4h', threshold = 3.0) {
+  const res = await api.get(`/alerts/probability/${symbol}`, { params: { timeframe, threshold } });
+  return res.data;
+}
+
+export async function checkSymbolsData(symbols: string[], timeframe = '4h') {
+  const res = await api.post('/alerts/check-data', { symbols, timeframe });
+  return res.data.data_available as Record<string, boolean>;
+}
+
+// ===== 掃描器校準 =====
+
+export async function fetchScannerCalibration() {
+  const res = await api.get('/config/scanner-calibration');
+  return res.data.calibration;
+}
+
+export async function resetScannerCalibration() {
+  const res = await api.post('/config/scanner-calibration/reset');
+  return res.data;
+}
+
+// ===== 全量歷史特徵分析 =====
+
+export async function fetchFeatureProfiles() {
+  const res = await api.get('/config/feature-profiles');
+  return res.data.profiles;
+}
+
+export async function recomputeFeatureProfiles() {
+  const res = await api.post('/config/feature-profiles/recompute');
+  return res.data.result;
+}
+
 // ===== 健康檢查 =====
 
 export async function healthCheck() {
   const res = await api.get('/health');
   return res.data;
+}
+
+// ── 台股名稱動態查詢（帶快取） ──
+
+const _twNameCache: Record<string, string> = {
+  'TWII': '加權指數',
+  'TWOII': '櫃買指數',
+};
+const _twNamePending: Record<string, Promise<string>> = {};
+
+export async function fetchTwStockName(code: string): Promise<string> {
+  code = code.toUpperCase();
+  if (_twNameCache[code] !== undefined) return _twNameCache[code];
+  // 避免同一代碼重複請求
+  if (_twNamePending[code]) return _twNamePending[code];
+  _twNamePending[code] = api.get('/tw-stock-name', { params: { code } })
+    .then((res) => {
+      const name = res.data?.name || '';
+      _twNameCache[code] = name;
+      delete _twNamePending[code];
+      return name;
+    })
+    .catch(() => {
+      delete _twNamePending[code];
+      return '';
+    });
+  return _twNamePending[code];
+}
+
+export function getTwStockNameSync(code: string): string | undefined {
+  return _twNameCache[code.toUpperCase()];
+}
+
+export function setTwStockNameCache(code: string, name: string) {
+  _twNameCache[code.toUpperCase()] = name;
 }
 
 export default api;

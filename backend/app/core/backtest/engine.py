@@ -22,9 +22,19 @@ from app.core.indicators import registry
 # ─── 交易成本參數 ────────────────────────────────────
 DEFAULT_SLIPPAGE_PCT = 0.0005   # 0.05% 保守滑點（靜態回退值）
 DEFAULT_FEE_PCT = 0.001         # 0.1% 手續費（單邊，靜態回退值）
+DEFAULT_FUNDING_RATE = 0.0001   # 0.01% 每 8 小時（永續合約資金費率）
 DEFAULT_CAPITAL = 10000.0       # 預設初始資金 (USDT)
 MIN_DATA_POINTS = 60            # 最低數據量需求
 OOS_RATIO = 0.3                 # out-of-sample 佔比
+
+# 各時間框架對應的 bar 數 per 8 小時（資金費率結算週期）
+_BARS_PER_FUNDING_PERIOD: dict[str, float] = {
+    "15m": 32.0,   # 8h / 15m
+    "1h": 8.0,
+    "4h": 2.0,
+    "1d": 1 / 3,   # 8h / 24h
+    "1w": 1 / 21,  # 8h / 168h
+}
 
 # 各交易所 maker/taker 費率（單邊）
 EXCHANGE_FEES = {
@@ -339,6 +349,8 @@ def run_backtest(
     leverage: float = 1.0,
     dynamic_cost: bool = True,
     exchange: str = "default",
+    timeframe: str = "4h",
+    funding_rate: float = DEFAULT_FUNDING_RATE,
 ) -> BacktestResult:
     """
     執行向量化回測
@@ -354,6 +366,8 @@ def run_backtest(
         take_profit_pct: 止盈百分比
         initial_capital: 初始資金
         leverage: 槓桿倍數（預設 1.0 = 無槓桿）
+        timeframe: K 線時間框架，用於計算資金費率週期
+        funding_rate: 永續合約資金費率（每 8 小時），預設 0.01%
     """
     result = BacktestResult()
 
@@ -382,6 +396,10 @@ def run_backtest(
     leverage = max(1.0, leverage)
     static_cost_rate = slippage_pct + fee_pct
     capital = initial_capital
+
+    # 資金費率：每 bar 的費率（永續合約槓桿 > 1 時生效）
+    bars_per_funding = _BARS_PER_FUNDING_PERIOD.get(timeframe, 2.0)
+    funding_per_bar = funding_rate / bars_per_funding if leverage > 1 and bars_per_funding > 0 else 0.0
 
     # 預計算 ATR 和 volume 用於動態成本
     volume = df["volume"].values.astype(float) if "volume" in df.columns else np.ones(len(close))
@@ -427,13 +445,18 @@ def run_backtest(
                 entry_capital = capital
                 in_position = True
         else:
+            # 計算持倉期間累計資金費率成本
+            def _funding_cost(bars_held: int) -> float:
+                return funding_per_bar * bars_held
+
             # 檢查強制平倉（槓桿爆倉）
             if liq_margin is not None:
                 if direction == "long" and low[i] <= entry_price * (1 - liq_margin):
                     exit_price = entry_price * (1 - liq_margin)
                     trades.append(_make_trade(
                         entry_idx, i, timestamps, entry_price, exit_price,
-                        direction, entry_capital, cost_rate, "liquidation", leverage
+                        direction, entry_capital, cost_rate, "liquidation", leverage,
+                        _funding_cost(i - entry_idx),
                     ))
                     capital += trades[-1].pnl_amount
                     capital = max(capital, 0)
@@ -444,7 +467,8 @@ def run_backtest(
                     exit_price = entry_price * (1 + liq_margin)
                     trades.append(_make_trade(
                         entry_idx, i, timestamps, entry_price, exit_price,
-                        direction, entry_capital, cost_rate, "liquidation", leverage
+                        direction, entry_capital, cost_rate, "liquidation", leverage,
+                        _funding_cost(i - entry_idx),
                     ))
                     capital += trades[-1].pnl_amount
                     capital = max(capital, 0)
@@ -461,7 +485,8 @@ def run_backtest(
                     exit_price = min(sl_target_long, open_prices[i]) * (1 - cost_rate)
                     trades.append(_make_trade(
                         entry_idx, i, timestamps, entry_price, exit_price,
-                        direction, entry_capital, cost_rate, "stop_loss", leverage
+                        direction, entry_capital, cost_rate, "stop_loss", leverage,
+                        _funding_cost(i - entry_idx),
                     ))
                     capital += trades[-1].pnl_amount
                     in_position = False
@@ -471,7 +496,8 @@ def run_backtest(
                     exit_price = max(sl_target_short, open_prices[i]) * (1 + cost_rate)
                     trades.append(_make_trade(
                         entry_idx, i, timestamps, entry_price, exit_price,
-                        direction, entry_capital, cost_rate, "stop_loss", leverage
+                        direction, entry_capital, cost_rate, "stop_loss", leverage,
+                        _funding_cost(i - entry_idx),
                     ))
                     capital += trades[-1].pnl_amount
                     in_position = False
@@ -487,7 +513,8 @@ def run_backtest(
                     exit_price = max(tp_target_long, open_prices[i]) * (1 - cost_rate)
                     trades.append(_make_trade(
                         entry_idx, i, timestamps, entry_price, exit_price,
-                        direction, entry_capital, cost_rate, "take_profit", leverage
+                        direction, entry_capital, cost_rate, "take_profit", leverage,
+                        _funding_cost(i - entry_idx),
                     ))
                     capital += trades[-1].pnl_amount
                     in_position = False
@@ -497,7 +524,8 @@ def run_backtest(
                     exit_price = min(tp_target_short, open_prices[i]) * (1 + cost_rate)
                     trades.append(_make_trade(
                         entry_idx, i, timestamps, entry_price, exit_price,
-                        direction, entry_capital, cost_rate, "take_profit", leverage
+                        direction, entry_capital, cost_rate, "take_profit", leverage,
+                        _funding_cost(i - entry_idx),
                     ))
                     capital += trades[-1].pnl_amount
                     in_position = False
@@ -509,7 +537,8 @@ def run_backtest(
                 exit_price = close[i] * (1 - cost_rate if direction == "long" else 1 + cost_rate)
                 trades.append(_make_trade(
                     entry_idx, i, timestamps, entry_price, exit_price,
-                    direction, entry_capital, cost_rate, "signal", leverage
+                    direction, entry_capital, cost_rate, "signal", leverage,
+                    _funding_cost(i - entry_idx),
                 ))
                 capital += trades[-1].pnl_amount
                 in_position = False
@@ -521,7 +550,8 @@ def run_backtest(
         exit_price = close[-1] * (1 - cost_rate if direction == "long" else 1 + cost_rate)
         trades.append(_make_trade(
             entry_idx, len(close) - 1, timestamps, entry_price, exit_price,
-            direction, entry_capital, cost_rate, "end_of_data", leverage
+            direction, entry_capital, cost_rate, "end_of_data", leverage,
+            _funding_cost(len(close) - 1 - entry_idx),
         ))
         capital += trades[-1].pnl_amount
         equity_arr.append(capital)
@@ -605,13 +635,15 @@ def _make_trade(
     cost_rate: float,
     exit_reason: str,
     leverage: float = 1.0,
+    funding_cost_pct: float = 0.0,
 ) -> Trade:
     if direction == "long":
         raw_pnl_pct = (exit_price / entry_price) - 1
     else:
         raw_pnl_pct = 1 - (exit_price / entry_price)
 
-    pnl_pct = raw_pnl_pct * leverage
+    # 扣除資金費率成本（永續合約持倉期間累計）
+    pnl_pct = (raw_pnl_pct - funding_cost_pct) * leverage
     pnl_amount = capital * pnl_pct
 
     return Trade(

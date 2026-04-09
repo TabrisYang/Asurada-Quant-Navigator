@@ -62,6 +62,19 @@ _INTENT_KEYWORDS: dict[str, list[str]] = {
         "FVG", "失衡區", "order block",
         "機構", "結構破壞", "結構轉折",
     ],
+    "deep_analysis": [
+        "完整分析", "全面分析", "詳細分析", "深度分析",
+        "full analysis", "deep analysis",
+    ],
+    "deep_phase1": [
+        "完整分析一", "完整分析1", "全面分析一", "深度分析一",
+    ],
+    "deep_phase2": [
+        "完整分析二", "完整分析2", "全面分析二", "深度分析二",
+    ],
+    "deep_phase3": [
+        "完整分析三", "完整分析3", "全面分析三", "深度分析三",
+    ],
 }
 
 
@@ -79,11 +92,20 @@ def detect_intents(message: str, mode: str | None = None) -> set[str]:
         if any(kw in msg for kw in keywords):
             intents.add(intent)
 
+    # ── 深度分析互斥：phase1/2/3 命中時，移除泛用的 deep_analysis 和 analysis
+    _deep_phases = {"deep_phase1", "deep_phase2", "deep_phase3"}
+    if intents & _deep_phases:
+        intents.discard("deep_analysis")
+        intents.discard("analysis")  # 各階段有專屬模組，不需一般分析模組
+    elif "deep_analysis" in intents:
+        intents.discard("analysis")  # 完整分析有專屬模組
+
     # 降級邏輯：同時命中 simple_query + analysis 但沒有明確分析詞 → 視為簡單查詢
     if "simple_query" in intents and "analysis" in intents:
         _strong_analysis = {"分析", "預測", "建議", "進場", "出場", "做多", "做空"}
         has_strong = any(kw in msg for kw in _strong_analysis)
-        deep = {"backtest", "quant_research", "calibrate", "event_analysis"}
+        deep = {"backtest", "quant_research", "calibrate", "event_analysis",
+                "deep_analysis", "deep_phase1", "deep_phase2", "deep_phase3"}
         if not has_strong and not (intents & deep):
             intents.discard("analysis")
 
@@ -121,6 +143,9 @@ chart_state 中的 indicatorValues 包含系統精確計算的指標數值（最
 - 如果 indicatorValues 中沒有該指標，你必須先呼叫 manage_indicator 添加指標，或明確告知使用者「目前未啟用該指標，無法提供精確數值」。
 - 趨勢標籤（↑↓→）代表最近數根的變化方向，可直接引用。
 - 若 chart_state 中有 factorScanSummary，代表使用者最近執行了因子掃描。你必須參考該結果，在分析時引用具體的 IC 數據和有效因子，不要忽略它。
+- 若 chart_state 中有 data_availability，代表系統已告知你本地數據的實際範圍與數量（含起始日期、結束日期、K 線總數）。在數據量充足時「禁止」聲稱「數據不足」或「資料不夠」。只有當 total_bars 確實低於分析所需最低門檻（一般分析 30 根、因子掃描 200 根）時，才可告知使用者數據不足。
+- 若 chart_state 中有 active_alerts，代表系統自動掃描偵測到異常前兆信號（基於量幅不同步、方向一致性、價格效率等微結構特徵）。你必須在分析中參考這些預警，說明預警的方向和觸發原因，並評估是否支持你的判斷。
+- 若 active_alerts 中包含 move_probability 和 evidence_summary，你必須在分析中引用具體的機率數據和歷史依據，例如「根據47個歷史相似情境，未來6根K線內出現≥3%波動的機率為72.3%」。必須說明依據（哪些特徵在歷史成功信號中出現率高），不可忽略機率數據。
 
 【★★ 數據驅動分析規則 — 零模糊容忍】
 你的每一句分析結論都必須附帶「具體數值 + 判斷閾值 + 機制解釋」，絕對不可只說結論不給數據。
@@ -215,6 +240,7 @@ type 可選：support_resistance, trend, pattern, indicator, strategy, volume, s
 - [direction:long/short] entry=價格 target=目標 stop=止損 timeframe=48h/7d confidence=high/medium/low regime=趨勢/盤整/高波動 indicators=指標1,指標2 invalidation=推翻本次判斷的具體條件
 ---END_PREDICTIONS---
 每次最多 2 個預測。invalidation 欄位為必填 — 明確寫出「哪些條件發生將推翻本次判斷」。
+注意：PREDICTIONS 區塊會被系統自動擷取，使用者看不到。你「必須」在回覆正文中用自然語言列出策略有效期和失效條件。
 
 【ML 增強信號】
 若 chart_state 中存在 mlPrediction 欄位，代表系統的 ML 模型已產生前兆模式辨識預測：
@@ -391,18 +417,20 @@ _PROMPT_MODULES["risk_checklist"] = """
 # ─── auto_backtest（分析時自動回測）────────────────────────────
 
 _PROMPT_MODULES["auto_backtest"] = """
-【★★ 策略建議前的強制回測驗證】
-當你要給出包含具體進場/止損/目標的交易建議時，你「必須」先做以下驗證：
+【★★ 回測數據驅動分析 — 強制遵守】
+系統已在你收到的背景資料中提供 6 種策略（做多 3 + 做空 3）的歷史回測結果。
+你的分析結論「必須」與回測數據一致，這是最高優先級規則：
 
-1. 呼叫 run_backtest 或 compare_strategies，用你建議的進出場條件跑歷史回測
-2. 回測結果中必須檢查：勝率、盈虧比、最大回撤、交易次數
-3. 如果回測結果不佳（勝率 < 45% 或 Profit Factor < 1.2），必須調整策略或降低信心等級
-4. 報告中必須附上回測關鍵數據（勝率、PF、MDD、交易次數）
-5. 「必須」說明本次回測使用了多少根 K 線（回測樣本量），讓使用者了解數據基礎是否充足
+1. 回測顯示所有做多策略均虧損（PF < 1.0）→ 不可建議做多，結論偏空或觀望
+2. 回測顯示所有做空策略均虧損（PF < 1.0）→ 不可建議做空，結論偏多或觀望
+3. 回測全部虧損 → 結論必須為「觀望」或「僅適合小倉位試單」
+4. 報告中必須引用回測關鍵數據（勝率、PF、Sharpe、MDD、交易次數）
+5. 必須說明回測使用了多少根 K 線（回測樣本量）
 
-唯一例外：使用者只是問一般市場看法而不需要具體交易策略時，不需要回測。
+如果你的技術面分析方向與回測結果矛盾，必須坦誠說明：
+「技術面訊號偏多/偏空，但歷史回測不支持，建議觀望或降低倉位。」
 
-若 chart_state 中有校準數據（calibration），回測時「必須」使用校準後的最佳指標參數，而非教科書預設值。"""
+若 chart_state 中有校準數據（calibration），分析時「必須」使用校準後的最佳指標參數。"""
 
 # ─── alpha_monitor（新增）────────────────────────────
 
@@ -435,9 +463,26 @@ _PROMPT_MODULES["output_lite"] = """
 回覆結構依序為：
 1. 市場狀態判斷（Regime + Structure + 時框對齊 + Regime 相容性）
 2. 多維度分析結果（各維度方向判斷 + 信號一致性）
-3. 最終建議（方向 + 信心 + 進場/止損/目標 + 推翻條件）
+3. 最終建議（方向 + 信心 + 進場/止損/目標 + 推翻條件 + 策略有效期）
 4. 知識碎片（KEY_INSIGHTS + PREDICTIONS，若適用）
-不需輸出因子 IC、Monte Carlo、Alpha Decay 等深度研究內容。"""
+不需輸出因子 IC、Monte Carlo、Alpha Decay 等深度研究內容。
+
+【★ 情境預測 + SMC — 一般分析必須呼叫】
+一般分析時你「必須」呼叫以下兩個函式取得真實數據，不可只用技術指標空談：
+1. generate_scenarios — 取得三情境預測，在分析中引用統計機率和價格目標
+2. detect_smc_structure — 取得 SMC 結構，在分析中引用 BOS/CHoCH/FVG 等證據
+將這兩個函式的結果融入多維度分析，不要作為獨立段落輸出。
+
+💡 如需更深入的回測驗證和量化研究，可輸入「完整分析二」和「完整分析三」。
+
+【★ 策略有效期 — 必須遵守】
+提出具體交易策略（含進場/止損/目標）時，回覆正文必須包含：
+1. **策略有效期間**：從今日起算，根據 timeframe 推算結束日。例如 timeframe=48h → 有效約 2 天；timeframe=7d → 有效約 7 天
+2. **預計有效天數**：例如「本策略預計有效 2 天（48 小時）」
+3. **失效條件**：明確列出哪些指標達到什麼數值時此策略失效（具體數字，與 PREDICTIONS 的 invalidation 一致但用使用者可讀格式）
+格式範例：
+📅 策略有效期：2026-04-05 至 2026-04-07（48 小時）
+⚠️ 失效條件：(1) BTC 跌破 65,000（止損觸發）(2) RSI(4h) 回落至 45 以下 (3) 成交量連續 3 根低於 20 日均量 50%"""
 
 # ─── output_full（新增）──────────────────────────────
 
@@ -451,7 +496,7 @@ _PROMPT_MODULES["output_full"] = """
 【4. 因子驗證】近期有效性、與系統反饋比對
 【5. 因子相關性】共線性、假分散風險
 【6. 多因子評分】多頭分/空頭分/中性分/信號一致性/信心等級
-【7. 預測結果】方向/強度/時間範圍/信心/推翻條件
+【7. 預測結果】方向/強度/時間範圍/信心/推翻條件/策略有效期（起始日至結束日）
 【8. 策略判斷】適合方向/是否建議部署/倉位建議
 【9. 績效風險】(若有) Expectancy/Win Rate/Sharpe/MDD/最大連輸/成本風險
 【10. Monte Carlo】(若有) 最大可能回撤/破產風險/建議倉位區間
@@ -662,6 +707,100 @@ _PROMPT_MODULES["smc"] = """
 
 所有數值必須直接引用計算結果，禁止自行推算任何價格或比率。"""
 
+# ─── 三階段完整分析 ─────────────────────────────────
+
+_PROMPT_MODULES["output_deep_phase1"] = """
+【★★★ 完整分析 — 第一階段：市場環境 + 情境預測 + SMC 結構 ★★★】
+
+你正在執行「完整分析」的第一階段。這是三階段深度分析的起點。
+
+【強制呼叫函式 — 不可省略】
+你「必須」呼叫以下兩個函式，取得真實計算數據：
+1. generate_scenarios — 取得三情境預測（看漲/中性/看跌 + 統計機率）
+2. detect_smc_structure — 取得 SMC 訂單流結構分析
+
+【輸出格式 — 嚴格按順序】
+1. 📊 市場體制判定（Regime + Structure + 多時框對齊 + Regime 相容性）
+2. 📈 七維度技術分析（趨勢/動量/量能/波動率/結構/情緒/風管，各維度給方向判斷）
+3. 🔮 三情境預測（直接引用 generate_scenarios 回傳的機率和價格目標，禁止自行編造）
+4. 🏦 SMC 訂單流結構（引用 detect_smc_structure 的 BOS/CHoCH/FVG/Sweep 數據）
+5. 🎯 第一階段結論：方向判定 + 信心等級 + 關鍵價位（支撐/壓力）
+
+【結尾必須附帶接續提示】
+在回覆最後附上：
+---
+📋 **完整分析進度：[1/3]**
+✅ 第一階段完成：市場環境 + 情境預測 + SMC 結構
+➡️ 輸入「**完整分析二**」→ 多策略回測驗證 + 條件機率掃描
+➡️ 輸入「**完整分析三**」→ 量化研究 + Monte Carlo + 倉位管理
+---"""
+
+_PROMPT_MODULES["output_deep_phase2"] = """
+【★★★ 完整分析 — 第二階段：策略回測 + 條件機率 ★★★】
+
+你正在執行「完整分析」的第二階段。使用者已看過第一階段的市場環境分析。
+
+【強制呼叫函式 — 不可省略】
+你「必須」呼叫以下函式，取得真實計算數據：
+1. compare_strategies — 至少比較 3 種不同類型的策略（趨勢跟蹤/均值回歸/量價突破等）
+2. scan_conditional_probability — 掃描關鍵指標的條件機率（例如 RSI、MACD 在什麼區間後續上漲機率最高）
+
+【輸出格式 — 嚴格按順序】
+1. ⚔️ 多策略回測比較（引用 compare_strategies 的真實績效數據）
+   - 每個策略列出：勝率 / Sharpe / PF / 總報酬 / MDD
+   - 排名並推薦最佳策略
+2. 📊 條件機率分析（引用 scan_conditional_probability 的真實數據）
+   - 最佳指標區間 + 機率提升幅度
+   - 可操作的進場條件建議
+3. ✅ 風險檢查清單
+   - 最大回撤是否可承受
+   - 連輸風險
+   - 成本（手續費+滑點）對績效的影響
+4. 🎯 第二階段結論：最佳策略 + 最佳進場條件 + 風險評級
+
+【結尾必須附帶接續提示】
+---
+📋 **完整分析進度：[2/3]**
+✅ 第一階段：市場環境 + 情境預測 + SMC 結構
+✅ 第二階段完成：多策略回測 + 條件機率
+➡️ 輸入「**完整分析三**」→ 因子驗證 + Monte Carlo 壓力測試 + 倉位管理
+---"""
+
+_PROMPT_MODULES["output_deep_phase3"] = """
+【★★★ 完整分析 — 第三階段：量化研究 + 倉位管理 ★★★】
+
+你正在執行「完整分析」的最後階段。使用者已看過市場環境和策略回測。
+
+【強制呼叫函式 — 不可省略】
+你「必須」呼叫以下函式：
+1. run_quant_research — 完整量化研究（因子 IC + Monte Carlo + Walk Forward + 倉位建議）
+
+【輸出格式 — 嚴格按順序】
+1. 🔬 因子預測力排名（IC 分析 + Alpha Decay 趨勢）
+   - 列出 top 因子的 IC 值、衰退狀態
+   - 正相關 vs 負相關因子分開
+2. 🎲 Monte Carlo 壓力測試
+   - 獲利機率 / 破產風險 / 報酬分佈（p25/p50/p75）
+   - 策略是否穩健
+3. 📐 Walk Forward 驗證
+   - 是否有 Alpha / 一致性評分 / 各視窗表現
+4. 💰 倉位管理建議
+   - Kelly 建議 / ATR 波動率調整 / 最終建議倉位
+5. 🏆 三階段總結
+   - 市場環境（第一階段結論）
+   - 最佳策略（第二階段結論）
+   - 量化驗證結果（本階段結論）
+   - 最終建議：部署 / 觀望 / 暫停 + 理由
+
+【結尾格式】
+---
+📋 **完整分析進度：[3/3] — 全部完成**
+✅ 第一階段：市場環境 + 情境預測 + SMC 結構
+✅ 第二階段：多策略回測 + 條件機率
+✅ 第三階段：量化研究 + Monte Carlo + 倉位管理
+🎯 最終結論：[方向] / 信心 [等級] / 建議倉位 [百分比]
+---"""
+
 _PROMPT_MODULES["teaching"] = """
 【教學模式 — 面向學習者的解說】
 你目前處於教學模式。除了正常分析，你必須額外做到：
@@ -681,7 +820,11 @@ _INTENT_TO_MODULES: dict[str, list[str]] = {
     "general": [],
     "simple_query": [],
     "drawing": ["drawing"],
-    "analysis": ["regime_v2", "analysis_v2", "factor_validation", "output_lite", "drawing", "backtest", "risk_checklist", "auto_backtest"],
+    "analysis": [
+        "regime_v2", "analysis_v2", "factor_validation",
+        "scenario", "smc",  # ★ 日常分析自動含情境預測 + SMC
+        "output_lite", "drawing", "backtest", "risk_checklist", "auto_backtest",
+    ],
     "backtest": ["regime_v2", "backtest", "risk_checklist"],
     "quant_research": [
         "regime_v2", "quant_research", "backtest",
@@ -692,6 +835,23 @@ _INTENT_TO_MODULES: dict[str, list[str]] = {
     "conditional_prob": ["conditional_prob"],
     "scenario": ["scenario", "regime_v2", "analysis_v2"],
     "smc": ["smc", "regime_v2", "drawing"],
+    # ── 三階段完整分析 ──
+    "deep_analysis": [  # 不帶數字 → 等同第一階段
+        "regime_v2", "analysis_v2", "factor_validation",
+        "scenario", "smc", "drawing", "risk_checklist", "output_deep_phase1",
+    ],
+    "deep_phase1": [
+        "regime_v2", "analysis_v2", "factor_validation",
+        "scenario", "smc", "drawing", "risk_checklist", "output_deep_phase1",
+    ],
+    "deep_phase2": [
+        "smc", "backtest", "risk_checklist", "auto_backtest",
+        "event_analysis", "conditional_prob", "drawing", "output_deep_phase2",
+    ],
+    "deep_phase3": [
+        "quant_research", "calibrate", "alpha_monitor",
+        "risk_checklist", "output_full", "output_deep_phase3",
+    ],
 }
 
 
@@ -725,6 +885,7 @@ def assemble_system_prompt(intents: set[str], teaching_mode: bool = False) -> st
         "regime_v2", "analysis_v2", "factor_validation",
         "auto_backtest", "risk_checklist", "alpha_monitor",
         "output_lite", "output_full",
+        "output_deep_phase1", "output_deep_phase2", "output_deep_phase3",
         "drawing", "event_analysis", "conditional_prob", "scenario", "smc",
         "quant_research", "calibrate", "backtest",
     )
@@ -733,6 +894,11 @@ def assemble_system_prompt(intents: set[str], teaching_mode: bool = False) -> st
     for mod_key in _MODULE_ORDER:
         if mod_key in modules_needed:
             parts.append(_PROMPT_MODULES[mod_key])
+
+    from datetime import datetime
+
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    parts.append(f"\n【目前時間】{now_str}（台北時區 UTC+8）")
 
     return "\n".join(parts)
 

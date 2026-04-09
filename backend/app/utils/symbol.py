@@ -29,6 +29,20 @@ COINBASE_USD_MAP = {
 
 SUPPORTED_QUOTE_CURRENCIES = {"USDT", "USD", "BUSD", "USDC", "BTC", "ETH", "TWD"}
 
+# 台股指數代碼映射（內部格式 → yfinance ticker）
+TW_INDEX_MAP: dict[str, str] = {
+    "TWII/TWD": "^TWII",       # 加權指數
+    "TWOII/TWD": "^TWOII",     # 櫃買指數
+}
+
+# 中文別名 → 內部格式
+_TW_INDEX_ALIASES: dict[str, str] = {
+    "加權指數": "TWII/TWD",
+    "櫃買指數": "TWOII/TWD",
+    "大盤": "TWII/TWD",
+    "台股大盤": "TWII/TWD",
+}
+
 
 def normalize_symbol(raw: str) -> str:
     """
@@ -39,8 +53,20 @@ def normalize_symbol(raw: str) -> str:
     BTC/USDT → BTC/USDT
     2330.TW → 2330/TWD
     2330.TWO → 2330/TWD
+    ^TWII → TWII/TWD
+    加權指數 → TWII/TWD
     """
-    raw = raw.strip().upper()
+    raw = raw.strip()
+
+    # 中文別名（大小寫敏感，先處理再轉大寫）
+    if raw in _TW_INDEX_ALIASES:
+        return _TW_INDEX_ALIASES[raw]
+
+    raw = raw.upper()
+
+    # 指數格式：^TWII → TWII/TWD
+    if raw.startswith("^TW"):
+        return f"{raw[1:]}/TWD"
 
     # 台股格式：2330.TW / 2330.TWO → 2330/TWD
     tw_match = re.match(r"^(\d{4,6})\.(TW|TWO)$", raw)
@@ -81,8 +107,12 @@ def symbol_to_yf_ticker(symbol: str) -> str:
 
     2330/TWD → 2330.TW（上市）
     6547/TWD → 6547.TWO（上櫃）
+    TWII/TWD → ^TWII（加權指數）
     """
     symbol = normalize_symbol(symbol)
+    # 指數優先查映射表
+    if symbol in TW_INDEX_MAP:
+        return TW_INDEX_MAP[symbol]
     code = symbol.split("/")[0]
     # 4 碼且以 6 開頭 → 上櫃 (.TWO)，否則 → 上市 (.TW)
     suffix = ".TWO" if len(code) == 4 and code.startswith("6") else ".TW"

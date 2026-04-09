@@ -80,11 +80,25 @@ def calculate_dynamic_positions(
                 positions[i] = np.clip(position, min_position_pct, max_position_pct)
 
     elif method == "kelly_dynamic":
-        # Kelly + ATR 混合
-        b = avg_win_loss_ratio
+        # Kelly（連續收益型）+ ATR 混合
+        # 離散型 Kelly: (b*p - q) / b 假設只有贏/輸兩種結果
+        # 連續型更適合交易：f = E[R] / E[L^2]，近似為 (p*W - q*L) / L
         p = win_rate
         q = 1 - p
-        full_kelly = (b * p - q) / b if b > 0 else 0
+        b = avg_win_loss_ratio
+        if b > 0 and 0 < p < 1:
+            # 連續收益 Kelly: 考慮平均獲利和平均虧損的比例
+            # avg_win = b * avg_loss (by definition of win/loss ratio)
+            # f = (p * avg_win - q * avg_loss) / avg_loss = p*b - q
+            # 但需要除以 b 以得到佔比: f = (p*b - q) / b
+            # 額外安全措施：加入二階修正項，避免高波動時過度下注
+            raw_kelly = (p * b - q) / b
+            # 二階修正：Kelly 乘以 (1 - variance_penalty)
+            # variance_penalty 近似為 kelly^2 * variance_ratio
+            variance_penalty = min(0.3, raw_kelly ** 2)
+            full_kelly = raw_kelly * (1 - variance_penalty)
+        else:
+            full_kelly = 0
         base_kelly = max(0, full_kelly * kelly_fraction)
 
         for i in range(max(atr_period, atr_ma_period), n):

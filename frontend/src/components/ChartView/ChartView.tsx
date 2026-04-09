@@ -133,6 +133,9 @@ function toChartTime(ts: string): number {
 const PRICE_SCALE_MIN_WIDTH = 65;
 
 // ─── Sub-Chart 子圖組件 ──────────────────────────────
+const COLLAPSED_PANE_HEIGHT = 24;
+const MAX_EXPANDED_BY_DEFAULT = 4; // 超過此數量的副圖預設折疊
+
 interface SubChartPaneProps {
   indicator: ActiveIndicator;
   ohlcvData: OHLCVData[];
@@ -142,13 +145,16 @@ interface SubChartPaneProps {
   onChartReady?: (id: string, chart: IChartApi, series: ISeriesApi<any> | null) => void;
   onChartDestroy?: (id: string) => void;
   paneHeight: number;
+  collapsed: boolean;
+  onToggleCollapse?: (indicatorId: string) => void;
   onResizeStart?: (indicatorId: string, startY: number) => void;
   onRemove?: (indicatorId: string) => void;
 }
 
 const SubChartPane = memo(function SubChartPane({
   indicator, ohlcvData, syncRangeRef, onTimeRangeChange, isLastSubChart,
-  onChartReady, onChartDestroy, paneHeight, onResizeStart, onRemove,
+  onChartReady, onChartDestroy, paneHeight, collapsed, onToggleCollapse,
+  onResizeStart, onRemove,
 }: SubChartPaneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -352,39 +358,56 @@ const SubChartPane = memo(function SubChartPane({
   return (
     <div
       style={{
-        height: `${paneHeight}px`,
-        minHeight: '60px',
+        height: collapsed ? `${COLLAPSED_PANE_HEIGHT}px` : `${paneHeight}px`,
+        minHeight: collapsed ? `${COLLAPSED_PANE_HEIGHT}px` : '60px',
         borderTop: '1px solid #30363d',
         position: 'relative',
         background: '#0d1117',
+        overflow: 'hidden',
+        transition: 'height 0.15s ease',
       }}
     >
-      {/* 頂部拖曳把手（調整高度） */}
-      <div
-        style={{
-          position: 'absolute',
-          top: 0, left: 0, right: 0,
-          height: '5px',
-          cursor: 'row-resize',
-          zIndex: 15,
-        }}
-        onMouseDown={(e) => {
-          e.preventDefault();
-          onResizeStart?.(indicator.id, e.clientY);
-        }}
-      >
-        <div style={{
-          position: 'absolute', top: '1px', left: '50%', transform: 'translateX(-50%)',
-          width: '30px', height: '3px', borderRadius: '2px',
-          background: '#30363d', opacity: 0.6,
-        }} />
-      </div>
+      {/* 頂部拖曳把手（調整高度）— 折疊時隱藏 */}
+      {!collapsed && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 0, left: 0, right: 0,
+            height: '5px',
+            cursor: 'row-resize',
+            zIndex: 15,
+          }}
+          onMouseDown={(e) => {
+            e.preventDefault();
+            onResizeStart?.(indicator.id, e.clientY);
+          }}
+        >
+          <div style={{
+            position: 'absolute', top: '1px', left: '50%', transform: 'translateX(-50%)',
+            width: '30px', height: '3px', borderRadius: '2px',
+            background: '#30363d', opacity: 0.6,
+          }} />
+        </div>
+      )}
 
-      {/* 指標名稱 + 十字線數值 + 關閉按鈕 */}
+      {/* 指標名稱列（可點擊折疊/展開） */}
       <div
-        className="absolute top-1 left-2 z-10 text-xs font-medium"
-        style={{ color: '#8b949e', display: 'flex', alignItems: 'center', flexWrap: 'wrap' }}
+        className="absolute top-0 left-0 right-0 z-10 text-xs font-medium"
+        style={{
+          color: '#8b949e',
+          display: 'flex',
+          alignItems: 'center',
+          height: `${COLLAPSED_PANE_HEIGHT}px`,
+          paddingLeft: '8px',
+          paddingRight: '8px',
+          cursor: 'pointer',
+          background: collapsed ? '#161b22' : 'transparent',
+        }}
+        onClick={() => onToggleCollapse?.(indicator.id)}
       >
+        <span style={{ color: '#6e7681', marginRight: '4px', fontSize: '10px' }}>
+          {collapsed ? '▶' : '▼'}
+        </span>
         <span>{indicator.indicator_type}</span>
         {Object.keys(indicator.parameters).length > 0 && (
           <span style={{ color: '#58a6ff', marginLeft: '4px' }}>
@@ -396,32 +419,42 @@ const SubChartPane = memo(function SubChartPane({
             OB:{overbought} OS:{oversold}
           </span>
         )}
-        <span
-          ref={legendRef}
-          style={{ marginLeft: '4px', fontFamily: 'monospace', whiteSpace: 'nowrap' }}
-        />
+        {!collapsed && (
+          <span
+            ref={legendRef}
+            style={{ marginLeft: '4px', fontFamily: 'monospace', whiteSpace: 'nowrap' }}
+          />
+        )}
+
+        {/* ✕ 關閉按鈕 — 放在標題列右側 */}
+        <button
+          onClick={(e) => { e.stopPropagation(); onRemove?.(indicator.id); }}
+          className="ml-auto cursor-pointer hover:opacity-80"
+          style={{
+            background: 'rgba(248,81,73,0.12)',
+            border: 'none',
+            borderRadius: '3px',
+            color: '#f85149',
+            fontSize: '11px',
+            padding: '1px 5px',
+            lineHeight: '16px',
+            flexShrink: 0,
+          }}
+          title={`關閉 ${indicator.indicator_type}`}
+        >
+          ✕
+        </button>
       </div>
 
-      {/* ✕ 關閉按鈕 */}
-      <button
-        onClick={() => onRemove?.(indicator.id)}
-        className="absolute top-1 right-2 z-10 cursor-pointer hover:opacity-80"
+      {/* 圖表容器 — 折疊時隱藏 */}
+      <div
+        ref={containerRef}
+        className="w-full"
         style={{
-          background: 'rgba(248,81,73,0.12)',
-          border: 'none',
-          borderRadius: '3px',
-          color: '#f85149',
-          fontSize: '11px',
-          padding: '1px 5px',
-          lineHeight: '16px',
+          height: collapsed ? 0 : '100%',
+          visibility: collapsed ? 'hidden' : 'visible',
         }}
-        title={`關閉 ${indicator.indicator_type}`}
-      >
-        ✕
-      </button>
-
-      {/* 圖表容器 */}
-      <div ref={containerRef} className="w-full h-full" />
+      />
     </div>
   );
 });
@@ -472,6 +505,19 @@ export default function ChartView() {
   const [paneHeights, setPaneHeights] = useState<Record<string, number>>({});
   const resizeRef = useRef<{ indicatorId: string; startY: number; startH: number } | null>(null);
 
+  // 副圖折疊狀態管理（在 subChartIndicators 宣告後初始化）
+  const [collapsedPanes, setCollapsedPanes] = useState<Set<string>>(new Set());
+  const prevSubCountRef = useRef(0);
+
+  const handleToggleCollapse = useCallback((indicatorId: string) => {
+    setCollapsedPanes((prev) => {
+      const next = new Set(prev);
+      if (next.has(indicatorId)) next.delete(indicatorId);
+      else next.add(indicatorId);
+      return next;
+    });
+  }, []);
+
   const getPaneHeight = useCallback((id: string, isLast: boolean) => {
     return paneHeights[id] ?? (isLast ? 160 : 120);
   }, [paneHeights]);
@@ -519,6 +565,28 @@ export default function ChartView() {
     () => activeIndicators.filter((i) => i.visible && i.display_mode === 'sub_chart' && i.data),
     [activeIndicators],
   );
+
+  // 超過 MAX_EXPANDED_BY_DEFAULT 個副圖時，新增的副圖預設折疊
+  useEffect(() => {
+    const currentIds = subChartIndicators.map((ind) => ind.id);
+    const prevCount = prevSubCountRef.current;
+    if (currentIds.length > prevCount && currentIds.length > MAX_EXPANDED_BY_DEFAULT) {
+      setCollapsedPanes((prev) => {
+        const next = new Set(prev);
+        currentIds.slice(MAX_EXPANDED_BY_DEFAULT).forEach((id) => {
+          if (!prev.has(id)) next.add(id);
+        });
+        return next;
+      });
+    }
+    // 清除已移除指標的折疊狀態
+    setCollapsedPanes((prev) => {
+      const idSet = new Set(currentIds);
+      const next = new Set([...prev].filter((id) => idSet.has(id)));
+      return next.size !== prev.size ? next : prev;
+    });
+    prevSubCountRef.current = currentIds.length;
+  }, [subChartIndicators]);
 
   // 統一刷新 markers（合併 overlay + annotation 兩個來源）
   const flushMarkers = useCallback(() => {
@@ -702,7 +770,12 @@ export default function ChartView() {
 
   // 更新 K 線 + 成交量數據
   useEffect(() => {
-    if (!candleSeriesRef.current || !volumeSeriesRef.current || ohlcvData.length === 0) return;
+    if (!candleSeriesRef.current || !volumeSeriesRef.current) return;
+    if (ohlcvData.length === 0) {
+      candleSeriesRef.current.setData([]);
+      volumeSeriesRef.current.setData([]);
+      return;
+    }
 
     // 依據最新收盤價動態設定價格精度
     const latestClose = ohlcvData[ohlcvData.length - 1].close;
@@ -1043,8 +1116,8 @@ export default function ChartView() {
 
   return (
     <div className="flex flex-col flex-1" style={{ minHeight: 0 }}>
-      {/* ── 主圖區域 ── */}
-      <div className="flex-1 relative" style={{ minHeight: '200px' }}>
+      {/* ── 主圖區域（最低佔比保護：至少 40%） ── */}
+      <div className="flex-1 relative" style={{ minHeight: subChartIndicators.length > 2 ? '40%' : '200px' }}>
         {/* 圖表資訊覆蓋層 */}
         <div
           className="absolute top-3 left-3 z-10 text-sm"
@@ -1214,25 +1287,32 @@ export default function ChartView() {
         <div ref={mainContainerRef} className="w-full h-full" />
       </div>
 
-      {/* ── Sub-Chart 副圖區域 ── */}
-      {subChartIndicators.map((indicator, idx) => {
-        const isLast = idx === subChartIndicators.length - 1;
-        return (
-          <SubChartPane
-            key={indicator.id}
-            indicator={indicator}
-            ohlcvData={ohlcvData}
-            syncRangeRef={syncRangeRef}
-            onTimeRangeChange={handleSubChartTimeChange}
-            isLastSubChart={isLast}
-            onChartReady={handleSubChartReady}
-            onChartDestroy={handleSubChartDestroy}
-            paneHeight={getPaneHeight(indicator.id, isLast)}
-            onResizeStart={handleResizeStart}
-            onRemove={handleRemoveIndicator}
-          />
-        );
-      })}
+      {/* ── Sub-Chart 副圖區域（支援折疊，最多佔 60% 高度） ── */}
+      {subChartIndicators.length > 0 && (
+        <div style={{ maxHeight: '60%', overflowY: 'auto', flexShrink: 0 }}>
+          {subChartIndicators.map((indicator, idx) => {
+            const isLast = idx === subChartIndicators.length - 1;
+            const isCollapsed = collapsedPanes.has(indicator.id);
+            return (
+              <SubChartPane
+                key={indicator.id}
+                indicator={indicator}
+                ohlcvData={ohlcvData}
+                syncRangeRef={syncRangeRef}
+                onTimeRangeChange={handleSubChartTimeChange}
+                isLastSubChart={isLast && !isCollapsed}
+                onChartReady={handleSubChartReady}
+                onChartDestroy={handleSubChartDestroy}
+                paneHeight={getPaneHeight(indicator.id, isLast)}
+                collapsed={isCollapsed}
+                onToggleCollapse={handleToggleCollapse}
+                onResizeStart={handleResizeStart}
+                onRemove={handleRemoveIndicator}
+              />
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

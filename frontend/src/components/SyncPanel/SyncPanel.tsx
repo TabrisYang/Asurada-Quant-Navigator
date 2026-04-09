@@ -17,6 +17,8 @@ import {
   triggerDataSync,
   fetchSyncTaskProgress,
   fetchAvailableExchanges,
+  getTwStockNameSync,
+  fetchTwStockName,
   type SyncRequestParams,
 } from '../../services/api';
 
@@ -30,17 +32,17 @@ const DEFAULT_CRYPTO_SYMBOLS = [
 ];
 
 const DEFAULT_TW_SYMBOLS = [
+  'TWII/TWD',  // 加權指數
   '2330/TWD', '2317/TWD', '2454/TWD', '2412/TWD', '3008/TWD',
   '2881/TWD', '2882/TWD', '1301/TWD', '2308/TWD', '2303/TWD',
 ];
 
-// 台股代碼對照名稱
-const TW_STOCK_NAMES: Record<string, string> = {
-  '2330/TWD': '台積電', '2317/TWD': '鴻海', '2454/TWD': '聯發科',
-  '2412/TWD': '中華電', '3008/TWD': '大立光', '2881/TWD': '富邦金',
-  '2882/TWD': '國泰金', '1301/TWD': '台塑', '2308/TWD': '台達電',
-  '2303/TWD': '聯電',
-};
+/** 取得台股顯示名稱（從共用快取） */
+function getTwDisplayLabel(sym: string): string {
+  const code = sym.split('/')[0];
+  const name = getTwStockNameSync(code);
+  return name ? ` ${name}` : '';
+}
 
 // 時間週期
 const ALL_TIMEFRAMES = [
@@ -139,6 +141,20 @@ export default function SyncPanel() {
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [progress?.logs.length]);
+
+  // 解析台股中文名稱（從 API 取得未知名稱）
+  const [, setNameTick] = useState(0);
+  useEffect(() => {
+    if (assetType !== 'tw_stock') return;
+    const unknown = selectedSymbols.filter((s) => {
+      const code = s.split('/')[0];
+      return !getTwStockNameSync(code);
+    });
+    if (unknown.length === 0) return;
+    Promise.all(
+      unknown.map((s) => fetchTwStockName(s.split('/')[0])),
+    ).then(() => setNameTick((n) => n + 1));
+  }, [assetType, selectedSymbols]);
 
   // ===== 輪詢進度 =====
   const startPolling = useCallback(
@@ -370,7 +386,7 @@ export default function SyncPanel() {
                     opacity: syncing ? 0.5 : 1,
                   }}
                 >
-                  {sym}{TW_STOCK_NAMES[sym] ? ` ${TW_STOCK_NAMES[sym]}` : ''}
+                  {sym}{getTwDisplayLabel(sym)}
                 </button>
               ))}
               {/* 已選但不在預設列表的 */}

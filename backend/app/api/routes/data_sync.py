@@ -15,7 +15,7 @@ from app.core.config.settings import settings
 from app.data.fetchers.crypto_engine import crypto_engine
 from app.data.fetchers.tw_stock_engine import tw_stock_engine
 from app.models.schemas import DataSyncRequest, SyncTaskProgress
-from app.utils.symbol import is_tw_stock
+from app.utils.symbol import is_tw_stock, symbol_to_yf_ticker
 from app.utils.timezone import taipei_now, parse_date_string
 
 router = APIRouter()
@@ -118,7 +118,8 @@ async def _run_sync(request: DataSyncRequest, task_id: str):
             from app.core.ml.model_manager import model_manager
             for symbol in request.symbols:
                 for tf in request.timeframes:
-                    df = crypto_engine.load_local_data(symbol, tf.value)
+                    _engine = tw_stock_engine if is_tw_stock(symbol) else crypto_engine
+                    df = _engine.load_local_data(symbol, tf.value)
                     if df is not None and len(df) > 0:
                         # 驗證過期的 ML 預測
                         validated_count += model_manager.validate_ml_predictions(
@@ -272,3 +273,32 @@ async def get_available_symbols():
         "tw_symbols": settings.default_tw_symbols,
         "custom_allowed": True,
     }
+
+
+# 台股名稱快取（程序重啟清除）
+_tw_name_cache: dict[str, str] = {
+    "TWII": "加權指數",
+    "TWOII": "櫃買指數",
+}
+
+
+@router.get("/tw-stock-name")
+async def get_tw_stock_name(code: str):
+    """用 yfinance 查詢台股中文名稱"""
+    code = code.strip().upper()
+    if code in _tw_name_cache:
+        return {"code": code, "name": _tw_name_cache[code]}
+
+    try:
+        import yfinance as yf
+        ticker = symbol_to_yf_ticker(f"{code}/TWD")
+        info = yf.Ticker(ticker).info
+        name = info.get("shortName") or info.get("longName") or ""
+        # yfinance 的 shortName 可能是英文，嘗試取中文
+        if not name or name.isascii():
+            name = info.get("longName") or info.get("shortName") or ""
+        _tw_name_cache[code] = name
+        return {"code": code, "name": name}
+    except Exception as e:
+        logger.warning(f"查詢台股名稱失敗 {code}: {e}")
+        return {"code": code, "name": ""}

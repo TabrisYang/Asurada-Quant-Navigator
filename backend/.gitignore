@@ -7,6 +7,9 @@ build/
 .eggs/
 *.egg
 
+# Port 檔（run.py 自動產生）
+.port
+
 # 環境
 .env
 .venv/

@@ -121,6 +121,12 @@ export interface ChatMessage {
   isStreaming?: boolean;    // 正在串流中
   isThinking?: boolean;     // LLM 正在思考
   statusText?: string;      // 進度狀態文字（取代固定的「思考中」）
+  progress?: {              // 分析進度
+    percentage: number;
+    completed: number;
+    total: number;
+    current_task: string;
+  };
 }
 
 export interface FunctionCall {

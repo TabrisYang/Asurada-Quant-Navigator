@@ -42,7 +42,7 @@ interface SettingsPanelProps {
 export default function SettingsPanel({ onClose }: SettingsPanelProps) {
   const llmConfig = useChartStore((s) => s.llmConfig);
   const setLLMConfig = useChartStore((s) => s.setLLMConfig);
-  const [activeTab, setActiveTab] = useState<'llm' | 'export' | 'strategies' | 'ml' | 'predictions'>('llm');
+  const [activeTab, setActiveTab] = useState<'llm' | 'export' | 'strategies' | 'ml' | 'predictions' | 'scan'>('llm');
   const [apiKey, setApiKey] = useState('');
   const [baseUrl, setBaseUrl] = useState(llmConfig.baseUrl || 'http://localhost:11434');
 
@@ -295,12 +295,24 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
           >
             匯出/匯入
           </button>
+          <button
+            onClick={() => setActiveTab('scan')}
+            className="px-3 py-1.5 rounded-t text-sm cursor-pointer"
+            style={{
+              color: activeTab === 'scan' ? 'var(--accent-blue)' : 'var(--text-secondary)',
+              borderBottom: activeTab === 'scan' ? '2px solid var(--accent-blue)' : '2px solid transparent',
+              background: 'transparent',
+            }}
+          >
+            掃描設定
+          </button>
         </div>
 
         {activeTab === 'strategies' && <StrategySection />}
         {activeTab === 'export' && <ExportImportSection onClose={onClose} />}
         {activeTab === 'ml' && <MLPanel />}
         {activeTab === 'predictions' && <PredictionDashboard />}
+        {activeTab === 'scan' && <ScanSettingsSection />}
 
         {activeTab === 'llm' && <>
         {/* ===== 1. LLM 供應商選擇 ===== */}
@@ -1130,6 +1142,679 @@ function StepLabel({ step, text }: { step: number; text: string }) {
 
 
 // MLSettingsSection moved to ./MLPanel.tsx
+
+
+// ─── 掃描設定組件 ─────────────────────────────────
+
+const AVAILABLE_SYMBOLS = [
+  'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'DOGE/USDT',
+  'ADA/USDT', 'AVAX/USDT', 'LINK/USDT', 'DOT/USDT', 'MATIC/USDT',
+  'BNB/USDT', 'TRX/USDT', 'TON/USDT', 'SHIB/USDT', 'LTC/USDT',
+  'BCH/USDT', 'UNI/USDT', 'NEAR/USDT', 'APT/USDT', 'FIL/USDT',
+];
+
+const TIMEFRAME_OPTIONS = [
+  { value: '15m', label: '15 分鐘' },
+  { value: '1h', label: '1 小時' },
+  { value: '4h', label: '4 小時' },
+  { value: '1d', label: '1 天' },
+  { value: '1w', label: '1 週' },
+];
+
+const INTERVAL_OPTIONS = [1, 2, 4, 6, 8, 12, 24];
+
+function ScanSettingsSection() {
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState('');
+
+  const [enabled, setEnabled] = useState(true);
+  const [symbols, setSymbols] = useState<string[]>([]);
+  const [timeframe, setTimeframe] = useState('4h');
+  const [interval, setInterval] = useState(4);
+  const [threshold, setThreshold] = useState(3.0);
+  const [customSymbol, setCustomSymbol] = useState('');
+
+  useEffect(() => {
+    fetchSystemSettings().then((s) => {
+      setEnabled(s.scan_enabled !== false);
+      if (Array.isArray(s.scan_symbols)) setSymbols(s.scan_symbols as string[]);
+      if (s.scan_timeframe) setTimeframe(s.scan_timeframe as string);
+      if (s.scan_interval_hours) setInterval(s.scan_interval_hours as number);
+      if (s.move_threshold_pct) setThreshold(s.move_threshold_pct as number);
+      setLoading(false);
+    }).catch(() => setLoading(false));
+  }, []);
+
+  const handleSave = async () => {
+    setSaving(true);
+    setMsg('');
+    try {
+      // 先檢查自訂幣種是否有數據
+      const customSyms = symbols.filter((s) => !AVAILABLE_SYMBOLS.includes(s));
+      if (customSyms.length > 0) {
+        const { checkSymbolsData } = await import('../../services/api');
+        const dataCheck = await checkSymbolsData(customSyms, timeframe);
+        const noData = customSyms.filter((s) => !dataCheck[s]);
+        if (noData.length > 0) {
+          setMsg(`以下幣種無本地數據，請先同步：${noData.join(', ')}`);
+          setSaving(false);
+          return;
+        }
+      }
+      await updateSystemSettings({
+        scan_enabled: enabled,
+        scan_symbols: symbols,
+        scan_timeframe: timeframe,
+        scan_interval_hours: interval,
+        move_threshold_pct: threshold,
+      });
+      setMsg('設定已儲存，即時生效');
+    } catch {
+      setMsg('儲存失敗');
+    }
+    setSaving(false);
+  };
+
+  const toggleSymbol = (sym: string) => {
+    setSymbols((prev) =>
+      prev.includes(sym) ? prev.filter((s) => s !== sym) : [...prev, sym]
+    );
+  };
+
+  const addCustomSymbol = () => {
+    const sym = customSymbol.trim().toUpperCase();
+    if (sym && !symbols.includes(sym)) {
+      setSymbols((prev) => [...prev, sym]);
+      setCustomSymbol('');
+    }
+  };
+
+  if (loading) return <div style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>載入中...</div>;
+
+  const inputStyle = {
+    background: 'var(--bg-tertiary)',
+    color: 'var(--text-primary)',
+    border: '1px solid var(--border-color)',
+    borderRadius: '6px',
+    padding: '6px 10px',
+    fontSize: '13px',
+    outline: 'none',
+  };
+
+  return (
+    <div style={{ fontSize: '13px' }}>
+      <h3 style={{ color: 'var(--text-primary)', fontWeight: 600, marginBottom: '16px' }}>
+        自動掃描預警設定
+      </h3>
+
+      {/* 啟用開關 */}
+      <div className="flex items-center gap-3 mb-4">
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={enabled}
+            onChange={(e) => setEnabled(e.target.checked)}
+            style={{ accentColor: 'var(--accent-blue)' }}
+          />
+          <span style={{ color: 'var(--text-primary)' }}>啟用自動掃描</span>
+        </label>
+        {!enabled && (
+          <span style={{ color: 'var(--text-secondary)', fontSize: '11px' }}>
+            停用後系統不會自動掃描，但仍可手動觸發
+          </span>
+        )}
+      </div>
+
+      {/* 掃描間隔 + 時間框架 + 波動門檻 */}
+      <div className="flex gap-4 mb-4" style={{ flexWrap: 'wrap' }}>
+        <div>
+          <label style={{ color: 'var(--text-secondary)', fontSize: '11px', display: 'block', marginBottom: '4px' }}>
+            掃描間隔
+          </label>
+          <select
+            value={interval}
+            onChange={(e) => setInterval(Number(e.target.value))}
+            style={{ ...inputStyle, cursor: 'pointer' }}
+          >
+            {INTERVAL_OPTIONS.map((h) => (
+              <option key={h} value={h}>{h} 小時</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label style={{ color: 'var(--text-secondary)', fontSize: '11px', display: 'block', marginBottom: '4px' }}>
+            K 線週期
+          </label>
+          <select
+            value={timeframe}
+            onChange={(e) => setTimeframe(e.target.value)}
+            style={{ ...inputStyle, cursor: 'pointer' }}
+          >
+            {TIMEFRAME_OPTIONS.map((tf) => (
+              <option key={tf.value} value={tf.value}>{tf.label}</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label style={{ color: 'var(--text-secondary)', fontSize: '11px', display: 'block', marginBottom: '4px' }}>
+            波動門檻 (%)
+          </label>
+          <input
+            type="number"
+            min={1}
+            max={20}
+            step={0.5}
+            value={threshold}
+            onChange={(e) => setThreshold(Number(e.target.value))}
+            style={{ ...inputStyle, width: '80px' }}
+          />
+        </div>
+      </div>
+
+      {/* 掃描幣種 */}
+      <div className="mb-4">
+        <label style={{ color: 'var(--text-secondary)', fontSize: '11px', display: 'block', marginBottom: '6px' }}>
+          掃描幣種（已選 {symbols.length} 個）
+        </label>
+        <div className="flex flex-wrap gap-1.5 mb-2">
+          {AVAILABLE_SYMBOLS.map((sym) => {
+            const active = symbols.includes(sym);
+            return (
+              <button
+                key={sym}
+                onClick={() => toggleSymbol(sym)}
+                className="cursor-pointer"
+                style={{
+                  padding: '2px 8px',
+                  borderRadius: '4px',
+                  fontSize: '11px',
+                  fontWeight: active ? 600 : 400,
+                  background: active ? 'rgba(88,166,255,0.15)' : 'var(--bg-tertiary)',
+                  color: active ? '#58a6ff' : 'var(--text-secondary)',
+                  border: active ? '1px solid rgba(88,166,255,0.3)' : '1px solid var(--border-color)',
+                }}
+              >
+                {sym.replace('/USDT', '')}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* 自訂幣種中不在預設列表的 */}
+        {symbols.filter((s) => !AVAILABLE_SYMBOLS.includes(s)).length > 0 && (
+          <div className="flex flex-wrap gap-1.5 mb-2">
+            {symbols.filter((s) => !AVAILABLE_SYMBOLS.includes(s)).map((sym) => (
+              <button
+                key={sym}
+                onClick={() => toggleSymbol(sym)}
+                className="cursor-pointer"
+                style={{
+                  padding: '2px 8px',
+                  borderRadius: '4px',
+                  fontSize: '11px',
+                  fontWeight: 600,
+                  background: 'rgba(246,106,10,0.15)',
+                  color: '#f66a0a',
+                  border: '1px solid rgba(246,106,10,0.3)',
+                }}
+              >
+                {sym} ×
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* 自訂新增 */}
+        <div className="flex gap-2 items-center">
+          <input
+            type="text"
+            placeholder="自訂幣種（如 PEPE/USDT）"
+            value={customSymbol}
+            onChange={(e) => setCustomSymbol(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') addCustomSymbol(); }}
+            style={{ ...inputStyle, width: '200px' }}
+          />
+          <button
+            onClick={addCustomSymbol}
+            className="cursor-pointer"
+            style={{
+              padding: '5px 12px',
+              borderRadius: '6px',
+              fontSize: '12px',
+              background: 'var(--bg-tertiary)',
+              color: 'var(--text-secondary)',
+              border: '1px solid var(--border-color)',
+            }}
+          >
+            新增
+          </button>
+        </div>
+      </div>
+
+      {/* 儲存 */}
+      <div className="flex items-center gap-3">
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          className="cursor-pointer"
+          style={{
+            padding: '6px 20px',
+            borderRadius: '6px',
+            fontSize: '13px',
+            fontWeight: 600,
+            background: saving ? 'var(--bg-tertiary)' : 'var(--accent-blue)',
+            color: '#fff',
+            border: 'none',
+          }}
+        >
+          {saving ? '儲存中...' : '儲存設定'}
+        </button>
+        {msg && (
+          <span style={{
+            color: msg.includes('失敗') ? '#f85149' : '#3fb950',
+            fontSize: '12px',
+          }}>
+            {msg}
+          </span>
+        )}
+      </div>
+
+      {/* CPU 負載警告 */}
+      {interval <= 2 && symbols.length > 15 && (
+        <div style={{
+          background: 'rgba(248,81,73,0.08)',
+          border: '1px solid rgba(248,81,73,0.2)',
+          borderRadius: '6px',
+          padding: '8px 12px',
+          marginTop: '12px',
+          fontSize: '11px',
+          color: '#f85149',
+        }}>
+          間隔 {interval} 小時 + {symbols.length} 個幣種可能造成較高 CPU 負載。建議將間隔調整為 4 小時或減少幣種數量。
+        </div>
+      )}
+      <p style={{ color: 'var(--text-secondary)', fontSize: '11px', marginTop: '12px' }}>
+        儲存後即時生效。建議掃描間隔不低於 K 線週期（如 4h K 線搭配 4 小時間隔）。
+      </p>
+
+      {/* 特徵分析 */}
+      <FeatureProfilesStatus />
+
+      {/* 校準狀態 */}
+      <CalibrationStatus />
+    </div>
+  );
+}
+
+
+/** 全量歷史特徵分析狀態 */
+function FeatureProfilesStatus() {
+  const [profiles, setProfiles] = useState<Record<string, any> | null>(null);
+  const [computing, setComputing] = useState(false);
+  const [msg, setMsg] = useState('');
+
+  const loadProfiles = useCallback(async () => {
+    try {
+      const { fetchFeatureProfiles } = await import('../../services/api');
+      const data = await fetchFeatureProfiles();
+      if (data && Object.keys(data).length > 0) setProfiles(data);
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => { loadProfiles(); }, [loadProfiles]);
+
+  const handleRecompute = async () => {
+    setComputing(true);
+    setMsg('');
+    try {
+      const { recomputeFeatureProfiles } = await import('../../services/api');
+      const result = await recomputeFeatureProfiles();
+      setMsg(`完成：${result.total_samples} 窗口, ${result.features_with_weight} 有效特徵`);
+      await loadProfiles();
+    } catch {
+      setMsg('計算失敗');
+    }
+    setComputing(false);
+  };
+
+  const meta = profiles?._meta;
+
+  // 排序：按 weight 降序
+  const featureList = profiles
+    ? Object.entries(profiles)
+        .filter(([k]) => !k.startsWith('_'))
+        .sort(([, a]: [string, any], [, b]: [string, any]) => (b.weight || 0) - (a.weight || 0))
+    : [];
+
+  return (
+    <div style={{
+      marginTop: '20px',
+      borderTop: '1px solid var(--border-color)',
+      paddingTop: '16px',
+    }}>
+      <div className="flex items-center justify-between mb-3">
+        <h4 style={{ color: 'var(--text-primary)', fontWeight: 600, fontSize: '13px', margin: 0 }}>
+          全量歷史特徵分析
+        </h4>
+        <div className="flex items-center gap-2">
+          {msg && (
+            <span style={{
+              fontSize: '10px',
+              color: msg.includes('失敗') ? '#f85149' : '#3fb950',
+            }}>{msg}</span>
+          )}
+          <button
+            onClick={handleRecompute}
+            disabled={computing}
+            className="cursor-pointer"
+            style={{
+              padding: '2px 10px',
+              borderRadius: '4px',
+              fontSize: '11px',
+              background: computing ? 'var(--bg-tertiary)' : 'rgba(88,166,255,0.12)',
+              color: computing ? 'var(--text-secondary)' : '#58a6ff',
+              border: 'none',
+            }}
+          >
+            {computing ? '分析中...' : '重新分析'}
+          </button>
+        </div>
+      </div>
+
+      {!meta ? (
+        <div style={{
+          background: 'rgba(88,166,255,0.06)',
+          border: '1px solid rgba(88,166,255,0.15)',
+          borderRadius: '6px',
+          padding: '10px 12px',
+          fontSize: '11px',
+          color: 'var(--text-secondary)',
+        }}>
+          尚未執行全量歷史特徵分析。系統啟動時會自動分析，或按「重新分析」手動觸發。
+        </div>
+      ) : (
+        <>
+          <div className="flex gap-4 mb-3" style={{ flexWrap: 'wrap', fontSize: '11px' }}>
+            <div>
+              <span style={{ color: 'var(--text-secondary)' }}>歷史窗口：</span>
+              <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>
+                {meta.total_samples?.toLocaleString()}
+              </span>
+            </div>
+            <div>
+              <span style={{ color: 'var(--text-secondary)' }}>幣種：</span>
+              <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{meta.symbols_used}</span>
+            </div>
+            <div>
+              <span style={{ color: 'var(--text-secondary)' }}>基線命中率：</span>
+              <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{meta.baseline_prob}%</span>
+            </div>
+            <div>
+              <span style={{ color: 'var(--text-secondary)' }}>建議門檻：</span>
+              <span style={{ color: '#58a6ff', fontWeight: 600 }}>{meta.score_threshold}</span>
+            </div>
+          </div>
+
+          {/* 特徵表格 */}
+          <div style={{ maxHeight: '200px', overflowY: 'auto', fontSize: '10px' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ color: 'var(--text-secondary)', textAlign: 'left' }}>
+                  <th style={{ padding: '2px 4px' }}>特徵</th>
+                  <th style={{ padding: '2px 4px', textAlign: 'right' }}>IC</th>
+                  <th style={{ padding: '2px 4px', textAlign: 'right' }}>一致性</th>
+                  <th style={{ padding: '2px 4px', textAlign: 'right' }}>Lift</th>
+                  <th style={{ padding: '2px 4px', textAlign: 'right' }}>權重</th>
+                </tr>
+              </thead>
+              <tbody>
+                {featureList.map(([name, p]: [string, any]) => {
+                  const absIc = Math.abs(p.ic || 0);
+                  const icColor = absIc >= 0.1 ? '#3fb950' : absIc >= 0.05 ? '#d29922' : 'var(--text-secondary)';
+                  return (
+                    <tr key={name} style={{ borderTop: '1px solid var(--border-color)' }}>
+                      <td style={{ padding: '3px 4px', color: 'var(--text-primary)' }}>
+                        {name.replace(/_/g, ' ')}
+                      </td>
+                      <td style={{ padding: '3px 4px', textAlign: 'right', color: icColor, fontWeight: 600 }}>
+                        {p.ic?.toFixed(3)}
+                      </td>
+                      <td style={{ padding: '3px 4px', textAlign: 'right', color: 'var(--text-secondary)' }}>
+                        {((p.ic_consistency || 0) * 100).toFixed(0)}%
+                      </td>
+                      <td style={{ padding: '3px 4px', textAlign: 'right', color: (p.lift || 0) > 1.2 ? '#d29922' : 'var(--text-secondary)' }}>
+                        {p.lift?.toFixed(2)}x
+                      </td>
+                      <td style={{
+                        padding: '3px 4px', textAlign: 'right', fontWeight: 600,
+                        color: (p.weight || 0) >= 1.0 ? '#3fb950' : (p.weight || 0) >= 0.3 ? '#d29922' : 'var(--text-secondary)',
+                      }}>
+                        {p.weight?.toFixed(2)}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+
+/** 掃描器自適應校準狀態顯示 */
+function CalibrationStatus() {
+  const [cal, setCal] = useState<Record<string, any> | null>(null);
+  const [loadError, setLoadError] = useState(false);
+  const [resetting, setResetting] = useState(false);
+
+  const loadCal = useCallback(async () => {
+    try {
+      const { fetchScannerCalibration } = await import('../../services/api');
+      const data = await fetchScannerCalibration();
+      setCal(data);
+    } catch {
+      setLoadError(true);
+    }
+  }, []);
+
+  useEffect(() => { loadCal(); }, [loadCal]);
+
+  if (loadError) return null;
+  if (!cal) return (
+    <div style={{ color: 'var(--text-secondary)', fontSize: '11px', marginTop: '16px' }}>
+      載入校準狀態...
+    </div>
+  );
+
+  const handleReset = async () => {
+    setResetting(true);
+    try {
+      const { resetScannerCalibration } = await import('../../services/api');
+      await resetScannerCalibration();
+      await loadCal();
+    } catch { /* ignore */ }
+    setResetting(false);
+  };
+
+  const totalSamples = cal.total_samples || 0;
+  const isActive = cal.calibration_active;
+  const overallHitRate = cal.overall_hit_rate;
+  const lastUpdated = cal.last_updated;
+  const featureWeights = cal.feature_weights || {};
+  const scoreThreshold = cal.score_threshold || {};
+  const confBoundaries = cal.confidence_boundaries || {};
+  const simThreshold = cal.similarity_threshold || {};
+
+  // 找出有調整的特徵
+  const adjustedFeatures = Object.entries(featureWeights)
+    .filter(([, v]: [string, any]) => v.samples > 0 && Math.abs(v.adjusted - v.default) > 0.01)
+    .sort(([, a]: [string, any], [, b]: [string, any]) => b.samples - a.samples);
+
+  return (
+    <div style={{
+      marginTop: '20px',
+      borderTop: '1px solid var(--border-color)',
+      paddingTop: '16px',
+    }}>
+      <div className="flex items-center justify-between mb-3">
+        <h4 style={{ color: 'var(--text-primary)', fontWeight: 600, fontSize: '13px', margin: 0 }}>
+          自適應校準狀態
+        </h4>
+        {isActive && (
+          <button
+            onClick={handleReset}
+            disabled={resetting}
+            className="cursor-pointer"
+            style={{
+              padding: '2px 10px',
+              borderRadius: '4px',
+              fontSize: '11px',
+              background: 'rgba(248,81,73,0.08)',
+              color: '#f85149',
+              border: '1px solid rgba(248,81,73,0.2)',
+            }}
+          >
+            {resetting ? '重置中...' : '重置為預設'}
+          </button>
+        )}
+      </div>
+
+      {/* 整體統計 */}
+      <div className="flex gap-4 mb-3" style={{ flexWrap: 'wrap' }}>
+        <div style={{ fontSize: '11px' }}>
+          <span style={{ color: 'var(--text-secondary)' }}>已驗證預警：</span>
+          <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{totalSamples} 筆</span>
+        </div>
+        {overallHitRate != null && (
+          <div style={{ fontSize: '11px' }}>
+            <span style={{ color: 'var(--text-secondary)' }}>命中率：</span>
+            <span style={{
+              color: overallHitRate >= 50 ? '#3fb950' : overallHitRate >= 35 ? '#d29922' : '#f85149',
+              fontWeight: 600,
+            }}>{overallHitRate}%</span>
+          </div>
+        )}
+        {lastUpdated && (
+          <div style={{ fontSize: '11px' }}>
+            <span style={{ color: 'var(--text-secondary)' }}>最後校準：</span>
+            <span style={{ color: 'var(--text-primary)' }}>
+              {new Date(lastUpdated).toLocaleString('zh-TW', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+            </span>
+          </div>
+        )}
+      </div>
+
+      {!isActive ? (
+        <div style={{
+          background: 'rgba(88,166,255,0.06)',
+          border: '1px solid rgba(88,166,255,0.15)',
+          borderRadius: '6px',
+          padding: '10px 12px',
+          fontSize: '11px',
+          color: 'var(--text-secondary)',
+        }}>
+          需要至少 20 筆已驗證預警才會開始自適應校準（目前：{totalSamples} 筆）。
+          系統會在每次掃描驗證後自動檢查是否可開始校準。
+        </div>
+      ) : (
+        <>
+          {/* 門檻區 */}
+          <div className="flex gap-3 mb-3" style={{ flexWrap: 'wrap' }}>
+            <CalThresholdBadge
+              label="觸發門檻"
+              defaultVal={scoreThreshold.default ?? 5.5}
+              adjustedVal={scoreThreshold.adjusted ?? 5.5}
+            />
+            <CalThresholdBadge
+              label="High 分界"
+              defaultVal={confBoundaries.high_detail?.default ?? 12}
+              adjustedVal={confBoundaries.high ?? 12}
+            />
+            <CalThresholdBadge
+              label="Medium 分界"
+              defaultVal={confBoundaries.medium_detail?.default ?? 8}
+              adjustedVal={confBoundaries.medium ?? 8}
+            />
+            <CalThresholdBadge
+              label="相似度門檻"
+              defaultVal={simThreshold.default ?? 0.85}
+              adjustedVal={simThreshold.adjusted ?? 0.85}
+            />
+          </div>
+
+          {/* 特徵權重表 */}
+          {adjustedFeatures.length > 0 && (
+            <div style={{ marginBottom: '8px' }}>
+              <div style={{ color: 'var(--text-secondary)', fontSize: '10px', marginBottom: '4px' }}>
+                已調整的特徵權重
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {adjustedFeatures.map(([name, v]: [string, any]) => {
+                  const isUp = v.adjusted > v.default;
+                  return (
+                    <span key={name} style={{
+                      padding: '2px 6px',
+                      borderRadius: '3px',
+                      fontSize: '10px',
+                      background: isUp ? 'rgba(63,185,80,0.1)' : 'rgba(248,81,73,0.1)',
+                      color: isUp ? '#3fb950' : '#f85149',
+                    }}>
+                      {name.replace(/_/g, ' ')} {v.default}→{v.adjusted}
+                      {v.hit_rate != null && ` (${v.hit_rate}%)`}
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {adjustedFeatures.length === 0 && (
+            <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
+              校準已啟用，目前所有特徵權重與預設值一致。
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+
+function CalThresholdBadge({ label, defaultVal, adjustedVal }: {
+  label: string; defaultVal: number; adjustedVal: number;
+}) {
+  const changed = Math.abs(adjustedVal - defaultVal) > 0.001;
+  return (
+    <div style={{
+      background: 'var(--bg-tertiary)',
+      borderRadius: '4px',
+      padding: '3px 8px',
+      fontSize: '10px',
+    }}>
+      <span style={{ color: 'var(--text-secondary)' }}>{label}: </span>
+      {changed ? (
+        <>
+          <span style={{ color: 'var(--text-secondary)', textDecoration: 'line-through' }}>
+            {defaultVal}
+          </span>
+          {' → '}
+          <span style={{
+            color: adjustedVal > defaultVal ? '#3fb950' : '#f85149',
+            fontWeight: 600,
+          }}>
+            {adjustedVal}
+          </span>
+        </>
+      ) : (
+        <span style={{ color: 'var(--text-primary)' }}>{defaultVal}</span>
+      )}
+    </div>
+  );
+}
 
 
 // Re-export for backward compatibility

@@ -15,6 +15,38 @@ const DEFAULT_QUICK_QUESTIONS = [
   '比較 RSI 和 MACD 策略的績效',
 ];
 
+const ANALYSIS_CATEGORIES = [
+  {
+    tab: '基礎分析',
+    allPrompt: '對 {symbol} 進行完整基礎分析（市場環境判定 + 七維度技術分析 + SMC 智慧資金分析 + 情境預測）',
+    items: [
+      { label: '市場環境判定', prompt: '分析 {symbol} 的市場環境（Regime + 結構 + 多時框對齊）' },
+      { label: '七維度技術分析', prompt: '對 {symbol} 進行完整的七維度技術分析' },
+      { label: 'SMC 智慧資金分析', prompt: '分析 {symbol} 的 SMC 訂單流結構' },
+      { label: '情境預測', prompt: '預測 {symbol} 未來三種可能情境' },
+    ],
+  },
+  {
+    tab: '進階量化',
+    allPrompt: '對 {symbol} 進行完整進階量化分析（策略回測驗證 + 條件機率掃描 + 事件型態分析 + 指標參數校準）',
+    items: [
+      { label: '策略回測驗證', prompt: '回測比較 {symbol} 的多種交易策略績效' },
+      { label: '條件機率掃描', prompt: '掃描 {symbol} 各指標的條件機率，找出最佳進場區間' },
+      { label: '事件型態分析', prompt: '分析 {symbol} 歷史上大漲大跌前的共通特徵' },
+      { label: '指標參數校準', prompt: '校準 {symbol} 的最佳指標參數' },
+    ],
+  },
+  {
+    tab: '完整分析',
+    allPrompt: '對 {symbol} 進行完整量化研究 + 因子驗證與監控 + 完整分析三階段',
+    items: [
+      { label: '完整量化研究', prompt: '對 {symbol} 進行完整量化研究（因子IC + Monte Carlo + Walk Forward）' },
+      { label: '因子驗證與監控', prompt: '驗證 {symbol} 當前哪些因子有效、哪些已衰退' },
+      { label: '完整分析三階段', prompt: '完整分析一 {symbol}' },
+    ],
+  },
+];
+
 function loadQuickQuestions(): string[] {
   try {
     const raw = localStorage.getItem(QUICK_QUESTIONS_KEY);
@@ -70,6 +102,8 @@ export default function ChatInterface() {
   const [distillHint, setDistillHint] = useState(false);
   const [quickQuestions, setQuickQuestions] = useState<string[]>(loadQuickQuestions);
   const [editingQuick, setEditingQuick] = useState(false);
+  const [activeAnalysisTab, setActiveAnalysisTab] = useState(0);
+  const [analysisBarOpen, setAnalysisBarOpen] = useState(true);
   const [showKnowledgePanel, setShowKnowledgePanel] = useState(false);
   const [knowledgeFragments, setKnowledgeFragments] = useState<FragmentItem[]>([]);
   const [knowledgeTotal, setKnowledgeTotal] = useState(0);
@@ -302,6 +336,19 @@ export default function ChatInterface() {
           updateMessage(assistantMsgId, { isStreaming: true, statusText: statusMessage });
         },
 
+        onProgress: (prog) => {
+          updateMessage(assistantMsgId, {
+            isStreaming: true,
+            statusText: prog.message,
+            progress: {
+              percentage: prog.percentage,
+              completed: prog.completed,
+              total: prog.total,
+              current_task: prog.current_task,
+            },
+          });
+        },
+
         onToken: (content: string) => {
           accumulatedText += content;
           updateMessage(assistantMsgId, {
@@ -309,6 +356,7 @@ export default function ChatInterface() {
             isThinking: false,
             isStreaming: true,
             statusText: undefined,
+            progress: undefined,
           });
         },
 
@@ -332,14 +380,11 @@ export default function ChatInterface() {
               //    只更新 state，App.tsx 的 useEffect 會統一觸發 loadChartData
               const newSymbol = updates.symbol as string | undefined;
               const newTimeframe = updates.timeframe as string | undefined;
-              const newStart = updates.startDate as string | undefined;
-              const newEnd = updates.endDate as string | undefined;
 
               if (newSymbol && newSymbol !== store.symbol) store.setSymbol(newSymbol);
               if (newTimeframe && newTimeframe !== store.timeframe) store.setTimeframe(newTimeframe as Timeframe);
-              if (newStart !== undefined || newEnd !== undefined) {
-                store.setDateRange(newStart ?? store.startDate, newEnd ?? store.endDate);
-              }
+              // ★ 不再從 LLM chart_updates 套用日期範圍，避免 LLM 的查詢範圍
+              //   覆蓋圖表顯示，導致只顯示部分數據。日期範圍僅由使用者手動操作。
 
               // 2. 指標操作（add / remove / update）
               const indicatorActions = updates.indicator_actions as Array<{
@@ -609,6 +654,61 @@ export default function ChatInterface() {
         />
       )}
 
+      {/* 分析功能快捷面板（固定在訊息列表上方） */}
+      <div style={{ borderBottom: '1px solid var(--border-primary)', flexShrink: 0 }}>
+        <div
+          className="flex items-center justify-between px-3 py-1 cursor-pointer"
+          style={{ background: 'var(--bg-secondary)' }}
+          onClick={() => setAnalysisBarOpen((v) => !v)}
+        >
+          <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>
+            {analysisBarOpen ? '▼' : '▶'} 分析功能
+          </span>
+          <div className="flex gap-1">
+            {ANALYSIS_CATEGORIES.map((cat, i) => (
+              <button
+                key={i}
+                onClick={(e) => { e.stopPropagation(); setActiveAnalysisTab(i); if (!analysisBarOpen) setAnalysisBarOpen(true); }}
+                className="px-2 py-0.5 rounded text-xs cursor-pointer transition-colors"
+                style={{
+                  background: activeAnalysisTab === i ? 'var(--accent-blue)' : 'transparent',
+                  color: activeAnalysisTab === i ? '#fff' : 'var(--text-secondary)',
+                }}
+              >
+                {cat.tab}
+              </button>
+            ))}
+          </div>
+        </div>
+        {analysisBarOpen && (
+          <div className="flex flex-wrap gap-1.5 px-3 py-2" style={{ background: 'var(--bg-secondary)' }}>
+            <button
+              onClick={() => {
+                const sym = useChartStore.getState().symbol || 'BTC/USDT';
+                setInput(ANALYSIS_CATEGORIES[activeAnalysisTab].allPrompt.replace('{symbol}', sym));
+              }}
+              className="px-2.5 py-1 rounded text-xs cursor-pointer transition-colors font-medium"
+              style={{ background: 'var(--accent-blue)', color: '#fff' }}
+            >
+              全部分析
+            </button>
+            {ANALYSIS_CATEGORIES[activeAnalysisTab].items.map((item, i) => (
+              <button
+                key={i}
+                onClick={() => {
+                  const sym = useChartStore.getState().symbol || 'BTC/USDT';
+                  setInput(item.prompt.replace('{symbol}', sym));
+                }}
+                className="px-2.5 py-1 rounded text-xs cursor-pointer transition-colors"
+                style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)' }}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
       {/* 訊息列表 */}
       <div className="flex-1 overflow-y-auto p-4 space-y-3">
         {messages.length === 0 && (
@@ -640,6 +740,7 @@ export default function ChatInterface() {
                     </button>
                   ))}
                 </div>
+
               </>
             ) : (
               <div className="text-left mx-auto" style={{ maxWidth: '400px' }}>
@@ -771,24 +872,47 @@ export default function ChatInterface() {
                   <span className="inline-block w-0.5 h-4 ml-0.5 animate-pulse" style={{ background: 'var(--accent-blue)' }} />
                 )}
 
-                {/* 進度狀態列：有內容且仍在串流、有 statusText 時顯示（含耗時計時器） */}
+                {/* 進度狀態列：有內容且仍在串流、有 statusText 時顯示 */}
                 {msg.isStreaming && msg.content && msg.statusText && (
                   <div
-                    className="flex items-center gap-2 mt-2 px-2.5 py-1.5 rounded"
+                    className="mt-2 px-2.5 py-1.5 rounded"
                     style={{
                       background: 'rgba(88, 166, 255, 0.08)',
                       border: '1px solid rgba(88, 166, 255, 0.2)',
                     }}
                   >
-                    <span className="flex gap-0.5 flex-shrink-0">
-                      <span className="w-1 h-1 rounded-full animate-bounce" style={{ background: 'var(--accent-blue)', animationDelay: '0ms' }} />
-                      <span className="w-1 h-1 rounded-full animate-bounce" style={{ background: 'var(--accent-blue)', animationDelay: '150ms' }} />
-                      <span className="w-1 h-1 rounded-full animate-bounce" style={{ background: 'var(--accent-blue)', animationDelay: '300ms' }} />
-                    </span>
-                    <span className="text-xs" style={{ color: 'var(--accent-blue)' }}>
-                      {msg.statusText}
-                      <ElapsedTimer />
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className="flex gap-0.5 flex-shrink-0">
+                        <span className="w-1 h-1 rounded-full animate-bounce" style={{ background: 'var(--accent-blue)', animationDelay: '0ms' }} />
+                        <span className="w-1 h-1 rounded-full animate-bounce" style={{ background: 'var(--accent-blue)', animationDelay: '150ms' }} />
+                        <span className="w-1 h-1 rounded-full animate-bounce" style={{ background: 'var(--accent-blue)', animationDelay: '300ms' }} />
+                      </span>
+                      <span className="text-xs flex-1" style={{ color: 'var(--accent-blue)' }}>
+                        {msg.statusText}
+                        <ElapsedTimer />
+                      </span>
+                      {msg.progress && (
+                        <span className="text-xs font-mono font-semibold" style={{ color: 'var(--accent-blue)' }}>
+                          {msg.progress.percentage}%
+                        </span>
+                      )}
+                    </div>
+                    {/* 進度條 */}
+                    {msg.progress && msg.progress.total > 0 && (
+                      <div
+                        className="mt-1.5 rounded-full overflow-hidden"
+                        style={{ height: 4, background: 'rgba(88, 166, 255, 0.15)' }}
+                      >
+                        <div
+                          className="h-full rounded-full"
+                          style={{
+                            width: `${msg.progress.percentage}%`,
+                            background: 'var(--accent-blue)',
+                            transition: 'width 0.5s ease-out',
+                          }}
+                        />
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

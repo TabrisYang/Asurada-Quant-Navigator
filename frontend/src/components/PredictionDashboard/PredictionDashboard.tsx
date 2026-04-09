@@ -6,6 +6,7 @@ import {
   fetchPredictionStats, fetchActivePredictions, fetchPredictionHistory,
   updatePredictionNote, generateReview, clearPredictions,
   fetchScenarios, fetchAdjustments, recalculateAdjustments,
+  fetchReviewHistory,
 } from '../../services/api';
 import { loadPersistedSession } from '../../services/session';
 
@@ -48,7 +49,7 @@ export default function PredictionDashboard() {
   const [activePreds, setActivePreds] = useState<PredictionItem[]>([]);
   const [historyPreds, setHistoryPreds] = useState<PredictionItem[]>([]);
   const [loading, setLoading] = useState(true);
-  const [viewTab, setViewTab] = useState<'scenarios' | 'active' | 'history' | 'indicators' | 'adjustments'>('scenarios');
+  const [viewTab, setViewTab] = useState<'scenarios' | 'active' | 'history' | 'indicators' | 'adjustments' | 'reviews'>('scenarios');
 
   // 情境預測
   const [scenarioData, setScenarioData] = useState<any>(null);
@@ -58,6 +59,10 @@ export default function PredictionDashboard() {
   // 自動調整
   const [adjustments, setAdjustments] = useState<any[]>([]);
   const [adjLoading, setAdjLoading] = useState(false);
+
+  // 歷史覆盤報告
+  const [reviews, setReviews] = useState<any[]>([]);
+  const [reviewsLoading, setReviewsLoading] = useState(false);
 
   // 筆記編輯
   const [editingNoteId, setEditingNoteId] = useState<number | null>(null);
@@ -72,16 +77,23 @@ export default function PredictionDashboard() {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [statsRes, activeRes, historyRes] = await Promise.all([
+      // 各自獨立 try/catch，避免一個失敗導致全部資料消失
+      const [statsResult, activeResult, historyResult] = await Promise.allSettled([
         fetchPredictionStats(chartSymbol || undefined),
         fetchActivePredictions(chartSymbol || undefined),
         fetchPredictionHistory(chartSymbol || undefined, 50),
       ]);
-      setStats(statsRes.stats || null);
-      setDirectionStats(statsRes.direction_stats || null);
-      setStreak(statsRes.streak || null);
-      setActivePreds(activeRes.predictions || []);
-      setHistoryPreds(historyRes.predictions || []);
+      if (statsResult.status === 'fulfilled') {
+        setStats(statsResult.value.stats || null);
+        setDirectionStats(statsResult.value.direction_stats || null);
+        setStreak(statsResult.value.streak || null);
+      }
+      if (activeResult.status === 'fulfilled') {
+        setActivePreds(activeResult.value.predictions || []);
+      }
+      if (historyResult.status === 'fulfilled') {
+        setHistoryPreds(historyResult.value.predictions || []);
+      }
     } catch {
       /* ignore */
     } finally {
@@ -123,9 +135,19 @@ export default function PredictionDashboard() {
     finally { setAdjLoading(false); }
   };
 
+  const loadReviews = useCallback(async () => {
+    setReviewsLoading(true);
+    try {
+      const res = await fetchReviewHistory(10);
+      setReviews(res.reviews || []);
+    } catch { setReviews([]); }
+    finally { setReviewsLoading(false); }
+  }, []);
+
   useEffect(() => { loadData(); }, [loadData]);
   useEffect(() => { if (viewTab === 'scenarios') loadScenarios(); }, [viewTab, loadScenarios]);
   useEffect(() => { if (viewTab === 'adjustments') loadAdjustments(); }, [viewTab, loadAdjustments]);
+  useEffect(() => { if (viewTab === 'reviews') loadReviews(); }, [viewTab, loadReviews]);
 
   const handleSaveNote = async (predId: number) => {
     setSavingNote(true);
@@ -228,21 +250,22 @@ export default function PredictionDashboard() {
       )}
 
       {/* 連勝/連敗 */}
-      {streak && (streak.current_streak !== 0) && (
-        <div className="text-xs px-2" style={{ color: streak.current_streak > 0 ? '#4ade80' : '#f87171' }}>
-          {streak.current_streak > 0
+      {streak && streak.current_streak > 0 && (
+        <div className="text-xs px-2" style={{ color: streak.streak_type === 'hit_target' ? '#4ade80' : '#f87171' }}>
+          {streak.streak_type === 'hit_target'
             ? `目前連勝 ${streak.current_streak} 筆`
-            : `目前連敗 ${Math.abs(streak.current_streak)} 筆`}
+            : `目前連敗 ${streak.current_streak} 筆`}
         </div>
       )}
 
       {/* ===== Sub-tabs ===== */}
-      <div className="flex gap-2 border-b" style={{ borderColor: 'var(--border-primary)' }}>
-        {(['scenarios', 'active', 'history', 'indicators', 'adjustments'] as const).map((tab) => {
+      <div className="flex gap-2 border-b overflow-x-auto" style={{ borderColor: 'var(--border-primary)' }}>
+        {(['scenarios', 'active', 'history', 'reviews', 'indicators', 'adjustments'] as const).map((tab) => {
           const labels: Record<string, string> = {
             scenarios: '情境預測',
             active: `進行中 (${activePreds.length})`,
             history: `歷史記錄 (${historyPreds.length})`,
+            reviews: '覆盤報告',
             indicators: '指標勝率',
             adjustments: '自動調整',
           };
@@ -575,6 +598,41 @@ export default function PredictionDashboard() {
             <div className="text-center py-6 text-xs" style={{ color: 'var(--text-secondary)' }}>
               累積更多預測後即可顯示各指標的勝率排名
             </div>
+          )}
+        </div>
+      )}
+
+      {/* ===== 覆盤報告列表 ===== */}
+      {viewTab === 'reviews' && (
+        <div className="space-y-2">
+          {reviewsLoading ? (
+            <div className="text-center py-6 text-xs" style={{ color: 'var(--text-secondary)' }}>
+              載入覆盤報告中...
+            </div>
+          ) : reviews.length === 0 ? (
+            <div className="text-center py-6 text-xs" style={{ color: 'var(--text-secondary)' }}>
+              尚無覆盤報告。點擊下方「生成覆盤報告」或等待每週自動覆盤。
+            </div>
+          ) : (
+            reviews.map((rev: any) => (
+              <div key={rev.id} className="rounded-lg p-3 text-xs" style={{ background: 'var(--bg-tertiary)' }}>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="font-medium" style={{ color: 'var(--text-primary)' }}>
+                    {rev.is_auto ? '自動週覆盤' : '手動覆盤'}
+                    {rev.symbol ? ` — ${rev.symbol}` : ''}
+                  </span>
+                  <span style={{ color: 'var(--text-secondary)' }}>
+                    {fmtTime(rev.created_at)}
+                  </span>
+                </div>
+                <div
+                  className="whitespace-pre-wrap leading-relaxed"
+                  style={{ color: 'var(--text-primary)', maxHeight: 200, overflow: 'auto' }}
+                >
+                  {rev.report}
+                </div>
+              </div>
+            ))
           )}
         </div>
       )}

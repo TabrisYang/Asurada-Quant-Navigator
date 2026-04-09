@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
-from app.api.routes import chat, chart, indicators, config, data_sync, export, factor_scan, ml, predictions, scenario, smc
+from app.api.routes import alerts, chat, chart, indicators, config, data_sync, export, factor_scan, ml, predictions, scenario, smc
 from app.core.config.settings import settings
 from app.core.usage_tracker import usage_tracker
 from app.core.chat_history import chat_history
@@ -100,6 +100,12 @@ async def lifespan(app: FastAPI):
         # 預設分析策略（首次啟動時載入）
         from app.core.user_strategies import seed_default_strategies
         seed_default_strategies()
+        # 初始化特徵分析（首次或過期時自動計算）
+        try:
+            from app.core.scanner_feature_profiler import scanner_feature_profiler
+            scanner_feature_profiler.ensure_profiles()
+        except Exception as e:
+            logger.warning(f"[特徵分析] 背景初始化失敗: {e}")
 
     threading.Thread(target=_background_init, daemon=True).start()
 
@@ -115,12 +121,144 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.error(f"[排程驗證] 失敗: {e}")
 
+    # 背景排程：每週自動覆盤
+    async def _periodic_weekly_review():
+        from datetime import datetime, timedelta
+        from app.core.prediction_tracker import prediction_tracker
+
+        # 啟動後等 60 秒再檢查，讓其他初始化先完成
+        await asyncio.sleep(60)
+
+        while True:
+            try:
+                last_review = prediction_tracker.get_last_review_time()
+                now = datetime.now().astimezone()
+                need_review = (last_review is None) or (now - last_review > timedelta(days=7))
+
+                if need_review:
+                    logger.info("[週覆盤] 開始自動產生每週覆盤報告...")
+                    review_data = prediction_tracker.get_review_data(
+                        start_date=(now - timedelta(days=7)).isoformat(),
+                    )
+                    if review_data["summary"]["total"] == 0:
+                        logger.info("[週覆盤] 過去 7 天無已驗證預測，跳過")
+                    else:
+                        # 嘗試用 LLM 生成覆盤
+                        report = await _run_auto_review(review_data)
+                        prediction_tracker.save_review(
+                            report=report,
+                            summary=review_data["summary"],
+                            is_auto=True,
+                        )
+                        # 覆盤後觸發自動調整
+                        try:
+                            from app.core.auto_adjuster import run_adjustment_cycle
+                            run_adjustment_cycle()
+                            logger.info("[週覆盤] 自動調整已觸發")
+                        except Exception as e:
+                            logger.warning(f"[週覆盤] 自動調整失敗: {e}")
+            except Exception as e:
+                logger.error(f"[週覆盤] 失敗: {e}")
+
+            await asyncio.sleep(86400)  # 每 24 小時檢查一次
+
+    async def _run_auto_review(review_data: dict) -> str:
+        """用 LLM 生成覆盤報告，失敗時回退到模板。"""
+        preds = review_data["predictions"]
+        summary = review_data["summary"]
+
+        preds_text = []
+        for p in preds:
+            outcome = f"{p['actual_outcome_pct']:.2f}%" if p.get("actual_outcome_pct") is not None else "N/A"
+            preds_text.append(
+                f"- {p['symbol']} {p['direction']} | 入場={p['entry_price']} "
+                f"目標={p['target_price']} 止損={p['stop_price']} | "
+                f"結果: {p['status']} ({outcome}) | "
+                f"信心: {p['confidence']} | 指標: {p['indicators']} | regime: {p['regime']}"
+            )
+
+        prompt = f"""你是一位量化交易覆盤教練。請根據以下預測記錄，生成一份每週覆盤報告。
+
+## 統計摘要
+- 總預測數: {summary['total']}
+- 命中目標: {summary['wins']} ({summary['win_rate']}%)
+- 觸及止損: {summary['losses']}
+- 到期未觸發: {summary['expired']}
+
+## 預測明細
+{chr(10).join(preds_text)}
+
+## 請分析以下幾點：
+1. **成功模式** — 命中目標的預測有什麼共同特徵？
+2. **失敗模式** — 觸及止損的預測有什麼共同特徵？有哪些可以避免的錯誤？
+3. **關鍵教訓** — 列出 3-5 條具體、可執行的改進建議
+4. **下週建議** — 根據近期表現，建議調整什麼策略參數？
+
+請用繁體中文回覆，格式清晰易讀。"""
+
+        try:
+            from app.core.llm.adapter import create_adapter
+            adapter = create_adapter(provider=settings.default_llm_provider)
+            llm_response = await adapter.chat(
+                messages=[{"role": "user", "content": prompt}],
+            )
+            report = llm_response.message
+
+            # 將教訓存入知識庫
+            try:
+                from app.api.routes.predictions import _save_lessons_from_review
+                _save_lessons_from_review(report)
+            except Exception:
+                pass
+
+            return report
+        except Exception as e:
+            logger.warning(f"[週覆盤] LLM 不可用，使用模板: {e}")
+            from app.api.routes.predictions import _generate_template_report
+            return _generate_template_report(review_data)
+
+    async def _periodic_auto_scan():
+        """定期自動掃描所有幣種，偵測異常前兆信號。間隔和幣種從用戶設定讀取。"""
+        await asyncio.sleep(120)  # 啟動延遲，等數據引擎初始化
+        while True:
+            try:
+                from app.core.auto_scanner import auto_scanner
+                cfg = auto_scanner._load_scan_config()
+
+                if cfg.get("scan_enabled", True):
+                    results = auto_scanner.scan_all_symbols()
+                    auto_scanner.validate_expired_alerts()
+                    if results:
+                        logger.info(f"[自動掃描] 發現 {len(results)} 個預警信號")
+                    else:
+                        logger.debug("[自動掃描] 本次未發現異常信號")
+                else:
+                    logger.debug("[自動掃描] 已停用，跳過本次掃描")
+
+                interval_hours = cfg.get("scan_interval_hours", 4)
+            except Exception as e:
+                logger.error(f"[自動掃描] 失敗: {e}")
+                interval_hours = 4
+            await asyncio.sleep(interval_hours * 3600)
+
     validation_task = asyncio.create_task(_periodic_validation())
+    review_task = asyncio.create_task(_periodic_weekly_review())
+    scan_task = asyncio.create_task(_periodic_auto_scan())
+
+    # 暴露 scan_task 供外部重啟（設定即時生效）
+    app_state["scan_task"] = scan_task
+    app_state["scan_factory"] = _periodic_auto_scan
 
     yield
 
     validation_task.cancel()
+    review_task.cancel()
+    scan_task.cancel()
     logger.info("👋 阿斯拉量化系統關閉")
+
+
+# 全域狀態：供 API 路由存取 scan_task
+app_state: dict = {}
 
 
 app = FastAPI(
@@ -151,6 +289,7 @@ app.include_router(ml.router, prefix="/api/ml", tags=["ML 增強"])
 app.include_router(predictions.router, prefix="/api/predictions", tags=["預測追蹤"])
 app.include_router(scenario.router, prefix="/api/scenario", tags=["情境預測"])
 app.include_router(smc.router, prefix="/api/smc", tags=["SMC 分析"])
+app.include_router(alerts.router, prefix="/api/alerts", tags=["預警"])
 
 
 @app.get("/api/health")

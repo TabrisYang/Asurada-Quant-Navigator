@@ -1,8 +1,9 @@
 /** 阿斯拉量化系統 — 頂部工具列 */
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useChartStore } from '../stores/chartStore';
 import type { Timeframe } from '../types';
+import { fetchTwStockName, getTwStockNameSync, setTwStockNameCache } from '../services/api';
 import FactorScanPanel from './FactorScanPanel/FactorScanPanel';
 
 const TIMEFRAMES: { label: string; value: Timeframe }[] = [
@@ -20,12 +21,14 @@ const DEFAULT_CRYPTO = [
 ];
 
 const DEFAULT_TW_STOCK = [
+  'TWII/TWD',  // 加權指數
   '2330/TWD', '2317/TWD', '2454/TWD', '2412/TWD', '3008/TWD',
   '2881/TWD', '2882/TWD', '1301/TWD', '2308/TWD', '2303/TWD',
 ];
 
 // 台股代碼 ↔ 名稱對照表（常見 50 檔）
 const TW_STOCK_DB: { code: string; name: string }[] = [
+  { code: 'TWII', name: '加權指數' }, { code: 'TWOII', name: '櫃買指數' },
   { code: '2330', name: '台積電' }, { code: '2317', name: '鴻海' },
   { code: '2454', name: '聯發科' }, { code: '2412', name: '中華電' },
   { code: '3008', name: '大立光' }, { code: '2881', name: '富邦金' },
@@ -59,6 +62,7 @@ const TW_NAME_TO_CODE: Record<string, string> = {};
 for (const { code, name } of TW_STOCK_DB) {
   TW_CODE_TO_NAME[code] = name;
   TW_NAME_TO_CODE[name] = code;
+  setTwStockNameCache(code, name); // 同步到共用快取
 }
 
 const STORAGE_KEY = 'asura_custom_symbols';
@@ -82,8 +86,16 @@ function saveSymbolList(list: SymbolList) {
 
 function getTwDisplayName(sym: string): string {
   const code = sym.split('/')[0];
-  const name = TW_CODE_TO_NAME[code];
-  return name ? `${code} ${name}` : code;
+  // 先查本地靜態表
+  const localName = TW_CODE_TO_NAME[code];
+  if (localName) return `${code} ${localName}`;
+  // 再查共用快取（含動態查詢結果）
+  const cachedName = getTwStockNameSync(code);
+  if (cachedName) {
+    TW_CODE_TO_NAME[code] = cachedName; // 回填本地表
+    return `${code} ${cachedName}`;
+  }
+  return code;
 }
 
 function getDisplayName(sym: string): string {
@@ -121,6 +133,28 @@ export default function TopBar({ onSettingsClick }: TopBarProps) {
   const [newTwStock, setNewTwStock] = useState('');
   const [twSuggestions, setTwSuggestions] = useState<{ code: string; name: string }[]>([]);
   const editorRef = useRef<HTMLDivElement>(null);
+  const [, forceUpdate] = useState(0);
+
+  // 動態查詢不在靜態表中的台股名稱
+  const resolveTwNames = useCallback(async (codes: string[]) => {
+    const unknowns = codes
+      .map((sym) => sym.split('/')[0])
+      .filter((c) => !TW_CODE_TO_NAME[c] && !getTwStockNameSync(c));
+    if (unknowns.length === 0) return;
+    const results = await Promise.all(unknowns.map((c) => fetchTwStockName(c)));
+    let changed = false;
+    unknowns.forEach((c, i) => {
+      if (results[i]) {
+        TW_CODE_TO_NAME[c] = results[i];
+        changed = true;
+      }
+    });
+    if (changed) forceUpdate((n) => n + 1); // 觸發重新渲染以顯示名稱
+  }, []);
+
+  useEffect(() => {
+    resolveTwNames(symbolList.tw_stock);
+  }, [symbolList.tw_stock, resolveTwNames]);
 
   // 點擊外部關閉編輯面板
   useEffect(() => {
@@ -172,6 +206,9 @@ export default function TopBar({ onSettingsClick }: TopBarProps) {
       // 純數字 → 直接當代碼
       if (/^\d{4,6}$/.test(raw)) {
         stockCode = raw;
+      } else if (/^[A-Za-z]+$/i.test(raw)) {
+        // 英文字母 → 可能是指數代碼如 TWII
+        stockCode = raw.toUpperCase();
       } else {
         // 中文名稱 → 查對照表（精確 + 前綴匹配）
         if (TW_NAME_TO_CODE[raw]) {
@@ -189,7 +226,15 @@ export default function TopBar({ onSettingsClick }: TopBarProps) {
     const sym = `${stockCode}/TWD`;
     if (!symbolList.tw_stock.includes(sym)) {
       updateList({ ...symbolList, tw_stock: [...symbolList.tw_stock, sym] });
-      // 自動記錄名稱到映射（如果是新的代碼）
+      // 不在靜態表中 → 動態查詢名稱
+      if (!TW_CODE_TO_NAME[stockCode]) {
+        fetchTwStockName(stockCode).then((name) => {
+          if (name) {
+            TW_CODE_TO_NAME[stockCode!] = name;
+            forceUpdate((n) => n + 1);
+          }
+        });
+      }
     }
     setNewTwStock('');
     setTwSuggestions([]);

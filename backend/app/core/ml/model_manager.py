@@ -994,7 +994,13 @@ class ModelManager:
         n_windows: int,
         config: dict | None,
     ) -> TrainResult:
-        """Walk Forward 交叉驗證訓練"""
+        """Walk Forward 交叉驗證訓練
+
+        注意：X, y 必須已按時間順序排列（由 feature_engineer.build_features
+        從時間排序的 DataFrame 產生，valid_mask 保留原始順序）。
+        此處使用 expanding window：train=[0:end], val=[end:end+window]，
+        position-based split 即為 time-based split。
+        """
         n = len(X)
         window_size = n // (n_windows + 1)
 

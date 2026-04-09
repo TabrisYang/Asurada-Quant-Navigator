@@ -532,13 +532,21 @@ class CryptoDataEngine:
         results = []
         for ts, group in merged.groupby("timestamp"):
             voting = self._calculate_voting(group)
+            # 成交量：優先使用 Binance（最大交易所）的 volume 作為基準，
+            # 避免跨所加總導致量能指標（OBV, RelVol）失真。
+            # 若 Binance 不存在，退回到所有交易所的中位數。
+            binance_rows = group[group["exchange"] == "binance"]
+            if not binance_rows.empty:
+                vol = float(binance_rows["volume"].iloc[0])
+            else:
+                vol = float(group["volume"].median())
             results.append({
                 "timestamp": pd.Timestamp(ts, unit="ms"),
                 "open": group["open"].median(),
                 "high": group["high"].max(),
                 "low": group["low"].min(),
                 "close": voting["final_price"],
-                "volume": group["volume"].sum(),
+                "volume": vol,
                 **voting,
             })
 

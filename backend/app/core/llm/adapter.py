@@ -175,7 +175,7 @@ class OpenAIAdapter(BaseLLMAdapter):
         self.api_key = api_key
         self.model = model
 
-    async def chat(self, messages: list[dict], chart_state: Optional[dict] = None, force_text: bool = False, system_prompt: Optional[str] = None, chart_screenshot: Optional[str] = None) -> LLMResponse:
+    async def chat(self, messages: list[dict], chart_state: Optional[dict] = None, force_text: bool = False, system_prompt: Optional[str] = None, chart_screenshot: Optional[str] = None, r2_mode: bool = False) -> LLMResponse:
         try:
             from openai import AsyncOpenAI
             client = AsyncOpenAI(api_key=self.api_key, timeout=_LLM_TIMEOUT)
@@ -382,7 +382,7 @@ class GeminiAdapter(BaseLLMAdapter):
 
         raise last_error  # type: ignore
 
-    async def chat(self, messages: list[dict], chart_state: Optional[dict] = None, force_text: bool = False, system_prompt: Optional[str] = None, chart_screenshot: Optional[str] = None) -> LLMResponse:
+    async def chat(self, messages: list[dict], chart_state: Optional[dict] = None, force_text: bool = False, system_prompt: Optional[str] = None, chart_screenshot: Optional[str] = None, r2_mode: bool = False) -> LLMResponse:
         import base64
         from google.genai import types
 
@@ -532,7 +532,7 @@ class ClaudeAdapter(BaseLLMAdapter):
             })
         return tools
 
-    async def chat(self, messages: list[dict], chart_state: Optional[dict] = None, force_text: bool = False, system_prompt: Optional[str] = None, chart_screenshot: Optional[str] = None) -> LLMResponse:
+    async def chat(self, messages: list[dict], chart_state: Optional[dict] = None, force_text: bool = False, system_prompt: Optional[str] = None, chart_screenshot: Optional[str] = None, r2_mode: bool = False) -> LLMResponse:
         try:
             from anthropic import AsyncAnthropic
             client = AsyncAnthropic(api_key=self.api_key, timeout=_LLM_TIMEOUT)
@@ -909,7 +909,7 @@ class OllamaAdapter(BaseLLMAdapter):
         self.base_url = base_url.rstrip("/")
         self.model = model
 
-    async def chat(self, messages: list[dict], chart_state: Optional[dict] = None, force_text: bool = False, system_prompt: Optional[str] = None, chart_screenshot: Optional[str] = None) -> LLMResponse:
+    async def chat(self, messages: list[dict], chart_state: Optional[dict] = None, force_text: bool = False, system_prompt: Optional[str] = None, chart_screenshot: Optional[str] = None, r2_mode: bool = False) -> LLMResponse:
         try:
             import httpx
 

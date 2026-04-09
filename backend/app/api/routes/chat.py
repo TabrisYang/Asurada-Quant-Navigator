@@ -19,7 +19,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from loguru import logger
 
 from app.core.llm.adapter import create_adapter
-from app.core.llm.executor import execute_function_calls, check_input_safety
+from app.core.llm.executor import execute_function_calls, check_input_safety, ProgressTracker
 from app.core.llm.function_defs import detect_intents, assemble_system_prompt
 from app.core.security.key_manager import key_manager
 from app.core.usage_tracker import usage_tracker
@@ -254,18 +254,38 @@ def _detect_mentioned_indicators(text: str, existing_ids: set[str]) -> list[dict
 _VALUE_KEYWORDS = {"多少", "是多少", "目前", "現在", "幾", "數值", "分析", "趨勢", "看"}
 
 # ─── 按意圖等級定義核心指標集 ────────────────────────────
-# analysis: 覆蓋 regime 判定 + 4 維度最小必要集
+# analysis: 趨勢 + 動量 + 波動 + 量能 + 風控（15 個）
 _ANALYSIS_CORE_INDICATORS = [
-    "adx", "atr", "rsi", "macd", "bb", "obv",
+    # 趨勢
+    "adx", "supertrend", "ema", "psar",
+    # 動量
+    "rsi", "macd", "stochrsi",
+    # 波動
+    "bb", "atr", "donchian",
+    # 量能
+    "obv", "rel_vol", "vwap",
+    # 背離
+    "rsi_divergence",
+    # 風控
+    "kelly",
 ]
-# deep analysis: 覆蓋全 7 維度 + 先行訊號
+# deep analysis: 全維度覆蓋 + 先行訊號 + 情緒 + 結構（25 個）
 _DEEP_ANALYSIS_INDICATORS = [
-    "adx", "atr", "rsi", "macd", "bb", "obv",
-    "supertrend", "stochrsi", "donchian", "rel_vol",
-    "leading_composite", "mtf_mss",
+    # 趨勢
+    "adx", "supertrend", "ema", "psar", "ichimoku", "market_structure", "mtf_mss",
+    # 動量
+    "rsi", "macd", "stochrsi", "roc", "leading_composite",
+    # 波動
+    "bb", "atr", "donchian", "keltner", "hv", "vol_squeeze",
+    # 量能
+    "obv", "rel_vol", "vwap", "cvd",
+    # 背離
+    "rsi_divergence", "macd_divergence",
+    # 風控
+    "kelly",
 ]
 
-_MAX_AUTO_CALC = 15
+_MAX_AUTO_CALC = 30
 
 
 def _auto_calc_indicator_values(
@@ -291,20 +311,25 @@ def _auto_calc_indicator_values(
     is_deep = bool(_intents & {"backtest", "quant_research", "event_analysis", "calibrate"})
     is_analysis = "analysis" in _intents
 
+    # ── 核心修復：分析意圖時「強制重算」所有核心指標 ──
+    # 前端傳來的 indicatorValues 可能是舊幣種/舊時間框架的殘留值，
+    # 不能信任。只要是分析意圖，一律由後端從最新數據重新計算。
+    force_recalc = is_deep or is_analysis
+
     if is_deep:
         for ind_id in _DEEP_ANALYSIS_INDICATORS:
-            if ind_id not in existing_keys and ind_id not in need_calc:
+            if ind_id not in need_calc:
                 need_calc.append(ind_id)
     elif is_analysis:
         for ind_id in _ANALYSIS_CORE_INDICATORS:
-            if ind_id not in existing_keys and ind_id not in need_calc:
+            if ind_id not in need_calc:
                 need_calc.append(ind_id)
 
     has_value_intent = is_analysis or is_deep or any(kw in user_msg for kw in _VALUE_KEYWORDS)
     if has_value_intent:
         for keyword, (ind_id, _dm) in _INDICATOR_TEXT_MAP.items():
             if keyword in msg_lower and ind_id not in need_calc:
-                if ind_id not in existing_keys:
+                if force_recalc or ind_id not in existing_keys:
                     need_calc.append(ind_id)
             if len(need_calc) >= _MAX_AUTO_CALC:
                 break
@@ -327,7 +352,21 @@ def _auto_calc_indicator_values(
         chart_state["_cached_df"] = df
         chart_state["_cached_df_key"] = f"{symbol}_{timeframe}"
 
-        auto_values = dict(chart_state.get("indicatorValues") or {})
+        # 注入數據可用性資訊，讓 LLM 知道本地實際有多少數據
+        if len(df) > 0 and "timestamp" in df.columns:
+            ts = df["timestamp"]
+            chart_state["data_availability"] = {
+                "total_bars": len(df),
+                "timeframe": timeframe,
+                "start_date": str(ts.iloc[0]),
+                "end_date": str(ts.iloc[-1]),
+            }
+
+        # 強制重算模式：清除前端傳來的舊值，完全以後端計算為準
+        if force_recalc:
+            auto_values = {}
+        else:
+            auto_values = dict(chart_state.get("indicatorValues") or {})
 
         for ind_id in need_calc:
             try:
@@ -355,9 +394,42 @@ def _auto_calc_indicator_values(
 
         chart_state = {**chart_state, "indicatorValues": auto_values}
         if need_calc:
-            logger.info(f"自動計算指標值 (intent={_intents}): {need_calc}")
+            logger.info(f"自動計算指標值 (intent={_intents}, force={force_recalc}): {need_calc}")
     except Exception as e:
         logger.warning(f"自動計算指標值失敗: {e}")
+
+    # 注入自動掃描預警（含波動機率和依據）
+    try:
+        from app.core.auto_scanner import auto_scanner
+        import json as _json
+
+        active_alerts = auto_scanner.get_active_alerts(symbol)
+        if active_alerts:
+            enriched = []
+            for a in active_alerts[:5]:
+                item = {
+                    "symbol": a["symbol"],
+                    "alert_type": a["alert_type"],
+                    "direction": a["direction"],
+                    "confidence": a["confidence"],
+                    "move_probability": a.get("move_probability"),
+                    "created_at": a["created_at"],
+                    "expires_at": a["expires_at"],
+                }
+                # 從 trigger_conditions 解析 evidence_summary
+                tc = a.get("trigger_conditions")
+                if tc and isinstance(tc, str):
+                    try:
+                        parsed = _json.loads(tc)
+                        prob = parsed.get("probability")
+                        if prob:
+                            item["evidence_summary"] = prob.get("evidence_summary")
+                    except (ValueError, AttributeError):
+                        pass
+                enriched.append(item)
+            chart_state["active_alerts"] = enriched
+    except Exception:
+        pass
 
     return chart_state
 
@@ -779,11 +851,80 @@ def _format_function_results(function_calls: list[dict], exec_result: dict) -> s
                             parts.append(f"  {b['range']}: {b['prob_pct']}% ({b['hit']}/{b['count']})")
                         elif b.get("note"):
                             parts.append(f"  {b['range']}: {b['note']} ({b['count']})")
+            elif fname == "run_quant_research":
+                parts.append(f"📊 量化研究報告 — {r.get('symbol', '?')} {r.get('timeframe', '?')}（{r.get('total_bars', 0)} 根 K 線）")
+                if r.get("notice"):
+                    parts.append(f"⚠️ {r['notice']}")
+                # 因子 IC 排名
+                ranking = r.get("factor_ic", {}).get("ranking", [])
+                if ranking:
+                    parts.append(f"\n因子預測力排名（共分析 {r.get('factor_ic', {}).get('total_analyzed', 0)} 個因子）:")
+                    for f in ranking[:8]:
+                        parts.append(f"  {f.get('factor', '?')}: IC={f.get('best_ic', '?')} [{f.get('power', '?')}] decay={f.get('decay_trend', '?')}")
+                # 因子相關性
+                corr = r.get("factor_correlation", {})
+                if corr.get("recommendation"):
+                    parts.append(f"因子相關性: {corr['recommendation']}")
+                # 回測
+                bt = r.get("backtest", {})
+                if bt and not bt.get("error"):
+                    parts.append("\n回測績效:")
+                    parts.append(f"  勝率: {bt.get('win_rate', '?')}% | PF: {bt.get('profit_factor', '?')} | 交易: {bt.get('total_trades', '?')} 筆")
+                    parts.append(f"  Sharpe: {bt.get('sharpe_ratio', '?')} | Sortino: {bt.get('sortino_ratio', '?')}")
+                    parts.append(f"  Expectancy: {bt.get('expectancy_pct', '?')}% | 最大回撤: {bt.get('max_drawdown_pct', '?')}%")
+                    parts.append(f"  總報酬: {bt.get('total_return_pct', '?')}%")
+                # Monte Carlo
+                mc = r.get("monte_carlo", {})
+                if mc and mc.get("status") == "success":
+                    parts.append("\nMonte Carlo 模擬:")
+                    parts.append(f"  獲利機率: {mc.get('profit_probability', '?')}% | 破產風險: {mc.get('ruin_probability', '?')}%")
+                    parts.append(f"  報酬分布 p25={mc.get('p25_return', '?')}% / p50={mc.get('p50_return', '?')}% / p75={mc.get('p75_return', '?')}%")
+                    parts.append(f"  策略穩健: {'✅' if mc.get('strategy_robust') else '❌'}")
+                # Walk Forward
+                wf = r.get("walk_forward", {})
+                if wf:
+                    assessment = wf.get("assessment", {})
+                    summary = wf.get("summary", {})
+                    if assessment:
+                        parts.append("\nWalk Forward 驗證:")
+                        parts.append(f"  Alpha: {'✅' if assessment.get('has_alpha') else '❌'} | 評分: {assessment.get('score', '?')}/100")
+                        if summary:
+                            parts.append(f"  視窗數: {summary.get('n_windows', '?')} | OOS 平均報酬: {summary.get('avg_oos_return', '?')}%")
+                # 倉位建議
+                pos = r.get("position_sizing", {})
+                if pos and not pos.get("error"):
+                    parts.append(f"\n倉位建議: {pos.get('recommendation', pos.get('summary', '?'))}")
+                # 結論
+                conclusion = r.get("conclusion", {})
+                if conclusion:
+                    parts.append(f"\n結論（綜合評分: {conclusion.get('score', '?')}/100）:")
+                    for finding in conclusion.get("findings", []):
+                        parts.append(f"  {finding}")
+                    if conclusion.get("recommendation"):
+                        parts.append(f"  建議: {conclusion['recommendation']}")
+            elif fname == "run_backtest":
+                m = r.get("metrics", {})
+                parts.append(f"回測結果（{r.get('total_trades', 0)} 筆交易）:")
+                parts.append(f"  勝率: {m.get('win_rate', '?')}% | PF: {m.get('profit_factor', '?')} | Sharpe: {m.get('sharpe_ratio', '?')}")
+                parts.append(f"  總報酬: {m.get('total_return_pct', '?')}% | 最大回撤: {m.get('max_drawdown_pct', '?')}%")
+                parts.append(f"  Sortino: {m.get('sortino_ratio', '?')} | Expectancy: {m.get('expectancy_pct', '?')}%")
+                if r.get("warnings"):
+                    parts.append(f"  ⚠️ 警告: {'; '.join(r['warnings'][:3])}")
+            elif fname == "compare_strategies":
+                parts.append(f"策略比較（{r.get('symbol', '?')} {r.get('timeframe', '?')}，共 {r.get('total_strategies', 0)} 個策略）:")
+                for c in r.get("comparison", []):
+                    if c.get("status") == "success":
+                        m = c.get("metrics", {})
+                        rank = c.get("rank", "?")
+                        parts.append(f"  #{rank} {c['name']}: 勝率={m.get('win_rate', '?')}% PF={m.get('profit_factor', '?')} "
+                                     f"Sharpe={m.get('sharpe_ratio', '?')} 報酬={m.get('total_return_pct', '?')}%")
+                    else:
+                        parts.append(f"  ✗ {c.get('name', '?')}: {c.get('message', '錯誤')}")
             else:
                 # 通用格式化（截斷過長內容）
                 result_str = json.dumps(r, ensure_ascii=False)
-                if len(result_str) > 500:
-                    result_str = result_str[:500] + "..."
+                if len(result_str) > 3000:
+                    result_str = result_str[:3000] + "..."
                 parts.append(f"結果: {result_str}")
         parts.append("")
 
@@ -1033,6 +1174,49 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
             timeframe=chart_timeframe,
         )
 
+        # ★ 預回測：分析意圖時，在 LLM 呼叫前先跑多空策略回測，注入上下文
+        _PRE_BT_INTENTS = {"analysis", "deep_analysis", "deep_phase1", "deep_phase2"}
+        if (_intents & _PRE_BT_INTENTS) and chart_symbol:
+            yield _sse_event("status", {"message": "正在預跑策略回測..."})
+            _pre_bt_calls = [{
+                "name": "compare_strategies",
+                "arguments": {
+                    "symbol": chart_symbol,
+                    "timeframe": chart_timeframe_ctx or "1d",
+                    "strategies": [
+                        {"name": "趨勢跟蹤(多)", "entry_conditions": ["ema_20 > ema_60", "rsi_14 > 50"], "exit_conditions": ["ema_20 < ema_60"], "direction": "long", "stop_loss_pct": 5.0, "take_profit_pct": 15.0},
+                        {"name": "均值回歸(多)", "entry_conditions": ["rsi_14 < 30", "bb_position < 0.2"], "exit_conditions": ["rsi_14 > 70"], "direction": "long", "stop_loss_pct": 3.0, "take_profit_pct": 8.0},
+                        {"name": "動量突破(多)", "entry_conditions": ["close > bb_upper", "volume_ratio > 1.5"], "exit_conditions": ["rsi_14 > 80", "volume_ratio < 0.8"], "direction": "long", "stop_loss_pct": 4.0, "take_profit_pct": 12.0},
+                        {"name": "趨勢跟蹤(空)", "entry_conditions": ["ema_20 < ema_60", "rsi_14 < 50"], "exit_conditions": ["ema_20 > ema_60"], "direction": "short", "stop_loss_pct": 5.0, "take_profit_pct": 15.0},
+                        {"name": "均值回歸(空)", "entry_conditions": ["rsi_14 > 70", "bb_position > 0.8"], "exit_conditions": ["rsi_14 < 30"], "direction": "short", "stop_loss_pct": 3.0, "take_profit_pct": 8.0},
+                        {"name": "動量突破(空)", "entry_conditions": ["close < bb_lower", "volume_ratio > 1.5"], "exit_conditions": ["rsi_14 < 20", "volume_ratio < 0.8"], "direction": "short", "stop_loss_pct": 4.0, "take_profit_pct": 12.0},
+                    ],
+                },
+            }]
+            try:
+                _pre_bt_result = await execute_function_calls(_pre_bt_calls, chart_state=request.chart_state)
+                _pre_bt_summary = _format_function_results(_pre_bt_calls, _pre_bt_result)
+                if _pre_bt_summary:
+                    # 注入到 messages 的使用者訊息之前（倒數第一條是使用者訊息）
+                    messages.insert(-1, {
+                        "role": "user",
+                        "content": (
+                            "[系統預回測結果 — 必須參考]\n"
+                            "以下是系統自動對 6 種策略（做多 3 + 做空 3）執行的歷史回測結果。\n"
+                            "你在分析時必須參考這些數據，結論必須與回測結果一致。\n"
+                            "如果所有做多策略回測均虧損，不可建議做多；反之亦然。\n"
+                            "如果所有策略均虧損，結論必須為「觀望」或「僅適合小倉位試單」。\n\n"
+                            f"{_pre_bt_summary}"
+                        ),
+                    })
+                    messages.insert(-1, {
+                        "role": "assistant",
+                        "content": "已收到回測數據，我會根據回測結果調整分析方向。",
+                    })
+                    logger.info(f"預回測完成，已注入 {len(_pre_bt_summary)} 字元上下文")
+            except Exception as e:
+                logger.warning(f"預回測失敗（不影響分析）：{e}")
+
         yield _sse_event("status", {"message": "正在分析您的問題..."})
 
         try:
@@ -1060,32 +1244,87 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
 
             # 3. 如果 LLM 回傳了 function calls → 執行 → 二輪回應
             if response.function_calls:
-                # 先串流第一輪的文字（如果有，移除 KEY_INSIGHTS / PREDICTIONS + JSON 過濾）
+                # 第一輪有 function calls 時，不串流佔位文字給用戶
+                # （第二輪會根據 function 結果產生完整報告）
                 if response.message:
-                    display_msg = strip_system_distill(strip_predictions(strip_key_insights(response.message)))
-                    display_msg, _ = _extract_json_function_calls(display_msg)
                     if len(final_text) < _MAX_FINAL_TEXT:
                         final_text += response.message[:_MAX_FINAL_TEXT - len(final_text)]
-                    for chunk in _split_text_for_streaming(display_msg):
-                        yield _sse_event("token", {"content": chunk})
-                        await asyncio.sleep(0.02)
 
                 # 發送 function calls 事件
                 yield _sse_event("function", {"function_calls": response.function_calls})
                 yield _sse_event("status", {"message": "正在執行圖表操作..."})
 
-                # 執行 function calls（帶心跳，避免使用者以為當機）
+                # 執行 function calls（無超時限制，以進度百分比回報）
                 try:
+                    _fc_progress = ProgressTracker()
                     _fc_task = asyncio.create_task(execute_function_calls(
                         response.function_calls, chart_state=request.chart_state,
+                        progress=_fc_progress,
                     ))
                     _active_tasks.append(_fc_task)
                     _hb_sec = 0
+                    _last_pct = -1
                     while not _fc_task.done():
-                        await asyncio.sleep(3)
-                        _hb_sec += 3
-                        yield _sse_event("status", {"message": f"正在執行分析運算... ({_hb_sec}秒)"})
+                        await asyncio.sleep(2)
+                        _hb_sec += 2
+                        _pct = _fc_progress.percentage
+                        _status = _fc_progress.status_text
+                        # 只在進度有變化或每 6 秒發送一次心跳
+                        if _pct != _last_pct or _hb_sec % 6 == 0:
+                            _last_pct = _pct
+                            yield _sse_event("progress", {
+                                "percentage": _pct,
+                                "completed": _fc_progress.completed,
+                                "total": _fc_progress.total,
+                                "current_task": _fc_progress.current_task,
+                                "message": _status,
+                            })
+                            yield _sse_event("status", {"message": _status})
                     exec_result = _fc_task.result()
+                    yield _sse_event("progress", {
+                        "percentage": 100,
+                        "completed": _fc_progress.total,
+                        "total": _fc_progress.total,
+                        "current_task": "",
+                        "message": "分析完成 (100%)",
+                    })
+                    logger.info(f"Function call 執行完成 ({_hb_sec}s)，結果數: {len(exec_result.get('results', []))}")
+
+                    # （預回測已在 LLM 呼叫前完成，此處不再需要事後回測注入）
+                    _llm_called_funcs = {fc.get("name") for fc in response.function_calls} if response.function_calls else set()
+
+                    # ★ 分析意圖必要函式補齊：檢查 prompt 要求的函式是否已執行
+                    _REQUIRED_ANALYSIS_FUNCS: dict[str, list[str]] = {
+                        "analysis": ["generate_scenarios", "detect_smc_structure"],
+                        "deep_phase1": ["generate_scenarios", "detect_smc_structure"],
+                        "deep_analysis": ["generate_scenarios", "detect_smc_structure"],
+                        "deep_phase2": ["compare_strategies", "scan_conditional_probability"],
+                        "deep_phase3": ["run_quant_research"],
+                    }
+                    _already_executed = _llm_called_funcs | {
+                        r.get("function") for r in exec_result.get("results", []) if isinstance(r, dict)
+                    }
+                    _missing_funcs: list[str] = []
+                    for _ik, _rf in _REQUIRED_ANALYSIS_FUNCS.items():
+                        if _ik in _intents:
+                            _missing_funcs = [fn for fn in _rf if fn not in _already_executed]
+                            break
+
+                    if _missing_funcs and chart_symbol:
+                        logger.info(f"自動補齊缺少的分析函式：{_missing_funcs}")
+                        yield _sse_event("status", {"message": f"正在補充分析數據..."})
+                        _fill_calls = [
+                            {"name": fn, "arguments": {"symbol": chart_symbol, "timeframe": chart_timeframe_ctx or "1d"}}
+                            for fn in _missing_funcs
+                        ]
+                        try:
+                            _fill_result = await execute_function_calls(_fill_calls, chart_state=request.chart_state)
+                            if "results" in _fill_result and _fill_result["results"]:
+                                _fitems = _fill_result["results"] if isinstance(_fill_result["results"], list) else [_fill_result["results"]]
+                                exec_result.setdefault("results", []).extend(_fitems)
+                            logger.info(f"補齊完成：{_missing_funcs}")
+                        except Exception as e:
+                            logger.warning(f"補齊分析函式失敗（不影響主流程）：{e}")
 
                     chart_updates = exec_result.get("chart_updates")
                     if chart_updates:
@@ -1111,6 +1350,12 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                     })
                     if response.message:
                         round2_messages.append({"role": "assistant", "content": response.message})
+                    _r2_func_rule = (
+                        "你可以繼續呼叫分析函式補充數據（如 detect_smc_structure、generate_scenarios 等），"
+                        "也可以呼叫 annotate_chart、draw_pattern、manage_indicator 進行圖表繪製。"
+                    ) if (_intents & {"analysis", "deep_analysis", "deep_phase1", "deep_phase2", "deep_phase3"}) else (
+                        "除了 annotate_chart、draw_pattern 和 manage_indicator 以外，不要呼叫其他函式。"
+                    )
                     round2_messages.append({
                         "role": "user",
                         "content": (
@@ -1119,11 +1364,11 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                             f"請根據以上數據結果回答使用者的問題。\n"
                             f"如果使用者要求在圖表上畫線、標記、型態等，你**必須**呼叫 annotate_chart 或 draw_pattern 函式來繪製。\n"
                             f"你也可以呼叫 manage_indicator 來添加分析中用到的指標到圖表上。\n"
-                            f"除了 annotate_chart、draw_pattern 和 manage_indicator 以外，不要呼叫其他函式。"
+                            f"{_r2_func_rule}"
                         ),
                     })
 
-                    # 第二輪 LLM 呼叫（帶心跳，沿用同一份動態 prompt）
+                    # 第二輪 LLM 呼叫（無超時限制，心跳保持連線）
                     yield _sse_event("status", {"message": "正在整理分析結果..."})
                     _r2_task = asyncio.create_task(adapter.chat(
                         round2_messages, chart_state=request.chart_state,
@@ -1135,8 +1380,9 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                     while not _r2_task.done():
                         await asyncio.sleep(3)
                         _hb_sec += 3
-                        yield _sse_event("status", {"message": f"正在整理分析結果... ({_hb_sec}秒)"})
+                        yield _sse_event("status", {"message": f"AI 正在撰寫分析報告... ({_hb_sec}秒)"})
                     response2 = _r2_task.result()
+                    logger.info(f"第二輪 LLM 完成 ({_hb_sec}s)，文字長度={len(response2.message or '')}")
 
                     if response2.usage and total_usage:
                         total_usage.prompt_tokens += response2.usage.prompt_tokens
@@ -1157,12 +1403,16 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                             if fc.get("name") == "manage_indicator":
                                 _r2_indicator_ids.add(fc.get("arguments", {}).get("indicator_id", ""))
 
+                        _r2_draw_funcs = {"annotate_chart", "draw_pattern", "manage_indicator"}
+                        _is_analysis_intent = bool(_intents & {"analysis", "deep_analysis", "deep_phase1", "deep_phase2", "deep_phase3"})
                         allowed_r2 = [
                             fc for fc in response2.function_calls
-                            if fc.get("name") in ("annotate_chart", "draw_pattern", "manage_indicator")
+                            if fc.get("name") in _r2_draw_funcs or _is_analysis_intent
                         ]
                         if allowed_r2:
-                            yield _sse_event("status", {"message": "正在更新圖表..."})
+                            _r2_has_analysis = any(fc.get("name") not in _r2_draw_funcs for fc in allowed_r2)
+                            _r2_status = "正在補充分析數據並更新圖表..." if _r2_has_analysis else "正在更新圖表..."
+                            yield _sse_event("status", {"message": _r2_status})
                             try:
                                 exec_result2 = await execute_function_calls(
                                     allowed_r2, chart_state=request.chart_state,
@@ -1179,6 +1429,16 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                                         parts.append(f"{_ind_count} 個指標")
                                     if parts:
                                         yield _sse_event("status", {"message": f"已添加 {'、'.join(parts)}"})
+                                # 如果第二輪有分析函式，將結果追加到摘要供第三輪使用
+                                if _r2_has_analysis and exec_result2.get("results"):
+                                    _r2_analysis_summary = _format_function_results(
+                                        [fc for fc in allowed_r2 if fc.get("name") not in _r2_draw_funcs],
+                                        exec_result2,
+                                    )
+                                    round2_messages.append({
+                                        "role": "user",
+                                        "content": f"[系統補充] 以下是你剛才補充呼叫的函式結果：\n\n{_r2_analysis_summary}\n\n請將這些數據整合到你的回覆中。",
+                                    })
                             except Exception as e2:
                                 logger.warning(f"第二輪 function call 執行失敗: {e2}")
 
@@ -1224,7 +1484,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                             await asyncio.sleep(3)
                             _hb_sec += 3
                             yield _sse_event("status", {
-                                "message": f"正在生成分析報告... ({_hb_sec}秒)"
+                                "message": f"AI 正在生成分析報告... ({_hb_sec}秒)"
                             })
                         response3 = _r3_task.result()
 
@@ -1296,9 +1556,14 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                             "content": "⚠️ AI 分析完成但未能產生文字報告，請嘗試重新提問。"
                         })
 
-                except Exception as e:
-                    logger.error(f"Function call 執行或二輪回應失敗: {e}")
-                    yield _sse_event("error", {"error": f"指令執行失敗: {str(e)}"})
+                except (Exception, asyncio.CancelledError) as e:
+                    import traceback
+                    logger.error(f"Function call 執行或二輪回應失敗: {e}\n{traceback.format_exc()}")
+                    err_msg = str(e) or "未知錯誤"
+                    yield _sse_event("token", {
+                        "content": f"\n\n⚠️ 分析報告產生失敗: {err_msg}\n請嘗試重新提問，若持續發生請檢查後端日誌。"
+                    })
+                    yield _sse_event("error", {"error": f"指令執行失敗: {err_msg}"})
 
             else:
                 # 沒有 function calls，直接串流文字（移除 KEY_INSIGHTS / PREDICTIONS）
@@ -1333,7 +1598,43 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                         yield _sse_event("token", {"content": chunk})
                         await asyncio.sleep(0.02)
 
-            # 4. token 用量 + 持久化記錄
+            # 4a. 三階段完整分析：程式化強制附加接續提示（不依賴 LLM）
+            _deep_reminder = ""
+            if "deep_phase1" in _intents or "deep_analysis" in _intents:
+                _deep_reminder = (
+                    "\n\n---\n"
+                    "📋 **完整分析進度：[1/3]**\n"
+                    "✅ 第一階段完成：市場環境 + 情境預測 + SMC 結構\n"
+                    "➡️ 輸入「**完整分析二**」→ 多策略回測驗證 + 條件機率掃描\n"
+                    "➡️ 輸入「**完整分析三**」→ 量化研究 + Monte Carlo + 倉位管理\n"
+                    "---"
+                )
+            elif "deep_phase2" in _intents:
+                _deep_reminder = (
+                    "\n\n---\n"
+                    "📋 **完整分析進度：[2/3]**\n"
+                    "✅ 第一階段：市場環境 + 情境預測 + SMC 結構\n"
+                    "✅ 第二階段完成：多策略回測 + 條件機率\n"
+                    "➡️ 輸入「**完整分析三**」→ 因子驗證 + Monte Carlo 壓力測試 + 倉位管理\n"
+                    "---"
+                )
+            elif "deep_phase3" in _intents:
+                _deep_reminder = (
+                    "\n\n---\n"
+                    "📋 **完整分析進度：[3/3] — 全部完成**\n"
+                    "✅ 第一階段：市場環境 + 情境預測 + SMC 結構\n"
+                    "✅ 第二階段：多策略回測 + 條件機率\n"
+                    "✅ 第三階段：量化研究 + Monte Carlo + 倉位管理\n"
+                    "---"
+                )
+            if _deep_reminder:
+                if "完整分析進度" not in final_text and "完整分析二" not in final_text:
+                    for chunk in _split_text_for_streaming(_deep_reminder):
+                        yield _sse_event("token", {"content": chunk})
+                        await asyncio.sleep(0.02)
+                    final_text += _deep_reminder
+
+            # 4b. token 用量 + 持久化記錄
             if total_usage:
                 usage_dict = total_usage.to_dict()
                 yield _sse_event("usage", {"usage": usage_dict})

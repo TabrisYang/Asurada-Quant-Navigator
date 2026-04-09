@@ -144,6 +144,9 @@ def build_features(
     )
 
     # ── 計算標籤：未來 N 根是否達到幅度門檻 ──
+    # 安全邊界：label 只看 [i+1, i+forward_period] 的價格變化，
+    # 而 window feature 最多用到 index i-1 的指標值（_build_window_features
+    # 取 raw_matrix[i-window:i]，即 i-window ~ i-1），不存在洩漏。
     y_full = np.full(n, np.nan)
     for i in range(n - forward_period):
         pct = (close[i + forward_period] - close[i]) / close[i] if close[i] != 0 else 0.0
@@ -153,10 +156,14 @@ def build_features(
             y_full[i] = 1.0 if pct >= target_threshold else 0.0
 
     # ── 過濾有效行 ──
+    # 雙重保障：排除最後 forward_period 行（label 區域不完整）和 window 暖機行
     valid_mask = (
         ~np.isnan(y_full)
         & ~np.any(np.isnan(window_features), axis=1)
     )
+    # 強制排除尾部，防止 partial forward window 洩漏
+    if forward_period > 0:
+        valid_mask[-(forward_period):] = False
 
     X = window_features[valid_mask]
     y = y_full[valid_mask]

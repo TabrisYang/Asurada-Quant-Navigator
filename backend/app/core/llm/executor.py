@@ -4,10 +4,58 @@
 返回前端需要的圖表更新指令。
 """
 
+import asyncio
 import re
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
+import numpy as np
+
 from loguru import logger
+
+
+# ── 進度追蹤器 ────────────────────────────────────────────
+
+# 函式中文顯示名稱
+_FUNC_DISPLAY_NAMES: dict[str, str] = {
+    "query_chart_data": "載入價格數據",
+    "manage_indicator": "設定指標",
+    "find_conditions": "條件掃描",
+    "annotate_chart": "圖表標記",
+    "draw_pattern": "繪製型態",
+    "generate_analysis": "文字分析",
+    "suggest_indicators": "指標建議",
+    "run_backtest": "策略回測",
+    "compare_strategies": "多策略比較",
+    "analyze_event_patterns": "事件型態分析",
+    "run_quant_research": "量化研究",
+    "optimize_indicator_params": "參數優化",
+    "scan_conditional_probability": "條件機率掃描",
+    "generate_scenarios": "情境預測",
+    "detect_smc_structure": "SMC 結構分析",
+}
+
+
+@dataclass
+class ProgressTracker:
+    """追蹤 function call 執行進度，供 SSE 心跳讀取"""
+    total: int = 0
+    completed: int = 0
+    current_task: str = ""
+    phase: str = "init"       # init → sequential → parallel → done
+
+    @property
+    def percentage(self) -> int:
+        if self.total == 0:
+            return 0
+        return min(int(self.completed / self.total * 100), 99)
+
+    @property
+    def status_text(self) -> str:
+        name = _FUNC_DISPLAY_NAMES.get(self.current_task, self.current_task)
+        if self.phase == "done":
+            return "分析完成 (100%)"
+        return f"[{self.completed}/{self.total}] {name}... ({self.percentage}%)"
 
 from app.core.indicators import registry
 from app.data.fetchers.crypto_engine import crypto_engine
@@ -78,9 +126,14 @@ def validate_function_call(func_name: str, args: dict) -> bool:
 async def execute_function_calls(
     function_calls: list[dict[str, Any]],
     chart_state: Optional[dict] = None,
+    progress: Optional[ProgressTracker] = None,
 ) -> dict[str, Any]:
     """
     執行 LLM 回傳的 function calls
+    重量級分析函式（回測、SMC、情境預測等）會並行執行以避免超時。
+
+    Args:
+        progress: 可選的進度追蹤器，供外部輪詢進度百分比
 
     Returns:
         {
@@ -88,30 +141,54 @@ async def execute_function_calls(
             "results": [...],        # 各函式的執行結果
         }
     """
-    chart_updates = {}
-    results = []
+    chart_updates: dict[str, Any] = {}
+    results: list[dict] = []
 
     # 從 chart_state 取得預設值
     default_symbol = (chart_state or {}).get("symbol", "BTC/USDT")
     default_timeframe = (chart_state or {}).get("timeframe", "1d")
 
+    # 可並行執行的重量級非同步函式
+    _PARALLEL_FUNCS = {
+        "run_backtest", "compare_strategies", "analyze_event_patterns",
+        "run_quant_research", "optimize_indicator_params",
+        "scan_conditional_probability", "generate_scenarios",
+        "detect_smc_structure",
+    }
+
+    # 分離：輕量同步/依序 vs 重量級可並行
+    sequential_calls = []
+    parallel_calls = []
     for fc in function_calls:
         name = fc.get("name", "")
-        args = fc.get("arguments", {})
-
-        if not validate_function_call(name, args):
+        if not validate_function_call(name, fc.get("arguments", {})):
             results.append({"function": name, "error": "未授權的函式呼叫"})
             continue
+        if name in _PARALLEL_FUNCS:
+            parallel_calls.append(fc)
+        else:
+            sequential_calls.append(fc)
 
+    # 初始化進度追蹤
+    _total = len(sequential_calls) + len(parallel_calls)
+    if progress is not None:
+        progress.total = _total
+        progress.completed = 0
+        progress.phase = "sequential" if sequential_calls else "parallel"
+
+    # --- Phase 1: 依序執行輕量函式 ---
+    for fc in sequential_calls:
+        name = fc["name"]
+        args = fc.get("arguments", {})
+        if progress is not None:
+            progress.current_task = name
         try:
             if name == "query_chart_data":
                 result = await _exec_query_chart(args, default_symbol, default_timeframe)
                 cu = result.get("chart_updates", {})
                 if not chart_updates.get("symbol"):
-                    # 第一次查詢：設定圖表幣對
                     chart_updates.update(cu)
                 else:
-                    # 多幣查詢：不覆蓋 symbol，避免圖表切換混亂
                     chart_updates.setdefault("multi_symbol_data", []).append(cu)
                 results.append({"function": name, "result": result})
 
@@ -142,45 +219,84 @@ async def execute_function_calls(
                 result = _exec_suggest_indicators(args)
                 results.append({"function": name, "result": result})
 
-            elif name == "run_backtest":
-                result = await _exec_backtest(args, default_symbol, default_timeframe)
-                if result.get("trade_annotations"):
-                    chart_updates.setdefault("annotations", []).extend(result["trade_annotations"])
-                results.append({"function": name, "result": result})
-
-            elif name == "compare_strategies":
-                result = await _exec_compare_strategies(args, default_symbol, default_timeframe)
-                results.append({"function": name, "result": result})
-
-            elif name == "analyze_event_patterns":
-                result = await _exec_analyze_event_patterns(args, default_symbol, default_timeframe)
-                if result.get("annotations"):
-                    chart_updates.setdefault("annotations", []).extend(result.pop("annotations"))
-                results.append({"function": name, "result": result})
-
-            elif name == "run_quant_research":
-                result = await _exec_quant_research(args, default_symbol, default_timeframe)
-                results.append({"function": name, "result": result})
-
-            elif name == "optimize_indicator_params":
-                result = await _exec_optimize_params(args, default_symbol, default_timeframe)
-                results.append({"function": name, "result": result})
-
-            elif name == "scan_conditional_probability":
-                result = await _exec_conditional_prob_scan(args, default_symbol, default_timeframe)
-                results.append({"function": name, "result": result})
-
-            elif name == "generate_scenarios":
-                result = await _exec_generate_scenarios(args, default_symbol, default_timeframe)
-                results.append({"function": name, "result": result})
-
-            elif name == "detect_smc_structure":
-                result = await _exec_detect_smc(args, default_symbol, default_timeframe)
-                results.append({"function": name, "result": result})
-
         except Exception as e:
             logger.error(f"執行 {name} 失敗: {e}")
             results.append({"function": name, "error": str(e)})
+        finally:
+            if progress is not None:
+                progress.completed += 1
+
+    # --- Phase 2: 並行執行重量級函式 ---
+    if parallel_calls:
+        if progress is not None:
+            progress.phase = "parallel"
+            # 顯示並行中最具代表性的任務名
+            progress.current_task = parallel_calls[0]["name"]
+
+        async def _run_one(fc: dict) -> dict:
+            """執行單一重量級函式，完成後更新進度"""
+            name = fc["name"]
+            args = fc.get("arguments", {})
+            try:
+                if name == "run_backtest":
+                    result = await _exec_backtest(args, default_symbol, default_timeframe)
+                    return {"function": name, "result": result}
+                elif name == "compare_strategies":
+                    result = await _exec_compare_strategies(args, default_symbol, default_timeframe)
+                    return {"function": name, "result": result}
+                elif name == "analyze_event_patterns":
+                    result = await _exec_analyze_event_patterns(args, default_symbol, default_timeframe)
+                    return {"function": name, "result": result}
+                elif name == "run_quant_research":
+                    result = await _exec_quant_research(args, default_symbol, default_timeframe)
+                    return {"function": name, "result": result}
+                elif name == "optimize_indicator_params":
+                    result = await _exec_optimize_params(args, default_symbol, default_timeframe)
+                    return {"function": name, "result": result}
+                elif name == "scan_conditional_probability":
+                    result = await _exec_conditional_prob_scan(args, default_symbol, default_timeframe)
+                    return {"function": name, "result": result}
+                elif name == "generate_scenarios":
+                    result = await _exec_generate_scenarios(args, default_symbol, default_timeframe)
+                    return {"function": name, "result": result}
+                elif name == "detect_smc_structure":
+                    result = await _exec_detect_smc(args, default_symbol, default_timeframe)
+                    return {"function": name, "result": result}
+                return {"function": name, "error": f"未知的並行函式: {name}"}
+            except Exception as e:
+                logger.error(f"執行 {name} 失敗: {e}")
+                return {"function": name, "error": str(e)}
+            finally:
+                if progress is not None:
+                    progress.completed += 1
+                    # 更新 current_task 為尚未完成的並行任務中第一個
+                    _remaining = [
+                        pc["name"] for pc in parallel_calls
+                        if pc["name"] != name
+                    ]
+                    if _remaining:
+                        progress.current_task = _remaining[0]
+
+        parallel_results = await asyncio.gather(
+            *[_run_one(fc) for fc in parallel_calls],
+            return_exceptions=False,
+        )
+
+        # 合併並行結果到 chart_updates 和 results
+        for pr in parallel_results:
+            results.append(pr)
+            r = pr.get("result", {})
+            if not isinstance(r, dict):
+                continue
+            fname = pr.get("function", "")
+            if fname == "run_backtest" and r.get("trade_annotations"):
+                chart_updates.setdefault("annotations", []).extend(r["trade_annotations"])
+            elif fname == "analyze_event_patterns" and r.get("annotations"):
+                chart_updates.setdefault("annotations", []).extend(r.pop("annotations"))
+
+    if progress is not None:
+        progress.phase = "done"
+        progress.completed = progress.total
 
     return {"chart_updates": chart_updates, "results": results}
 
@@ -201,8 +317,9 @@ async def _exec_query_chart(args: dict, default_symbol: str, default_tf: str) ->
         "chart_updates": {
             "symbol": symbol,
             "timeframe": timeframe,
-            "startDate": start,
-            "endDate": end,
+            # ★ 不回傳 startDate/endDate 給前端，避免 LLM 的查詢範圍
+            #   覆蓋前端圖表的日期設定，導致圖表只顯示部分數據。
+            #   前端圖表應始終顯示全量數據，LLM 的日期篩選僅用於本次分析。
             "dataLoaded": not df.empty,
             "dataPoints": len(df),
         }
@@ -534,13 +651,14 @@ async def _exec_compare_strategies(args: dict, default_symbol: str, default_tf: 
     end = args.get("end_date")
 
     _MIN_BARS = 60
+    _PREFER_MIN_BARS = 500
     df = _load_local_data(symbol, timeframe, start, end)
-    if len(df) < _MIN_BARS and (start or end):
+    if (start or end) and len(df) < _PREFER_MIN_BARS:
         df_full = _load_local_data(symbol, timeframe)
-        if len(df_full) >= _MIN_BARS:
+        if len(df_full) > len(df):
+            logger.info(f"策略比較 [{symbol}]: 指定範圍 {len(df)} 根不足建議量，擴大至全部（{len(df_full)} 根）")
             df = df_full
-            logger.info(f"策略比較 [{symbol}]: 指定日期範圍數據不足，已自動擴大至全部本地數據（{len(df)} 根）")
-    if df.empty:
+    if df.empty or len(df) < _MIN_BARS:
         return {"status": "error", "message": f"找不到 {symbol} {timeframe} 的本地數據，請先同步。"}
 
     comparison: list[dict] = []
@@ -597,13 +715,14 @@ async def _exec_backtest(args: dict, default_symbol: str, default_tf: str) -> di
     end = args.get("end_date")
 
     _MIN_BARS_BACKTEST = 60
+    _PREFER_MIN_BARS = 500
     df = _load_local_data(symbol, timeframe, start, end)
-    if len(df) < _MIN_BARS_BACKTEST and (start or end):
+    if (start or end) and len(df) < _PREFER_MIN_BARS:
         df_full = _load_local_data(symbol, timeframe)
-        if len(df_full) >= _MIN_BARS_BACKTEST:
+        if len(df_full) > len(df):
             df = df_full
             logger.info(
-                f"回測 [{symbol}]: 指定日期範圍數據不足，已自動擴大至全部本地數據（{len(df)} 根）"
+                f"回測 [{symbol}]: 指定範圍不足建議量，已自動擴大至全部本地數據（{len(df)} 根）"
             )
     if df.empty:
         return {"status": "error", "message": f"找不到 {symbol} {timeframe} 的本地數據，請先同步。"}
@@ -835,17 +954,21 @@ async def _exec_quant_research(args: dict, default_symbol: str, default_tf: str)
     leverage = args.get("leverage", 1.0)
 
     _MIN_BARS_RESEARCH = 100
-    df = _load_local_data(symbol, timeframe, start, end)
+    _MAX_BARS_NO_TRIM = 5000  # 日線級別不截斷，僅小時級別以下考慮
+    # 量化研究優先使用全部數據，確保統計顯著性
+    df_full = _load_local_data(symbol, timeframe)
     date_expanded = False
-    if len(df) < _MIN_BARS_RESEARCH and (start or end):
-        df_full = _load_local_data(symbol, timeframe)
-        if len(df_full) >= _MIN_BARS_RESEARCH:
+    if (start or end):
+        df = _load_local_data(symbol, timeframe, start, end)
+        # 只要全量數據不超過上限，就使用全量（LLM 常自作主張帶日期限制）
+        if len(df_full) <= _MAX_BARS_NO_TRIM and len(df_full) > len(df):
+            logger.info(
+                f"量化研究 [{symbol}]: 指定範圍 {len(df)} 根，全量 {len(df_full)} 根在合理範圍內，使用全量數據"
+            )
             df = df_full
             date_expanded = True
-            logger.info(
-                f"量化研究 [{symbol}]: 指定日期範圍數據不足（{len(_load_local_data(symbol, timeframe, start, end))} 根），"
-                f"已自動擴大至全部本地數據（{len(df)} 根）"
-            )
+    else:
+        df = df_full
     if df.empty or len(df) < _MIN_BARS_RESEARCH:
         return {"status": "error", "message": f"數據不足（{len(df)} 根 K 線），至少需要 {_MIN_BARS_RESEARCH} 根。請先同步更多歷史數據。"}
 
@@ -921,10 +1044,20 @@ async def _exec_quant_research(args: dict, default_symbol: str, default_tf: str)
             report["backtest"] = metrics
 
             # ── 4. Monte Carlo ──
-            if bt_result.trades and len(bt_result.trades) >= 3:
+            if bt_result.trades and len(bt_result.trades) >= 10:
                 logger.info(f"量化研究 [{symbol}]: Monte Carlo 模擬中...")
                 pnls = [t.pnl_pct for t in bt_result.trades]
-                mc = run_monte_carlo(pnls, n_simulations=1000)
+                # Regime labels: 用 ATR 中位數分高/低波動
+                atr_simple = (df["high"] - df["low"]).values
+                atr_median = float(np.median(atr_simple))
+                regime_per_bar = (atr_simple > atr_median).astype(int)
+                regime_labels = [
+                    int(regime_per_bar[t.entry_idx])
+                    for t in bt_result.trades
+                ]
+                mc = run_monte_carlo(
+                    pnls, n_simulations=1000, regime_labels=regime_labels,
+                )
                 report["monte_carlo"] = mc
 
             # ── 5. Walk Forward ──
@@ -945,7 +1078,7 @@ async def _exec_quant_research(args: dict, default_symbol: str, default_tf: str)
         except Exception as e:
             report["backtest"] = {"error": str(e)}
 
-    # ── 6. 動態倉位建議 ──
+    # ── 6. 動態倉位建議（MC 回饋調控 Kelly） ──
     logger.info(f"量化研究 [{symbol}]: 動態倉位計算中...")
     try:
         win_rate = report.get("backtest", {}).get("win_rate", 50) / 100
@@ -953,13 +1086,28 @@ async def _exec_quant_research(args: dict, default_symbol: str, default_tf: str)
         avg_loss = abs(report.get("backtest", {}).get("avg_loss_pct", 1.0))
         wl_ratio = avg_win / avg_loss if avg_loss > 0 else 1.5
 
+        # MC → Kelly cap: P5 最大回撤 > 30% 時按比例縮減
+        mc_kelly_cap = 1.0
+        mc_result = report.get("monte_carlo", {})
+        if mc_result.get("status") == "success":
+            mc_p5_dd = abs(mc_result.get("max_drawdown", {}).get("worst_5pct", 0))
+            if mc_p5_dd > 30:
+                mc_kelly_cap = 30.0 / mc_p5_dd
+
         pos = calculate_dynamic_positions(
             df, method="kelly_dynamic",
             win_rate=win_rate, avg_win_loss_ratio=wl_ratio,
+            kelly_fraction=0.25 * mc_kelly_cap,
         )
         report["position_sizing"] = {
             "summary": pos.get("summary"),
             "recommendation": pos.get("recommendation"),
+            "mc_adjustment": {
+                "kelly_cap_factor": round(mc_kelly_cap, 3),
+                "reason": f"MC P5 回撤 {mc_p5_dd:.1f}% 超過 30%，Kelly 縮減至 {mc_kelly_cap:.1%}"
+                if mc_kelly_cap < 1.0
+                else "無需調整",
+            },
         }
     except Exception as e:
         report["position_sizing"] = {"error": str(e)}
@@ -1006,6 +1154,8 @@ def _generate_conclusion(report: dict) -> dict:
 
     # Monte Carlo
     mc = report.get("monte_carlo", {})
+    if mc.get("confidence_level") == "low":
+        findings.append("⚠️ Monte Carlo 信心度偏低（交易筆數不足 30）")
     if mc.get("strategy_robust"):
         score += 10
         findings.append(f"✅ Monte Carlo 驗證通過（獲利機率 {mc.get('profit_probability', 0)}%）")
@@ -1015,6 +1165,16 @@ def _generate_conclusion(report: dict) -> dict:
     if mc.get("ruin_probability", 0) > 5:
         score -= 15
         findings.append(f"❌ 破產風險 {mc['ruin_probability']}%，建議降低槓桿")
+    # 壓力測試
+    stress = mc.get("stress_test", {})
+    if stress.get("ruin_probability", 0) > 10:
+        score -= 10
+        findings.append(f"❌ 壓力測試破產風險 {stress['ruin_probability']}%")
+    # 回撤機率
+    dd_probs = mc.get("drawdown_probabilities", {})
+    if dd_probs.get("exceed_50pct", 0) > 10:
+        score -= 5
+        findings.append(f"⚠️ 超過 50% 回撤的機率為 {dd_probs['exceed_50pct']}%")
 
     # Walk Forward
     wf = report.get("walk_forward", {})
@@ -1095,9 +1255,11 @@ async def _exec_conditional_prob_scan(args: dict, default_symbol: str, default_t
 
     df = _load_local_data(symbol, timeframe, start, end)
 
-    # 未指定日期範圍時，預設使用最近 120 根 K 線，確保分析反映近期市場狀態
-    if start is None and end is None and df is not None and len(df) > 120:
-        df = df.tail(120).copy()
+    # 使用全量歷史數據以提升統計顯著性；另外保留近期 15% 子集做對比
+    df_recent = None
+    if df is not None and len(df) > forward_bars + 60:
+        recent_bars = max(60, len(df) // 7)  # 約 15% 的數據，最少 60 根
+        df_recent = df.tail(recent_bars).copy()
 
     if df.empty or len(df) < forward_bars + 50:
         return {"status": "error", "message": f"數據不足（{len(df)} 根 K 線），至少需要 {forward_bars + 50} 根。"}
@@ -1187,6 +1349,43 @@ async def _exec_conditional_prob_scan(args: dict, default_symbol: str, default_t
     if not results_by_indicator:
         return {"status": "error", "message": "指定的指標無法計算或數據不足"}
 
+    # --- 近期對比（最近 120 根 K 線）---
+    recent_comparison: dict | None = None
+    if df_recent is not None and len(df_recent) >= forward_bars + 20:
+        rc_closes = df_recent["close"].values.astype(float)
+        rc_n = len(rc_closes)
+        rc_hit = np.zeros(rc_n, dtype=bool)
+        for i in range(rc_n - forward_bars):
+            pct = (rc_closes[i + forward_bars] - rc_closes[i]) / rc_closes[i] * 100
+            if direction == "up":
+                rc_hit[i] = pct >= target_pct
+            else:
+                rc_hit[i] = pct <= -target_pct
+        rc_valid = rc_n - forward_bars
+
+        recent_comparison = {"bars": len(df_recent), "indicators": {}}
+        for ind_id in indicator_ids:
+            try:
+                calc = registry.calculate(ind_id, df_recent)
+                if not calc:
+                    continue
+            except Exception:
+                continue
+            for series_name, values in calc.items():
+                key = f"{ind_id}_{series_name}" if series_name != ind_id else ind_id
+                if key not in results_by_indicator:
+                    continue
+                arr = np.array([float(v) if v is not None else np.nan for v in values], dtype=float)
+                valid_mask = ~np.isnan(arr[:rc_valid])
+                if valid_mask.sum() < 10:
+                    continue
+                rc_baseline = float(rc_hit[:rc_valid][valid_mask].sum()) / valid_mask.sum() * 100
+                recent_comparison["indicators"][key] = {
+                    "recent_baseline_prob_pct": round(rc_baseline, 1),
+                    "full_baseline_prob_pct": results_by_indicator[key]["baseline_prob_pct"],
+                    "samples": int(valid_mask.sum()),
+                }
+
     overall_best = max(
         results_by_indicator.values(),
         key=lambda x: x["best_prob_pct"],
@@ -1194,7 +1393,7 @@ async def _exec_conditional_prob_scan(args: dict, default_symbol: str, default_t
 
     dir_label = f"上漲≥{target_pct}%" if direction == "up" else f"下跌≥{target_pct}%"
 
-    return {
+    result = {
         "status": "success",
         "symbol": symbol,
         "timeframe": timeframe,
@@ -1214,6 +1413,9 @@ async def _exec_conditional_prob_scan(args: dict, default_symbol: str, default_t
         },
         "warning": "條件機率不代表因果關係，高機率區間可能樣本較少。建議搭配其他分析交叉驗證。",
     }
+    if recent_comparison:
+        result["recent_comparison"] = recent_comparison
+    return result
 
 
 async def _exec_generate_scenarios(args: dict, default_symbol: str, default_tf: str) -> dict:

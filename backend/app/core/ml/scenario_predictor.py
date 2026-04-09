@@ -243,6 +243,7 @@ def _collect_historical_similarity(df: pd.DataFrame, lookback: int = 20, n_simil
     """歷史相似度分析 — 找出近期走勢最相似的歷史片段，統計後續走勢
 
     使用最近 lookback 根 K 線的報酬率序列做相似度匹配。
+    加入 ADX Regime 過濾：跳過市場結構差異過大的歷史片段。
 
     Returns:
         {
@@ -258,6 +259,24 @@ def _collect_historical_similarity(df: pd.DataFrame, lookback: int = 20, n_simil
     # 計算報酬率序列
     returns = np.diff(closes) / closes[:-1]
 
+    # 計算 ADX 用於 regime 過濾（避免牛市形態套到熊市）
+    adx_values = None
+    _ADX_REGIME_TOLERANCE = 15  # ADX 差距超過此值視為不同 regime
+    try:
+        adx_result = registry.calculate("adx", df)
+        if adx_result and "adx" in adx_result:
+            adx_raw = adx_result["adx"]
+            adx_values = np.array([v if v is not None else np.nan for v in adx_raw])
+    except Exception:
+        pass
+
+    current_adx = None
+    if adx_values is not None and len(adx_values) > 0:
+        recent_adx = adx_values[-5:]
+        valid_adx = recent_adx[~np.isnan(recent_adx)]
+        if len(valid_adx) > 0:
+            current_adx = float(np.mean(valid_adx))
+
     # 目前模式（最近 lookback 根）
     current_pattern = returns[-lookback:]
     current_norm = (current_pattern - np.mean(current_pattern))
@@ -272,6 +291,12 @@ def _collect_historical_similarity(df: pd.DataFrame, lookback: int = 20, n_simil
     # 從 lookback 開始，到倒數 lookback+forward_period 結束
     search_end = len(returns) - lookback - forward_period
     for i in range(lookback, search_end):
+        # Regime 過濾：ADX 差距太大則跳過
+        if current_adx is not None and adx_values is not None and i < len(adx_values):
+            hist_adx = adx_values[i]
+            if not np.isnan(hist_adx) and abs(hist_adx - current_adx) > _ADX_REGIME_TOLERANCE:
+                continue
+
         hist_pattern = returns[i - lookback:i]
         hist_norm = (hist_pattern - np.mean(hist_pattern))
         hist_std = np.std(hist_norm)
@@ -579,12 +604,24 @@ class ScenarioPredictor:
         weights["regime"] = 0.15
         scores["regime"] = regime["bullish_score"]
 
-        # 歸一化權重（排除不可用的來源）
+        # 智慧權重重分配：不可用來源的權重按優先順序分配給其他來源
+        # （避免均分導致低可靠來源權重膨脹）
+        missing_weight = 0.0
+        if weights["ml"] == 0:
+            missing_weight += 0.35  # ML 的基礎權重
+        if weights["historical"] == 0:
+            missing_weight += 0.25
+
+        if missing_weight > 0:
+            # 將缺失權重按比例分配：技術指標 60%、市場結構 40%
+            weights["technical"] += missing_weight * 0.6
+            weights["regime"] += missing_weight * 0.4
+
         active_total = sum(w for w in weights.values() if w > 0)
         if active_total > 0:
             norm_weights = {k: v / active_total for k, v in weights.items()}
         else:
-            norm_weights = {"technical": 0.5, "regime": 0.5, "ml": 0.0, "historical": 0.0}
+            norm_weights = {"technical": 0.6, "regime": 0.4, "ml": 0.0, "historical": 0.0}
 
         # 加權平均
         bullish_prob = sum(scores[k] * norm_weights[k] for k in scores)

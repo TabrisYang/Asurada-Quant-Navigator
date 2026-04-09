@@ -9,6 +9,7 @@ import { useChartStore } from './stores/chartStore';
 import { calculateIndicator } from './services/api';
 
 // Lazy load 重量級元件（Code Splitting）
+const AlertPanel = lazy(() => import('./components/AlertPanel/AlertPanel'));
 const ChartView = lazy(() => import('./components/ChartView/ChartView'));
 const ChatInterface = lazy(() => import('./components/ChatInterface/ChatInterface'));
 const IndicatorPanel = lazy(() => import('./components/IndicatorPanel/IndicatorPanel'));
@@ -190,8 +191,13 @@ function App() {
           </div>
         )}
 
-        {/* 中間：K 線圖表 */}
+        {/* 中間：預警 + K 線圖表 */}
         <div data-guide="chart" className="flex-1 flex flex-col overflow-hidden">
+          <ErrorBoundary name="預警面板">
+            <Suspense fallback={null}>
+              <AlertPanel />
+            </Suspense>
+          </ErrorBoundary>
           <ErrorBoundary name="K 線圖表">
             <Suspense fallback={<LoadingSkeleton name="K 線圖表" />}>
               <ChartView />

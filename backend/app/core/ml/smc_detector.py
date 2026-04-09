@@ -31,8 +31,8 @@ from app.core.indicators import registry
 
 # ─── 常量 ────────────────────────────────────────
 
-# 信心計分表（硬編碼，不依賴 LLM）
-CONFIDENCE_WEIGHTS = {
+# 信心計分表（基礎權重，會根據 ADX regime 動態調整）
+_BASE_CONFIDENCE_WEIGHTS = {
     "mtf_alignment":       +15,   # HTF/LTF 方向一致
     "volume_confirm":      +10,   # 關鍵事件成交量確認
     "fvg_support":         +10,   # 有 FVG 支持入場
@@ -44,6 +44,37 @@ CONFIDENCE_WEIGHTS = {
     "no_fvg":               -5,   # 缺乏 FVG
     "in_premium_for_buy":  -15,   # 在溢價區做多
 }
+
+# 向後相容：預設使用基礎權重
+CONFIDENCE_WEIGHTS = dict(_BASE_CONFIDENCE_WEIGHTS)
+
+
+def get_regime_adjusted_weights(adx_value: float | None) -> dict[str, int]:
+    """根據 ADX 動態調整 SMC 信心權重。
+
+    趨勢市（ADX > 25）：BOS 更可靠，FVG 權重提高
+    震盪市（ADX <= 25）：Equal levels / premium-discount 更重要，BOS 降權
+    """
+    w = dict(_BASE_CONFIDENCE_WEIGHTS)
+    if adx_value is None:
+        return w
+
+    if adx_value > 25:
+        # 趨勢市：結構突破和量能確認更可靠
+        w["bos_confirm"] = +15
+        w["volume_confirm"] = +12
+        w["fvg_support"] = +12
+        w["mtf_alignment"] = +18
+        w["against_htf"] = -25  # 逆勢更危險
+    else:
+        # 震盪市：BOS 常假突破，premium/discount 更有意義
+        w["bos_confirm"] = +5
+        w["premium_discount_ok"] = +20
+        w["sweep_before_entry"] = +15  # Sweep 後反轉在震盪市更常見
+        w["against_htf"] = -10  # HTF 方向在震盪市不那麼重要
+        w["fvg_support"] = +8
+
+    return w
 
 # HTF 自動推斷表
 _HTF_MAP = {
@@ -621,48 +652,50 @@ def _build_confidence(
     fvg_zones: list[dict],
     premium_discount: str,
     bias: str,
+    adx_value: float | None = None,
 ) -> tuple[int, dict]:
-    """固定計分表計算信心分數"""
+    """根據 ADX regime 動態調整的信心計分"""
+    weights = get_regime_adjusted_weights(adx_value)
     breakdown: dict[str, int] = {}
     base = 50
 
     # MTF 共振
     if mtf_aligned:
-        breakdown["+MTF共振"] = CONFIDENCE_WEIGHTS["mtf_alignment"]
+        breakdown["+MTF共振"] = weights["mtf_alignment"]
     elif trend_ltf != trend_htf and trend_htf != "ranging":
-        breakdown["-逆HTF方向"] = CONFIDENCE_WEIGHTS["against_htf"]
+        breakdown["-逆HTF方向"] = weights["against_htf"]
 
     # BOS 確認
     valid_bos = [b for b in bos_points if not b.get("filtered")]
     if valid_bos:
-        breakdown["+BOS確認"] = CONFIDENCE_WEIGHTS["bos_confirm"]
+        breakdown["+BOS確認"] = weights["bos_confirm"]
 
     # 成交量確認
     valid_sweeps = [s for s in sweep_events if not s.get("filtered")]
     if valid_sweeps:
-        breakdown["+成交量確認"] = CONFIDENCE_WEIGHTS["volume_confirm"]
-        breakdown["+Sweep確認"] = CONFIDENCE_WEIGHTS["sweep_before_entry"]
+        breakdown["+成交量確認"] = weights["volume_confirm"]
+        breakdown["+Sweep確認"] = weights["sweep_before_entry"]
     else:
         low_vol_events = [s for s in sweep_events if s.get("filtered")]
         if low_vol_events:
-            breakdown["-成交量不足"] = CONFIDENCE_WEIGHTS["low_volume"]
+            breakdown["-成交量不足"] = weights["low_volume"]
 
     # FVG 支持
     unfilled_fvg = [f for f in fvg_zones if not f.get("filled")]
     if unfilled_fvg:
-        breakdown["+FVG支持"] = CONFIDENCE_WEIGHTS["fvg_support"]
+        breakdown["+FVG支持"] = weights["fvg_support"]
     else:
-        breakdown["-無FVG"] = CONFIDENCE_WEIGHTS["no_fvg"]
+        breakdown["-無FVG"] = weights["no_fvg"]
 
     # Premium/Discount 適當性
     if bias == "BUY" and premium_discount == "discount":
-        breakdown["+折價區做多"] = CONFIDENCE_WEIGHTS["premium_discount_ok"]
+        breakdown["+折價區做多"] = weights["premium_discount_ok"]
     elif bias == "SELL" and premium_discount == "premium":
-        breakdown["+溢價區做空"] = CONFIDENCE_WEIGHTS["premium_discount_ok"]
+        breakdown["+溢價區做空"] = weights["premium_discount_ok"]
     elif bias == "BUY" and premium_discount == "premium":
-        breakdown["-溢價區做多"] = CONFIDENCE_WEIGHTS["in_premium_for_buy"]
+        breakdown["-溢價區做多"] = weights["in_premium_for_buy"]
     elif bias == "SELL" and premium_discount == "discount":
-        breakdown["-折價區做空"] = CONFIDENCE_WEIGHTS["in_premium_for_buy"]
+        breakdown["-折價區做空"] = weights["in_premium_for_buy"]
 
     total = base + sum(breakdown.values())
     total = max(0, min(100, total))
@@ -914,11 +947,21 @@ class SMCDetector:
                 reward = abs(take_profit - entry)
                 rr_ratio = round(reward / risk, 2) if risk > 0 else None
 
-        # ── Step 11: 信心評分 ──
+        # ── Step 11: 信心評分（ADX regime 動態調整） ──
+        _adx_val = None
+        try:
+            _adx_data = registry.calculate("adx", df)
+            if _adx_data and "adx" in _adx_data:
+                _adx_vals = [v for v in _adx_data["adx"] if v is not None]
+                if _adx_vals:
+                    _adx_val = _adx_vals[-1]
+        except Exception:
+            pass
+
         confidence, conf_breakdown = _build_confidence(
             trend_ltf, trend_htf, mtf_aligned,
             bos_points, sweep_events, fvg_zones,
-            premium_discount, bias,
+            premium_discount, bias, _adx_val,
         )
 
         # ── Step 12: ML Features ──

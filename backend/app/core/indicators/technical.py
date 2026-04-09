@@ -183,8 +183,10 @@ def calc_rsi(df: pd.DataFrame, params: dict) -> dict[str, list]:
 
     rs = avg_gain / avg_loss.replace(0, np.nan)
     rsi = 100 - (100 / (1 + rs))
-    # avg_loss 全為 0 → rs=inf → RSI 應為 100（純漲）；avg_gain 全為 0 → RSI 應為 0（純跌）
-    rsi = rsi.replace([np.inf, -np.inf], np.nan).fillna(100.0)
+    # avg_loss 全為 0 → rs=inf → RSI 應為 100（純漲）
+    # 但暖機期的 NaN 不應填 100，改用 clip 確保範圍正確
+    rsi = rsi.replace([np.inf], 100.0).replace([-np.inf], 0.0)
+    rsi = rsi.clip(0, 100)
 
     return {"RSI": _safe_list(rsi)}
 

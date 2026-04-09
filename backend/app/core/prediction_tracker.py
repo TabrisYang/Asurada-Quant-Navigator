@@ -9,6 +9,7 @@
 import math
 import re
 import sqlite3
+import threading
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -95,12 +96,15 @@ def strip_predictions(text: str) -> str:
 def _parse_timeframe_hours(tf: str) -> int:
     """將 '48h', '7d' 等轉為小時數。"""
     tf = tf.lower().strip()
-    if tf.endswith("h"):
-        return int(tf[:-1])
-    elif tf.endswith("d"):
-        return int(tf[:-1]) * 24
-    elif tf.endswith("w"):
-        return int(tf[:-1]) * 168
+    try:
+        if tf.endswith("h"):
+            return int(tf[:-1])
+        elif tf.endswith("d"):
+            return int(tf[:-1]) * 24
+        elif tf.endswith("w"):
+            return int(tf[:-1]) * 168
+    except (ValueError, IndexError):
+        logger.warning(f"無法解析 timeframe '{tf}'，使用預設 72h")
     return 72  # default 3 days
 
 
@@ -109,6 +113,7 @@ class PredictionTracker:
 
     def __init__(self):
         self._conn: Optional[sqlite3.Connection] = None
+        self._lock = threading.Lock()
 
     def _ensure_db(self):
         if self._conn:
@@ -175,6 +180,18 @@ class PredictionTracker:
             )
         except sqlite3.OperationalError:
             pass  # 欄位已存在
+
+        # 覆盤報告紀錄表
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS review_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                symbol TEXT,
+                report TEXT NOT NULL,
+                summary_json TEXT,
+                is_auto INTEGER DEFAULT 0
+            )
+        """)
         self._conn.commit()
 
     def store(
@@ -185,70 +202,72 @@ class PredictionTracker:
         source_question: str = "",
     ) -> int:
         """存入一筆預測，返回 id。"""
-        self._ensure_db()
-        now = taipei_now()
-        hours = prediction["timeframe_hours"]
-        expires = now + timedelta(hours=hours)
+        with self._lock:
+            self._ensure_db()
+            now = taipei_now()
+            hours = prediction["timeframe_hours"]
+            expires = now + timedelta(hours=hours)
 
-        # 多時間框架矛盾檢測
-        existing = self.get_active(symbol)
-        conflicts = [
-            p for p in existing
-            if p["direction"] != prediction["direction"]
-        ]
-        if conflicts:
-            conflict_info = ", ".join(
-                f"{p['timeframe']} {p['direction']}" for p in conflicts
-            )
-            logger.warning(
-                f"預測方向衝突: 新={prediction['direction']} {timeframe} "
-                f"vs 現有={conflict_info}（{symbol}）"
-            )
+            # 多時間框架矛盾檢測（直接查詢，避免遞迴鎖）
+            rows = self._conn.execute(
+                "SELECT timeframe, direction FROM predictions WHERE status='active' AND symbol=?",
+                (symbol,),
+            ).fetchall()
+            conflicts = [r for r in rows if r["direction"] != prediction["direction"]]
+            if conflicts:
+                conflict_info = ", ".join(
+                    f"{r['timeframe']} {r['direction']}" for r in conflicts
+                )
+                logger.warning(
+                    f"預測方向衝突: 新={prediction['direction']} {timeframe} "
+                    f"vs 現有={conflict_info}（{symbol}）"
+                )
 
-        cursor = self._conn.execute(
-            """INSERT INTO predictions
-               (symbol, timeframe, direction, entry_price, target_price, stop_price,
-                timeframe_hours, confidence, regime, indicators, invalidation,
-                source_question, created_at, expires_at, status)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')""",
-            (
-                symbol, timeframe,
-                prediction["direction"],
-                prediction["entry_price"],
-                prediction["target_price"],
-                prediction["stop_price"],
-                hours,
-                prediction["confidence"],
-                prediction["regime"],
-                prediction["indicators"],
-                prediction.get("invalidation", ""),
-                source_question,
-                now.isoformat(),
-                expires.isoformat(),
-            ),
-        )
-        self._conn.commit()
-        pid = cursor.lastrowid
-        logger.info(
-            f"預測已儲存 #{pid}: {symbol} {prediction['direction']} "
-            f"entry={prediction['entry_price']} target={prediction['target_price']} "
-            f"stop={prediction['stop_price']} expires={expires.isoformat()}"
-        )
-        return pid
+            cursor = self._conn.execute(
+                """INSERT INTO predictions
+                   (symbol, timeframe, direction, entry_price, target_price, stop_price,
+                    timeframe_hours, confidence, regime, indicators, invalidation,
+                    source_question, created_at, expires_at, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')""",
+                (
+                    symbol, timeframe,
+                    prediction["direction"],
+                    prediction["entry_price"],
+                    prediction["target_price"],
+                    prediction["stop_price"],
+                    hours,
+                    prediction["confidence"],
+                    prediction["regime"],
+                    prediction["indicators"],
+                    prediction.get("invalidation", ""),
+                    source_question,
+                    now.isoformat(),
+                    expires.isoformat(),
+                ),
+            )
+            self._conn.commit()
+            pid = cursor.lastrowid
+            logger.info(
+                f"預測已儲存 #{pid}: {symbol} {prediction['direction']} "
+                f"entry={prediction['entry_price']} target={prediction['target_price']} "
+                f"stop={prediction['stop_price']} expires={expires.isoformat()}"
+            )
+            return pid
 
     def get_active(self, symbol: Optional[str] = None) -> list[dict]:
         """取得尚未驗證的預測。"""
-        self._ensure_db()
-        if symbol:
-            rows = self._conn.execute(
-                "SELECT * FROM predictions WHERE status='active' AND symbol=? ORDER BY created_at DESC",
-                (symbol,),
-            ).fetchall()
-        else:
-            rows = self._conn.execute(
-                "SELECT * FROM predictions WHERE status='active' ORDER BY created_at DESC",
-            ).fetchall()
-        return [dict(r) for r in rows]
+        with self._lock:
+            self._ensure_db()
+            if symbol:
+                rows = self._conn.execute(
+                    "SELECT * FROM predictions WHERE status='active' AND symbol=? ORDER BY created_at DESC",
+                    (symbol,),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT * FROM predictions WHERE status='active' ORDER BY created_at DESC",
+                ).fetchall()
+            return [dict(r) for r in rows]
 
     def get_validated(
         self,
@@ -257,19 +276,20 @@ class PredictionTracker:
         limit: int = 50,
     ) -> list[dict]:
         """取得已驗證的預測（支援按 symbol 和 regime 過濾）。"""
-        self._ensure_db()
-        query = "SELECT * FROM predictions WHERE status != 'active'"
-        params = []
-        if symbol:
-            query += " AND symbol = ?"
-            params.append(symbol)
-        if regime:
-            query += " AND regime = ?"
-            params.append(regime)
-        query += " ORDER BY created_at DESC LIMIT ?"
-        params.append(limit)
-        rows = self._conn.execute(query, params).fetchall()
-        return [dict(r) for r in rows]
+        with self._lock:
+            self._ensure_db()
+            query = "SELECT * FROM predictions WHERE status != 'active'"
+            params = []
+            if symbol:
+                query += " AND symbol = ?"
+                params.append(symbol)
+            if regime:
+                query += " AND regime = ?"
+                params.append(regime)
+            query += " ORDER BY created_at DESC LIMIT ?"
+            params.append(limit)
+            rows = self._conn.execute(query, params).fetchall()
+            return [dict(r) for r in rows]
 
     def update_validation(
         self,
@@ -285,38 +305,40 @@ class PredictionTracker:
 
         hit_at: 實際觸及目標/止損的 K 線時間。若未提供則用當前時間。
         """
-        self._ensure_db()
-        validated_time = hit_at if hit_at else taipei_now().isoformat()
-        self._conn.execute(
-            """UPDATE predictions
-               SET status=?, validated_at=?, actual_outcome_pct=?,
-                   max_favorable_pct=?, max_adverse_pct=?, validation_note=?
-               WHERE id=?""",
-            (
-                status,
-                validated_time,
-                actual_outcome_pct,
-                max_favorable_pct,
-                max_adverse_pct,
-                note,
-                pred_id,
-            ),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._ensure_db()
+            validated_time = hit_at if hit_at else taipei_now().isoformat()
+            self._conn.execute(
+                """UPDATE predictions
+                   SET status=?, validated_at=?, actual_outcome_pct=?,
+                       max_favorable_pct=?, max_adverse_pct=?, validation_note=?
+                   WHERE id=?""",
+                (
+                    status,
+                    validated_time,
+                    actual_outcome_pct,
+                    max_favorable_pct,
+                    max_adverse_pct,
+                    note,
+                    pred_id,
+                ),
+            )
+            self._conn.commit()
 
     def clear_all(self, symbol: Optional[str] = None) -> int:
         """清除所有預測紀錄。若提供 symbol 則只清除該幣對。"""
-        self._ensure_db()
-        if symbol:
-            cursor = self._conn.execute(
-                "DELETE FROM predictions WHERE symbol = ?", (symbol,),
-            )
-        else:
-            cursor = self._conn.execute("DELETE FROM predictions")
-        self._conn.commit()
-        count = cursor.rowcount
-        logger.info(f"已清除 {count} 筆預測紀錄" + (f"（{symbol}）" if symbol else ""))
-        return count
+        with self._lock:
+            self._ensure_db()
+            if symbol:
+                cursor = self._conn.execute(
+                    "DELETE FROM predictions WHERE symbol = ?", (symbol,),
+                )
+            else:
+                cursor = self._conn.execute("DELETE FROM predictions")
+            self._conn.commit()
+            count = cursor.rowcount
+            logger.info(f"已清除 {count} 筆預測紀錄" + (f"（{symbol}）" if symbol else ""))
+            return count
 
     def get_stats(
         self,
@@ -325,6 +347,15 @@ class PredictionTracker:
         days: int = 90,
     ) -> dict:
         """計算預測績效統計（帶時間衰減權重）。"""
+        with self._lock:
+            return self._get_stats_unlocked(symbol, regime, days)
+
+    def _get_stats_unlocked(
+        self,
+        symbol: Optional[str] = None,
+        regime: Optional[str] = None,
+        days: int = 90,
+    ) -> dict:
         self._ensure_db()
         cutoff = (taipei_now() - timedelta(days=days)).isoformat()
         query = "SELECT * FROM predictions WHERE status != 'active' AND created_at > ?"
@@ -354,7 +385,10 @@ class PredictionTracker:
         confidence_hits = {"high": [0, 0], "medium": [0, 0], "low": [0, 0]}
 
         for p in preds:
-            days_ago = (now - datetime.fromisoformat(p["created_at"])).days
+            created = datetime.fromisoformat(p["created_at"])
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=now.tzinfo)
+            days_ago = (now - created).days
             weight = math.exp(-decay_lambda * days_ago)
 
             total_w += weight
@@ -386,7 +420,8 @@ class PredictionTracker:
                     confidence_hits[conf][0] += 1
 
         win_rate = hit_target_w / total_w if total_w > 0 else 0
-        outcomes_arr = np.array(outcomes) if outcomes else np.array([0])
+        has_outcomes = len(outcomes) > 0
+        outcomes_arr = np.array(outcomes) if has_outcomes else np.array([0.0])
 
         # indicator win rates (≥1 sample, low-sample marked)
         indicator_stats = {}
@@ -413,10 +448,10 @@ class PredictionTracker:
             "hit_target": sum(1 for p in preds if p["status"] == "hit_target"),
             "hit_stop": sum(1 for p in preds if p["status"] == "hit_stop"),
             "expired": sum(1 for p in preds if p["status"] == "expired"),
-            "avg_outcome_pct": round(float(np.mean(outcomes_arr)), 2),
-            "median_outcome_pct": round(float(np.median(outcomes_arr)), 2),
-            "best_outcome_pct": round(float(np.max(outcomes_arr)), 2),
-            "worst_outcome_pct": round(float(np.min(outcomes_arr)), 2),
+            "avg_outcome_pct": round(float(np.mean(outcomes_arr)), 2) if has_outcomes else None,
+            "median_outcome_pct": round(float(np.median(outcomes_arr)), 2) if has_outcomes else None,
+            "best_outcome_pct": round(float(np.max(outcomes_arr)), 2) if has_outcomes else None,
+            "worst_outcome_pct": round(float(np.min(outcomes_arr)), 2) if has_outcomes else None,
             "indicator_performance": indicator_stats,
             "confidence_calibration": conf_calibration,
             "decay_halflife_days": 35,
@@ -428,78 +463,81 @@ class PredictionTracker:
         self, symbol: Optional[str] = None, days: int = 90,
     ) -> dict[str, dict]:
         """取得多/空方向各自的勝率與樣本數。"""
-        self._ensure_db()
-        cutoff = (taipei_now() - timedelta(days=days)).isoformat()
-        query = "SELECT direction, status FROM predictions WHERE status != 'active' AND created_at > ?"
-        params: list = [cutoff]
-        if symbol:
-            query += " AND symbol = ?"
-            params.append(symbol)
+        with self._lock:
+            self._ensure_db()
+            cutoff = (taipei_now() - timedelta(days=days)).isoformat()
+            query = "SELECT direction, status FROM predictions WHERE status != 'active' AND created_at > ?"
+            params: list = [cutoff]
+            if symbol:
+                query += " AND symbol = ?"
+                params.append(symbol)
 
-        rows = self._conn.execute(query, params).fetchall()
-        result: dict[str, dict] = {}
-        for d in ("long", "short"):
-            dir_rows = [r for r in rows if r["direction"] == d]
-            total = len(dir_rows)
-            if total == 0:
-                continue
-            wins = sum(1 for r in dir_rows if r["status"] == "hit_target")
-            result[d] = {
-                "win_rate": round(wins / total * 100, 1),
-                "samples": total,
-            }
-        return result
+            rows = self._conn.execute(query, params).fetchall()
+            result: dict[str, dict] = {}
+            for d in ("long", "short"):
+                dir_rows = [r for r in rows if r["direction"] == d]
+                total = len(dir_rows)
+                if total == 0:
+                    continue
+                wins = sum(1 for r in dir_rows if r["status"] == "hit_target")
+                result[d] = {
+                    "win_rate": round(wins / total * 100, 1),
+                    "samples": total,
+                }
+            return result
 
     def get_recent_streak(
         self, symbol: Optional[str] = None, n: int = 10,
     ) -> dict:
-        """取得最近 N 筆預測的連勝/連敗資訊。"""
-        self._ensure_db()
-        query = (
-            "SELECT status FROM predictions "
-            "WHERE status != 'active'"
-        )
-        params: list = []
-        if symbol:
-            query += " AND symbol = ?"
-            params.append(symbol)
-        query += " ORDER BY created_at DESC LIMIT ?"
-        params.append(n)
+        """取得最近 N 筆預測的連勝/連敗資訊（expired 不算勝敗，跳過）。"""
+        with self._lock:
+            self._ensure_db()
+            query = (
+                "SELECT status FROM predictions "
+                "WHERE status IN ('hit_target', 'hit_stop')"
+            )
+            params: list = []
+            if symbol:
+                query += " AND symbol = ?"
+                params.append(symbol)
+            query += " ORDER BY created_at DESC LIMIT ?"
+            params.append(n)
 
-        rows = self._conn.execute(query, params).fetchall()
-        if not rows:
-            return {"total": 0}
+            rows = self._conn.execute(query, params).fetchall()
+            if not rows:
+                return {"total": 0, "current_streak": 0, "streak_type": None}
 
-        statuses = [r["status"] for r in rows]
-        recent_wins = sum(1 for s in statuses if s == "hit_target")
-        recent_losses = sum(1 for s in statuses if s == "hit_stop")
+            statuses = [r["status"] for r in rows]
+            recent_wins = sum(1 for s in statuses if s == "hit_target")
+            recent_losses = sum(1 for s in statuses if s == "hit_stop")
 
-        current_streak = 0
-        streak_type = statuses[0] if statuses else None
-        for s in statuses:
-            if s == streak_type:
-                current_streak += 1
-            else:
-                break
+            current_streak = 0
+            streak_type = statuses[0] if statuses else None
+            for s in statuses:
+                if s == streak_type:
+                    current_streak += 1
+                else:
+                    break
 
-        return {
-            "total": len(statuses),
-            "recent_wins": recent_wins,
-            "recent_losses": recent_losses,
-            "current_streak": current_streak,
-            "streak_type": streak_type,
-        }
+            return {
+                "total": len(statuses),
+                "recent_wins": recent_wins,
+                "recent_losses": recent_losses,
+                "current_streak": current_streak,
+                "streak_type": streak_type,
+            }
 
     # ─── 策略日誌 / 覆盤 ──────────────────
 
     def update_note(self, pred_id: int, note: str):
         """更新預測的使用者筆記"""
-        self._ensure_db()
-        self._conn.execute(
-            "UPDATE predictions SET notes = ? WHERE id = ?",
-            (note, pred_id),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._ensure_db()
+            self._conn.execute(
+                "UPDATE predictions SET notes = ? WHERE id = ?",
+                (note, pred_id),
+            )
+            self._conn.commit()
 
     def get_review_data(
         self,
@@ -508,36 +546,84 @@ class PredictionTracker:
         symbol: Optional[str] = None,
     ) -> dict:
         """取得覆盤所需的資料（某時間範圍內的所有已驗證預測）"""
-        self._ensure_db()
-        query = "SELECT * FROM predictions WHERE status != 'active'"
-        params: list = []
-        if start_date:
-            query += " AND created_at >= ?"
-            params.append(start_date)
-        if end_date:
-            query += " AND created_at <= ?"
-            params.append(end_date)
-        if symbol:
-            query += " AND symbol = ?"
-            params.append(symbol)
-        query += " ORDER BY created_at DESC"
-        rows = self._conn.execute(query, params).fetchall()
-        predictions = [dict(r) for r in rows]
+        with self._lock:
+            self._ensure_db()
+            query = "SELECT * FROM predictions WHERE status != 'active'"
+            params: list = []
+            if start_date:
+                query += " AND created_at >= ?"
+                params.append(start_date)
+            if end_date:
+                query += " AND created_at <= ?"
+                params.append(end_date)
+            if symbol:
+                query += " AND symbol = ?"
+                params.append(symbol)
+            query += " ORDER BY created_at DESC"
+            rows = self._conn.execute(query, params).fetchall()
+            predictions = [dict(r) for r in rows]
 
-        total = len(predictions)
-        wins = sum(1 for p in predictions if p["status"] == "hit_target")
-        losses = sum(1 for p in predictions if p["status"] == "hit_stop")
+            total = len(predictions)
+            wins = sum(1 for p in predictions if p["status"] == "hit_target")
+            losses = sum(1 for p in predictions if p["status"] == "hit_stop")
 
-        return {
-            "predictions": predictions,
-            "summary": {
-                "total": total,
-                "wins": wins,
-                "losses": losses,
-                "expired": total - wins - losses,
-                "win_rate": round(wins / total * 100, 1) if total > 0 else 0,
-            },
-        }
+            return {
+                "predictions": predictions,
+                "summary": {
+                    "total": total,
+                    "wins": wins,
+                    "losses": losses,
+                    "expired": total - wins - losses,
+                    "win_rate": round(wins / total * 100, 1) if total > 0 else 0,
+                },
+            }
+
+    # ─── 覆盤報告紀錄 ──────────────────
+
+    def save_review(
+        self,
+        report: str,
+        symbol: Optional[str] = None,
+        summary: Optional[dict] = None,
+        is_auto: bool = False,
+    ) -> int:
+        """儲存覆盤報告，返回 id。"""
+        import json as _json
+        with self._lock:
+            self._ensure_db()
+            now = taipei_now().isoformat()
+            cursor = self._conn.execute(
+                "INSERT INTO review_log (created_at, symbol, report, summary_json, is_auto) VALUES (?, ?, ?, ?, ?)",
+                (now, symbol or "", report, _json.dumps(summary or {}, ensure_ascii=False), 1 if is_auto else 0),
+            )
+            self._conn.commit()
+            rid = cursor.lastrowid
+            logger.info(f"覆盤報告已儲存 #{rid} (auto={is_auto})")
+            return rid
+
+    def get_last_review_time(self) -> Optional[datetime]:
+        """取得最近一次自動覆盤的時間。"""
+        with self._lock:
+            self._ensure_db()
+            row = self._conn.execute(
+                "SELECT created_at FROM review_log WHERE is_auto=1 ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+            if not row:
+                return None
+            dt = datetime.fromisoformat(row["created_at"])
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=taipei_now().tzinfo)
+            return dt
+
+    def get_reviews(self, limit: int = 10) -> list[dict]:
+        """取得歷史覆盤報告列表。"""
+        with self._lock:
+            self._ensure_db()
+            rows = self._conn.execute(
+                "SELECT id, created_at, symbol, report, summary_json, is_auto FROM review_log ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [dict(r) for r in rows]
 
 
 prediction_tracker = PredictionTracker()

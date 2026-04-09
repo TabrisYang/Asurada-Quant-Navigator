@@ -125,6 +125,13 @@ async def recalculate_adjustments(
     return {"status": "success", "result": result}
 
 
+@router.get("/reviews")
+async def get_review_history(limit: int = Query(10, ge=1, le=50)):
+    """取得歷史覆盤報告列表"""
+    reviews = prediction_tracker.get_reviews(limit=limit)
+    return {"status": "success", "reviews": reviews, "count": len(reviews)}
+
+
 @router.post("/review")
 async def generate_review(body: ReviewRequest):
     """AI 生成覆盤報告
@@ -218,6 +225,11 @@ async def generate_review(body: ReviewRequest):
         except Exception as e:
             logger.warning(f"覆盤後自動調整失敗: {e}")
 
+        # 儲存報告到 review_log
+        prediction_tracker.save_review(
+            report=report, symbol=body.symbol, summary=data["summary"], is_auto=False,
+        )
+
         return {
             "status": "success",
             "report": report,
@@ -227,6 +239,9 @@ async def generate_review(body: ReviewRequest):
         logger.error(f"覆盤報告生成失敗: {e}")
         # Fallback：生成模板報告（無需 LLM）
         report = _generate_template_report(data)
+        prediction_tracker.save_review(
+            report=report, symbol=body.symbol, summary=data["summary"], is_auto=False,
+        )
         return {
             "status": "success",
             "report": report,

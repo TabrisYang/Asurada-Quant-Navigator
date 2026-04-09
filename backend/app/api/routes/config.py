@@ -393,9 +393,21 @@ async def delete_strategy(strategy_id: str):
 _SYSTEM_SETTINGS_FILE = Path(_app_settings.db_path) / "system_settings.json"
 
 
+_SCAN_SETTINGS_DEFAULTS = {
+    "scan_enabled": True,
+    "scan_symbols": [
+        "BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT",
+        "ADA/USDT", "AVAX/USDT", "LINK/USDT", "DOT/USDT", "MATIC/USDT",
+    ],
+    "scan_timeframe": "4h",
+    "scan_interval_hours": 4,
+    "move_threshold_pct": 3.0,
+}
+
+
 def load_system_settings() -> dict:
     """讀取系統通用設定（外部模組可直接呼叫）"""
-    defaults = {"teaching_mode": False}
+    defaults = {"teaching_mode": False, **_SCAN_SETTINGS_DEFAULTS}
     if _SYSTEM_SETTINGS_FILE.exists():
         try:
             with open(_SYSTEM_SETTINGS_FILE) as f:
@@ -440,11 +452,104 @@ async def clear_session_cache():
 
 @router.put("/system-settings")
 async def update_system_settings(body: dict):
-    """更新系統通用設定"""
+    """更新系統通用設定（含掃描設定）"""
     current = load_system_settings()
+
     if "teaching_mode" in body:
         current["teaching_mode"] = bool(body["teaching_mode"])
+
+    # 掃描設定
+    if "scan_enabled" in body:
+        current["scan_enabled"] = bool(body["scan_enabled"])
+    if "scan_symbols" in body:
+        symbols = body["scan_symbols"]
+        if isinstance(symbols, list) and len(symbols) <= 30:
+            current["scan_symbols"] = [s.strip() for s in symbols if isinstance(s, str) and s.strip()]
+    if "scan_timeframe" in body:
+        tf = body["scan_timeframe"]
+        if tf in ("15m", "1h", "4h", "1d", "1w"):
+            current["scan_timeframe"] = tf
+    if "scan_interval_hours" in body:
+        interval = body["scan_interval_hours"]
+        if isinstance(interval, (int, float)) and 1 <= interval <= 24:
+            # CPU 保護：幣種多時強制最低間隔
+            n_symbols = len(current.get("scan_symbols", []))
+            min_interval = 2 if n_symbols > 20 else 1
+            current["scan_interval_hours"] = max(int(interval), min_interval)
+    if "move_threshold_pct" in body:
+        threshold = body["move_threshold_pct"]
+        if isinstance(threshold, (int, float)) and 1.0 <= threshold <= 20.0:
+            current["move_threshold_pct"] = float(threshold)
+
     _SYSTEM_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(_SYSTEM_SETTINGS_FILE, "w") as f:
         json.dump(current, f, ensure_ascii=False)
+
+    # 掃描設定變更 → 即時重啟掃描任務
+    scan_keys = {"scan_enabled", "scan_symbols", "scan_timeframe", "scan_interval_hours", "move_threshold_pct"}
+    if scan_keys & body.keys():
+        _restart_scan_task()
+
     return {"status": "ok", "settings": current}
+
+
+def _restart_scan_task():
+    """取消舊的掃描任務並立即重建，使設定即時生效。"""
+    import asyncio
+    try:
+        from app.main import app_state
+        old_task = app_state.get("scan_task")
+        factory = app_state.get("scan_factory")
+        if old_task and factory:
+            old_task.cancel()
+            new_task = asyncio.create_task(factory())
+            app_state["scan_task"] = new_task
+            logger.info("[掃描設定] 已重啟掃描任務，新設定即時生效")
+    except Exception as e:
+        logger.warning(f"[掃描設定] 重啟掃描任務失敗: {e}")
+
+
+# ─── 掃描器校準 API ──────────────────────────
+
+
+@router.get("/scanner-calibration")
+async def get_scanner_calibration():
+    """取得掃描器自適應校準狀態。"""
+    from app.core.scanner_calibrator import scanner_calibrator
+    cal = scanner_calibrator.get_active_calibrations()
+    return {"status": "ok", "calibration": cal}
+
+
+@router.post("/scanner-calibration/reset")
+async def reset_scanner_calibration():
+    """重置所有校準值為預設。"""
+    from app.core.scanner_calibrator import scanner_calibrator
+    scanner_calibrator.reset_all()
+    return {"status": "ok", "message": "已重置為預設值"}
+
+
+@router.put("/scanner-calibration/{cal_id}/override")
+async def override_calibration(cal_id: int, body: dict):
+    """用戶手動覆寫校準值。"""
+    from app.core.scanner_calibrator import scanner_calibrator
+    result = scanner_calibrator.set_override(cal_id, body.get("value"))
+    return {"status": "ok", "calibration": result}
+
+
+# ─── 全量歷史特徵分析 API ──────────────────────────
+
+
+@router.get("/feature-profiles")
+async def get_feature_profiles():
+    """取得全量歷史特徵分析結果。"""
+    from app.core.scanner_feature_profiler import scanner_feature_profiler
+    profiles = scanner_feature_profiler.get_feature_profiles()
+    return {"status": "ok", "profiles": profiles}
+
+
+@router.post("/feature-profiles/recompute")
+async def recompute_feature_profiles():
+    """重新計算全量歷史特徵分析。"""
+    from app.core.scanner_feature_profiler import scanner_feature_profiler
+    result = scanner_feature_profiler.compute_all_profiles()
+    return {"status": "ok", "result": result}

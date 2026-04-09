@@ -181,7 +181,11 @@ class TwStockEngine:
             if df is None or df.empty:
                 return None
 
-            # yfinance 回傳的 DataFrame: index=Date, columns=Open,High,Low,Close,Volume
+            # yfinance 新版回傳 MultiIndex columns，如 ('Close', '^TWII')
+            # 壓平為單層：'Close', 'High', ...
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+
             df = df.reset_index()
             return df
         except Exception as e:
