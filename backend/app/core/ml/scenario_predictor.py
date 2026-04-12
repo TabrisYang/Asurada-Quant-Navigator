@@ -239,7 +239,7 @@ def _collect_ml_signals(df: pd.DataFrame, symbol: str, timeframe: str) -> dict:
         return {"bullish_score": 0.5, "available": False, "reliability": "none", "details": {}}
 
 
-def _collect_historical_similarity(df: pd.DataFrame, lookback: int = 20, n_similar: int = 30) -> dict:
+def _collect_historical_similarity(df: pd.DataFrame, lookback: int = 20, n_similar: int = 30, forward_bars: int = 5) -> dict:
     """歷史相似度分析 — 找出近期走勢最相似的歷史片段，統計後續走勢
 
     使用最近 lookback 根 K 線的報酬率序列做相似度匹配。
@@ -285,8 +285,8 @@ def _collect_historical_similarity(df: pd.DataFrame, lookback: int = 20, n_simil
         return {"bullish_score": 0.5, "available": False, "stats": {}}
     current_norm = current_norm / current_std
 
-    # 在歷史中搜尋相似片段
-    forward_period = 5
+    # 在歷史中搜尋相似片段（使用傳入的 forward_bars）
+    forward_period = forward_bars
     similarities = []
     # 從 lookback 開始，到倒數 lookback+forward_period 結束
     search_end = len(returns) - lookback - forward_period
@@ -572,10 +572,11 @@ class ScenarioPredictor:
         logger.info(f"情境預測 [{symbol} {timeframe}]: 開始收集多源訊號...")
         tech = _collect_technical_signals(df)
         ml = _collect_ml_signals(df, symbol, timeframe)
-        hist = _collect_historical_similarity(df)
+        hist = _collect_historical_similarity(df, forward_bars=forward_bars)
         regime = _detect_market_regime(df)
 
-        # Step 2: 加權計算整體看漲機率
+        # Step 2: 動態加權計算整體看漲機率
+        # 基礎權重（會根據歷史驗證結果動態調整）
         weights = {}
         scores = {}
 
@@ -604,16 +605,25 @@ class ScenarioPredictor:
         weights["regime"] = 0.15
         scores["regime"] = regime["bullish_score"]
 
+        # 動態權重調整：根據歷史驗證結果調整各信號源權重
+        # 有正向預測差距的來源加權，負向的降權
+        if hasattr(self, '_source_adjustments') and self._source_adjustments:
+            for source, adj in self._source_adjustments.items():
+                if source in weights and weights[source] > 0:
+                    # 預測差距 > 0.05 加 20% 權重；< -0.05 降 30% 權重
+                    if adj > 0.05:
+                        weights[source] *= 1.2
+                    elif adj < -0.05:
+                        weights[source] *= 0.7
+
         # 智慧權重重分配：不可用來源的權重按優先順序分配給其他來源
-        # （避免均分導致低可靠來源權重膨脹）
         missing_weight = 0.0
         if weights["ml"] == 0:
-            missing_weight += 0.35  # ML 的基礎權重
+            missing_weight += 0.35
         if weights["historical"] == 0:
             missing_weight += 0.25
 
         if missing_weight > 0:
-            # 將缺失權重按比例分配：技術指標 60%、市場結構 40%
             weights["technical"] += missing_weight * 0.6
             weights["regime"] += missing_weight * 0.4
 
@@ -687,6 +697,148 @@ class ScenarioPredictor:
             signal_sources=signal_sources,
             generated_at=taipei_now().strftime("%Y-%m-%d %H:%M:%S"),
             data_points=len(df),
+        )
+
+
+    # ═══════════════════════════════════════════════════
+    #  情境預測回測驗證
+    # ═══════════════════════════════════════════════════
+
+    def __init__(self):
+        self._prediction_log: list[dict] = []  # 歷史預測記錄
+        self._source_adjustments: dict[str, float] = {}  # 信號源權重調整
+
+    def validate_past_predictions(
+        self,
+        df: pd.DataFrame,
+        symbol: str,
+        timeframe: str,
+        forward_bars: int = 5,
+        n_eval_points: int = 20,
+    ) -> dict:
+        """回測驗證情境預測的準確率。
+
+        在歷史數據上每隔一段距離取一個評估點，
+        模擬當時的預測，然後比對實際走勢。
+
+        Args:
+            df: 完整 OHLCV DataFrame
+            symbol: 交易對
+            timeframe: 時間週期
+            forward_bars: 預測前瞻期
+            n_eval_points: 評估點數量
+
+        Returns:
+            dict: 包含方向準確率、機率校準、各信號源貢獻
+        """
+        min_history = 100 + forward_bars
+        if len(df) < min_history + n_eval_points:
+            return {"status": "error", "message": f"數據不足（{len(df)} 根），至少需要 {min_history + n_eval_points} 根"}
+
+        # 在歷史上均勻取評估點
+        total = len(df)
+        step = max(1, (total - min_history) // n_eval_points)
+        eval_indices = list(range(min_history, total - forward_bars, step))[:n_eval_points]
+
+        results = []
+        for idx in eval_indices:
+            # 用 idx 之前的數據做預測
+            df_slice = df.iloc[:idx].copy().reset_index(drop=True)
+            try:
+                prediction = self.predict_scenarios(df_slice, symbol, timeframe, forward_bars)
+            except Exception:
+                continue
+
+            # 取預測後 forward_bars 的實際走勢
+            actual_close = float(df["close"].values[idx + forward_bars - 1])
+            entry_price = float(df["close"].values[idx - 1])
+            actual_return = (actual_close / entry_price - 1) * 100
+
+            # 判斷實際方向
+            if actual_return > 0.5:
+                actual_direction = "bullish"
+            elif actual_return < -0.5:
+                actual_direction = "bearish"
+            else:
+                actual_direction = "neutral"
+
+            # 預測的最高機率情境
+            best_scenario = max(prediction.scenarios, key=lambda s: s.probability)
+            predicted_direction = best_scenario.direction
+
+            # 記錄
+            bullish_prob = prediction.signal_sources.get("composite_bullish", 0.5)
+            results.append({
+                "idx": idx,
+                "predicted_direction": predicted_direction,
+                "predicted_prob": best_scenario.probability,
+                "bullish_prob": bullish_prob,
+                "actual_direction": actual_direction,
+                "actual_return_pct": round(actual_return, 2),
+                "direction_correct": predicted_direction == actual_direction,
+                "signal_weights": prediction.signal_sources.get("weights", {}),
+                "signal_scores": prediction.signal_sources.get("scores", {}),
+            })
+
+        if not results:
+            return {"status": "error", "message": "無法產生有效的評估結果"}
+
+        # 統計
+        n_total = len(results)
+        n_correct = sum(1 for r in results if r["direction_correct"])
+        direction_accuracy = round(n_correct / n_total * 100, 1)
+
+        # 機率校準：高信心預測是否真的更準
+        high_conf = [r for r in results if r["predicted_prob"] > 0.5]
+        low_conf = [r for r in results if r["predicted_prob"] <= 0.5]
+        high_conf_acc = round(sum(1 for r in high_conf if r["direction_correct"]) / max(len(high_conf), 1) * 100, 1)
+        low_conf_acc = round(sum(1 for r in low_conf if r["direction_correct"]) / max(len(low_conf), 1) * 100, 1)
+
+        # 各信號源在正確預測時的平均分數 vs 錯誤預測
+        source_analysis = {}
+        for source in ["technical", "ml", "historical", "regime"]:
+            correct_scores = [r["signal_scores"].get(source, 0.5) for r in results if r["direction_correct"]]
+            wrong_scores = [r["signal_scores"].get(source, 0.5) for r in results if not r["direction_correct"]]
+            if correct_scores and wrong_scores:
+                source_analysis[source] = {
+                    "avg_when_correct": round(float(np.mean(correct_scores)), 4),
+                    "avg_when_wrong": round(float(np.mean(wrong_scores)), 4),
+                    "predictive_gap": round(float(np.mean(correct_scores)) - float(np.mean(wrong_scores)), 4),
+                }
+
+        return {
+            "status": "success",
+            "n_evaluations": n_total,
+            "direction_accuracy_pct": direction_accuracy,
+            "probability_calibration": {
+                "high_confidence_accuracy": high_conf_acc,
+                "high_confidence_count": len(high_conf),
+                "low_confidence_accuracy": low_conf_acc,
+                "low_confidence_count": len(low_conf),
+                "calibrated": high_conf_acc > low_conf_acc,
+            },
+            "source_contribution": source_analysis,
+            "details": results,
+        }
+
+
+    def calibrate_weights(self, validation_result: dict):
+        """根據歷史驗證結果動態調整信號源權重。
+
+        Args:
+            validation_result: validate_past_predictions() 的回傳值
+        """
+        source_contrib = validation_result.get("source_contribution", {})
+        if not source_contrib:
+            return
+
+        self._source_adjustments = {}
+        for source, stats in source_contrib.items():
+            gap = stats.get("predictive_gap", 0)
+            self._source_adjustments[source] = gap
+
+        logger.info(
+            f"信號源權重校準: {', '.join(f'{k}={v:+.4f}' for k, v in self._source_adjustments.items())}"
         )
 
 

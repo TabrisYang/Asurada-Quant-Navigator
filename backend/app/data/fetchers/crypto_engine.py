@@ -390,7 +390,10 @@ class CryptoDataEngine:
         if not end_date:
             end_date = datetime.utcnow()
         if not start_date:
-            start_date = end_date - timedelta(days=settings.default_fetch_days)
+            raise ValueError(
+                "請指定 start_date，系統不會自動決定數據抓取範圍。"
+                "建議設定為 2020-01-01 或更早。"
+            )
 
         # 斷點續傳：檢查本地數據（同時檢查前段和後段）
         existing_df = None

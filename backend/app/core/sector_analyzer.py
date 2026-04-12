@@ -56,12 +56,7 @@ async def analyze_sector(
         df = tw_stock_engine.load_local_data(symbol, timeframe)
 
         if df is None or df.empty:
-            # 嘗試即時抓取
-            try:
-                logger.info(f"族群分析: {code} 本地無數據，嘗試抓取...")
-                df = await tw_stock_engine.fetch_ohlcv(symbol, timeframe)
-            except Exception as e:
-                logger.warning(f"族群分析: {code} 抓取失敗: {e}")
+            logger.info(f"族群分析: {code} 本地無數據，請先同步該股票")
 
         if df is not None and not df.empty and len(df) >= 20:
             df = df.copy()

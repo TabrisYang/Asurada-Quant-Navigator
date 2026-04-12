@@ -54,7 +54,14 @@ async def _run_sync(request: DataSyncRequest, task_id: str):
         except ValueError:
             start_date = end_date - timedelta(days=request.days)
     else:
-        start_date = end_date - timedelta(days=request.days)
+        # 用戶未指定起始日期 → 提醒設定
+        task.status = "failed"
+        task.logs.append(
+            "請設定數據起始日期（start_date），系統不會自動決定抓取範圍。"
+            "建議設定為 2020-01-01 或更早，以獲得足夠的回測數據。"
+        )
+        task.completed_at = taipei_now().strftime("%Y-%m-%d %H:%M:%S")
+        return
 
     try:
         for symbol in request.symbols:

@@ -33,20 +33,20 @@ class TrainResult:
     def reliability_level(self) -> str:
         """模型可靠性分級：high / medium / low / unreliable
 
-        - high:       OOS 準確率 > 55% 且樣本 ≥ 100
+        - high:       OOS 準確率 > 58% 且樣本 ≥ 100
         - medium:     OOS 準確率 > 55% 且樣本 ≥ 50，或 F1 > 0.55
-        - low:        OOS 準確率 52-55% 且樣本 ≥ 30（僅供參考）
-        - unreliable: 不達標
+        - low:        OOS 準確率 > 55% 且樣本 ≥ 30（僅供參考，權重降低）
+        - unreliable: 不達標（< 55% 視為無邊際，不納入預測）
         """
         acc = self.oos_accuracy
         f1 = self.oos_f1
         n = self.n_oos_samples
 
-        if acc > 0.55 and n >= 100:
+        if acc > 0.58 and n >= 100:
             return "high"
         if (acc > 0.55 and n >= 50) or (f1 > 0.55 and n >= 50):
             return "medium"
-        if acc > 0.52 and n >= 30:
+        if acc > 0.55 and n >= 30:
             return "low"
         return "unreliable"
 

@@ -47,8 +47,28 @@ EXCHANGE_FEES = {
 
 # 動態滑點參數
 SLIPPAGE_ATR_SCALE = 0.1        # ATR 比例因子：slippage = ATR/close * scale
-SLIPPAGE_LOW_VOLUME_MULT = 2.0  # 低成交量時滑點倍率
 VOLUME_PERCENTILE_THRESHOLD = 0.2  # 低於 20 分位即視為低量
+
+# 流動性分級滑點乘數（取代固定 2.0x）
+_LIQUIDITY_SLIPPAGE_MULT = {
+    "high": 1.0,    # BTC/ETH 等主流幣，日均交易額 > $1B
+    "medium": 1.3,  # SOL/ADA 等中型幣，$100M-$1B
+    "low": 1.5,     # 小幣 < $100M
+}
+
+
+def _estimate_liquidity_tier(close: np.ndarray, volume: np.ndarray) -> str:
+    """根據成交量 × 價格估算流動性等級。"""
+    if len(close) < 2 or len(volume) < 2:
+        return "low"
+    median_vol = float(np.nanmedian(volume))
+    last_close = float(close[-1])
+    daily_value = median_vol * last_close
+    if daily_value > 1e9:
+        return "high"
+    elif daily_value > 1e8:
+        return "medium"
+    return "low"
 
 
 def _compute_dynamic_cost(
@@ -58,10 +78,11 @@ def _compute_dynamic_cost(
     bar_idx: int,
     exchange: str = "default",
     order_type: str = "taker",
+    liquidity_tier: str = "medium",
 ) -> float:
     """計算單根 K 棒的動態交易成本（滑點 + 手續費，單邊）
 
-    - 滑點基於 ATR/close 比率，低量時放大
+    - 滑點基於 ATR/close 比率，低量時按流動性等級加成
     - 手續費依交易所 maker/taker 費率
     """
     # 手續費
@@ -74,16 +95,17 @@ def _compute_dynamic_cost(
     else:
         slippage = (atr[bar_idx] / close[bar_idx]) * SLIPPAGE_ATR_SCALE
 
-        # 低成交量加倍滑點
+        # 低成交量按流動性等級加成
+        vol_mult = _LIQUIDITY_SLIPPAGE_MULT.get(liquidity_tier, 1.3)
         if bar_idx >= 20:
             vol_window = volume[max(0, bar_idx - 20):bar_idx]
             vol_pctile = np.percentile(vol_window, VOLUME_PERCENTILE_THRESHOLD * 100)
             if volume[bar_idx] < vol_pctile:
-                slippage *= SLIPPAGE_LOW_VOLUME_MULT
+                slippage *= vol_mult
 
         # 設定地板和天花板
         slippage = max(slippage, 0.0001)  # 最低 0.01%
-        slippage = min(slippage, 0.01)    # 最高 1%
+        slippage = min(slippage, 0.005)   # 最高 0.5%（從 1% 降低）
 
     return slippage + fee
 
@@ -403,6 +425,7 @@ def run_backtest(
 
     # 預計算 ATR 和 volume 用於動態成本
     volume = df["volume"].values.astype(float) if "volume" in df.columns else np.ones(len(close))
+    liq_tier = _estimate_liquidity_tier(close, volume)
     if dynamic_cost and "atr" in df.columns:
         atr_arr = df["atr"].values.astype(float)
         use_dynamic = True
@@ -421,7 +444,7 @@ def run_backtest(
 
     def _cost_at(bar_idx: int) -> float:
         if use_dynamic:
-            return _compute_dynamic_cost(atr_arr, close, volume, bar_idx, exchange)
+            return _compute_dynamic_cost(atr_arr, close, volume, bar_idx, exchange, liquidity_tier=liq_tier)
         return static_cost_rate
     equity_arr = [capital]
     trades: list[Trade] = []
@@ -431,7 +454,7 @@ def run_backtest(
     entry_capital = 0.0
 
     # 強制平倉價（槓桿 > 1 時生效）：虧損達 ~95% 保證金即爆倉
-    liq_margin = 0.95 / leverage if leverage > 1 else None
+    liq_margin = 0.98 / leverage if leverage > 1 else None
 
     open_prices = df["open"].values.astype(float) if "open" in df.columns else close
 

@@ -87,7 +87,11 @@ class TwStockEngine:
         if not end_date:
             end_date = datetime.now()
         if not start_date:
-            start_date = end_date - timedelta(days=settings.default_fetch_days)
+            # 台股不自動 fallback，要求用戶指定
+            raise ValueError(
+                "請指定 start_date，系統不會自動決定台股數據抓取範圍。"
+                "建議設定為 2020-01-01 或更早。"
+            )
 
         # 斷點續傳：檢查本地數據
         existing_df = None
@@ -96,53 +100,78 @@ class TwStockEngine:
                 existing_df = CryptoDataEngine._validate_csv(filepath)
                 if not existing_df.empty:
                     existing_df["timestamp"] = pd.to_datetime(existing_df["timestamp"])
+                    first_ts = existing_df["timestamp"].min()
+                    first_date = first_ts.to_pydatetime().replace(tzinfo=None)
                     last_ts = existing_df["timestamp"].max()
                     last_date = last_ts.to_pydatetime().replace(tzinfo=None)
 
-                    # 如果本地數據已涵蓋到昨天以後，不需要再抓
-                    if last_date >= end_date - timedelta(days=1):
+                    need_backfill = first_date > start_date + timedelta(days=1)
+                    need_forward = last_date < end_date - timedelta(days=1)
+
+                    # 往前補抓歷史數據
+                    if need_backfill:
+                        _report(f"往前補抓: {start_date.strftime('%Y-%m-%d')} ~ {first_date.strftime('%Y-%m-%d')}")
+                        earlier_df = await asyncio.to_thread(
+                            self._download_from_yfinance,
+                            yf_ticker, yf_interval, start_date, first_date,
+                        )
+                        if earlier_df is not None and not earlier_df.empty:
+                            earlier_df = self._to_standard_format(earlier_df)
+                            existing_df = pd.concat([earlier_df, existing_df], ignore_index=True)
+                            existing_df = existing_df.drop_duplicates(subset=["timestamp"], keep="last")
+                            existing_df = existing_df.sort_values("timestamp").reset_index(drop=True)
+
+                    # 往後增量更新
+                    if need_forward:
+                        start_date = last_date + timedelta(days=1)
+                        _report(f"增量更新: 從 {start_date.strftime('%Y-%m-%d')} 開始抓取")
+                    elif not need_backfill:
                         _report(f"本地數據已是最新: {filename} ({len(existing_df)} 筆)")
                         return existing_df
-
-                    # 增量更新：從本地最後一筆的隔天開始抓
-                    start_date = last_date + timedelta(days=1)
-                    _report(f"增量更新: 從 {start_date.strftime('%Y-%m-%d')} 開始抓取")
+                    else:
+                        # 只有往前補抓，不需要往後抓
+                        start_date = None
             except Exception as e:
                 logger.warning(f"讀取本地數據失敗，將重新抓取: {e}")
                 existing_df = None
 
         # 透過 yfinance 抓取（在 executor 中跑同步呼叫）
-        _report(f"正在從 Yahoo Finance 抓取 {yf_ticker} {yf_interval}...")
+        # 如果 start_date=None，表示只做了往前補抓，不需要往後抓
+        new_df = None
+        if start_date is not None:
+            _report(f"正在從 Yahoo Finance 抓取 {yf_ticker} {yf_interval}...")
 
-        try:
-            new_df = await asyncio.to_thread(
-                self._download_from_yfinance,
-                yf_ticker, yf_interval, start_date, end_date,
-            )
-        except Exception as e:
-            _report(f"yfinance 抓取失敗: {e}")
-            if existing_df is not None and not existing_df.empty:
-                return existing_df
-            return pd.DataFrame()
+            try:
+                new_df = await asyncio.to_thread(
+                    self._download_from_yfinance,
+                    yf_ticker, yf_interval, start_date, end_date,
+                )
+            except Exception as e:
+                _report(f"yfinance 抓取失敗: {e}")
+                if existing_df is not None and not existing_df.empty:
+                    new_df = None  # 繼續用現有數據
+                else:
+                    return pd.DataFrame()
 
         if new_df is None or new_df.empty:
-            _report(f"yfinance 未回傳任何數據: {yf_ticker}")
             if existing_df is not None and not existing_df.empty:
-                return existing_df
-            return pd.DataFrame()
-
-        _report(f"Yahoo Finance 回傳 {len(new_df)} 筆數據")
-
-        # 轉為標準格式
-        new_df = self._to_standard_format(new_df)
-
-        # 合併舊數據
-        if existing_df is not None and not existing_df.empty:
-            combined = pd.concat([existing_df, new_df], ignore_index=True)
-            combined = combined.drop_duplicates(subset=["timestamp"], keep="last")
-            combined = combined.sort_values("timestamp").reset_index(drop=True)
+                # 只有 backfill 或 fetch 失敗，用現有合併資料繼續
+                combined = existing_df
+            else:
+                _report(f"yfinance 未回傳任何數據: {yf_ticker}")
+                return pd.DataFrame()
         else:
-            combined = new_df.sort_values("timestamp").reset_index(drop=True)
+            _report(f"Yahoo Finance 回傳 {len(new_df)} 筆數據")
+            new_df = self._to_standard_format(new_df)
+
+        # 合併舊數據 + 新數據
+        if new_df is not None and not new_df.empty:
+            if existing_df is not None and not existing_df.empty:
+                combined = pd.concat([existing_df, new_df], ignore_index=True)
+                combined = combined.drop_duplicates(subset=["timestamp"], keep="last")
+                combined = combined.sort_values("timestamp").reset_index(drop=True)
+            else:
+                combined = new_df.sort_values("timestamp").reset_index(drop=True)
 
         # 計算技術指標（復用 CryptoDataEngine 的靜態方法）
         _report("計算技術指標...")

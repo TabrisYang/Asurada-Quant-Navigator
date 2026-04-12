@@ -50,11 +50,15 @@ class ProgressTracker:
             return 0
         return min(int(self.completed / self.total * 100), 99)
 
+    sub_task: str = ""  # 子任務描述（如 WF 窗口進度）
+
     @property
     def status_text(self) -> str:
         name = _FUNC_DISPLAY_NAMES.get(self.current_task, self.current_task)
         if self.phase == "done":
             return "分析完成 (100%)"
+        if self.sub_task:
+            return f"[{self.completed}/{self.total}] {name} — {self.sub_task} ({self.percentage}%)"
         return f"[{self.completed}/{self.total}] {name}... ({self.percentage}%)"
 
 from app.core.indicators import registry
@@ -248,7 +252,7 @@ async def execute_function_calls(
                     result = await _exec_analyze_event_patterns(args, default_symbol, default_timeframe)
                     return {"function": name, "result": result}
                 elif name == "run_quant_research":
-                    result = await _exec_quant_research(args, default_symbol, default_timeframe)
+                    result = await _exec_quant_research(args, default_symbol, default_timeframe, progress)
                     return {"function": name, "result": result}
                 elif name == "optimize_indicator_params":
                     result = await _exec_optimize_params(args, default_symbol, default_timeframe)
@@ -676,6 +680,13 @@ async def _exec_compare_strategies(args: dict, default_symbol: str, default_tf: 
         sl = strat.get("stop_loss_pct")
         tp = strat.get("take_profit_pct")
 
+        # 如果 LLM 沒帶止損/止盈，根據時間框架自動補預設值
+        _default_sl = {"15m": 0.02, "1h": 0.03, "4h": 0.05, "1d": 0.07, "1w": 0.10}
+        if sl is None:
+            sl = _default_sl.get(timeframe, 0.05)
+        if tp is None:
+            tp = sl * 2  # 預設盈虧比 2:1
+
         if not entry_conds or not exit_conds:
             comparison.append({"name": name, "status": "error", "message": "缺少進場或出場條件"})
             continue
@@ -937,7 +948,7 @@ async def _exec_analyze_event_patterns(args: dict, default_symbol: str, default_
     }
 
 
-async def _exec_quant_research(args: dict, default_symbol: str, default_tf: str) -> dict:
+async def _exec_quant_research(args: dict, default_symbol: str, default_tf: str, progress: Optional[ProgressTracker] = None) -> dict:
     """完整量化研究流程：因子分析 + 回測 + Monte Carlo + Walk Forward + 倉位建議"""
     from app.core.backtest.engine import run_backtest
     from app.core.backtest.monte_carlo import run_monte_carlo
@@ -960,16 +971,15 @@ async def _exec_quant_research(args: dict, default_symbol: str, default_tf: str)
     leverage = args.get("leverage", 1.0)
 
     _MIN_BARS_RESEARCH = 100
-    _MAX_BARS_NO_TRIM = 5000  # 日線級別不截斷，僅小時級別以下考慮
-    # 量化研究優先使用全部數據，確保統計顯著性
+    # 量化研究永遠使用全量數據，確保統計顯著性
     df_full = _load_local_data(symbol, timeframe)
     date_expanded = False
     if (start or end):
         df = _load_local_data(symbol, timeframe, start, end)
-        # 只要全量數據不超過上限，就使用全量（LLM 常自作主張帶日期限制）
-        if len(df_full) <= _MAX_BARS_NO_TRIM and len(df_full) > len(df):
+        # 永遠使用全量數據（LLM 常自作主張帶日期限制，但量化研究需要最大樣本量）
+        if len(df_full) > len(df):
             logger.info(
-                f"量化研究 [{symbol}]: 指定範圍 {len(df)} 根，全量 {len(df_full)} 根在合理範圍內，使用全量數據"
+                f"量化研究 [{symbol}]: 指定範圍 {len(df)} 根，全量 {len(df_full)} 根，使用全量數據"
             )
             df = df_full
             date_expanded = True
@@ -982,7 +992,13 @@ async def _exec_quant_research(args: dict, default_symbol: str, default_tf: str)
     if date_expanded:
         report["notice"] = "因指定日期範圍數據不足，已自動擴大至全部本地數據進行分析。"
 
+    def _sub(msg: str):
+        """更新子任務進度（顯示在前端進度條）"""
+        if progress is not None:
+            progress.sub_task = msg
+
     # ── 1. 因子掃描（含近期 IC、Alpha Decay、衍生因子、組合 IC、分位數、相關性）──
+    _sub("因子掃描中...")
     logger.info(f"量化研究 [{symbol}]: 因子掃描中（含衍生因子）...")
     try:
         scan = run_factor_scan(df, timeframe=timeframe, indicator_ids=indicator_ids)
@@ -1039,6 +1055,7 @@ async def _exec_quant_research(args: dict, default_symbol: str, default_tf: str)
 
     # ── 3. 策略回測（如有條件）──
     if entry_conditions and exit_conditions:
+        _sub("策略回測中...")
         logger.info(f"量化研究 [{symbol}]: 策略回測中...")
         try:
             bt_result = run_backtest(
@@ -1051,6 +1068,7 @@ async def _exec_quant_research(args: dict, default_symbol: str, default_tf: str)
 
             # ── 4. Monte Carlo ──
             if bt_result.trades and len(bt_result.trades) >= 10:
+                _sub("Monte Carlo 模擬中...")
                 logger.info(f"量化研究 [{symbol}]: Monte Carlo 模擬中...")
                 pnls = [t.pnl_pct for t in bt_result.trades]
                 # Regime labels: 用 ATR 中位數分高/低波動
@@ -1066,25 +1084,35 @@ async def _exec_quant_research(args: dict, default_symbol: str, default_tf: str)
                 )
                 report["monte_carlo"] = mc
 
-            # ── 5. Walk Forward ──
+            # ── 5. Walk Forward（優化版：per-window SL/TP 優化 + OOS MC）──
             if len(df) >= 200:
+                _sub(f"Walk Forward 分析中（{len(df)} 根 × 5 窗口 × 優化）...")
                 logger.info(f"量化研究 [{symbol}]: Walk Forward 分析中...")
                 wf = run_walk_forward(
                     df, entry_conditions, exit_conditions,
                     direction=direction, stop_loss_pct=stop_loss, take_profit_pct=take_profit,
                     n_windows=5, leverage=leverage,
+                    optimize_sl_tp=True,
                 )
                 if wf.get("status") == "success":
                     report["walk_forward"] = {
                         "summary": wf.get("summary"),
                         "assessment": wf.get("assessment"),
                     }
+                    # 用 WF 的 OOS 交易跑 MC（比全樣本 MC 更可靠）
+                    oos_pnls = wf.get("oos_trade_pnls", [])
+                    if len(oos_pnls) >= 10:
+                        _sub(f"OOS Monte Carlo（{len(oos_pnls)} 筆交易）...")
+                        logger.info(f"量化研究 [{symbol}]: OOS Monte Carlo（{len(oos_pnls)} 筆 OOS 交易）...")
+                        mc_oos = run_monte_carlo(oos_pnls, n_simulations=1000)
+                        report["monte_carlo_oos"] = mc_oos
                 else:
                     report["walk_forward"] = wf
         except Exception as e:
             report["backtest"] = {"error": str(e)}
 
     # ── 6. 動態倉位建議（MC 回饋調控 Kelly） ──
+    _sub("動態倉位計算中...")
     logger.info(f"量化研究 [{symbol}]: 動態倉位計算中...")
     try:
         win_rate = report.get("backtest", {}).get("win_rate", 50) / 100
@@ -1119,6 +1147,7 @@ async def _exec_quant_research(args: dict, default_symbol: str, default_tf: str)
         report["position_sizing"] = {"error": str(e)}
 
     # ── 7. 整合結論 ──
+    _sub("整合結論中...")
     report["conclusion"] = _generate_conclusion(report)
     report["status"] = "success"
 
@@ -1155,8 +1184,8 @@ def _generate_conclusion(report: dict) -> dict:
         score += 5
         findings.append(f"✅ Expectancy {bt['expectancy_pct']}% > 0，長期期望值正")
     elif bt.get("expectancy_pct", 0) <= 0 and bt.get("total_trades", 0) > 5:
-        score -= 15
-        findings.append(f"❌ Expectancy {bt.get('expectancy_pct', 0)}% ≤ 0，長期期望值負")
+        score -= 8
+        findings.append(f"⚠️ Expectancy {bt.get('expectancy_pct', 0)}% ≤ 0，長期期望值負")
 
     # Monte Carlo
     mc = report.get("monte_carlo", {})
@@ -1166,16 +1195,16 @@ def _generate_conclusion(report: dict) -> dict:
         score += 10
         findings.append(f"✅ Monte Carlo 驗證通過（獲利機率 {mc.get('profit_probability', 0)}%）")
     elif mc.get("status") == "success":
-        score -= 10
+        score -= 7
         findings.append("⚠️ Monte Carlo 未通過（25%分位報酬為負）")
     if mc.get("ruin_probability", 0) > 5:
-        score -= 15
-        findings.append(f"❌ 破產風險 {mc['ruin_probability']}%，建議降低槓桿")
+        score -= 10
+        findings.append(f"⚠️ 破產風險 {mc['ruin_probability']}%，建議降低槓桿")
     # 壓力測試
     stress = mc.get("stress_test", {})
     if stress.get("ruin_probability", 0) > 10:
-        score -= 10
-        findings.append(f"❌ 壓力測試破產風險 {stress['ruin_probability']}%")
+        score -= 7
+        findings.append(f"⚠️ 壓力測試破產風險 {stress['ruin_probability']}%")
     # 回撤機率
     dd_probs = mc.get("drawdown_probabilities", {})
     if dd_probs.get("exceed_50pct", 0) > 10:
@@ -1189,8 +1218,35 @@ def _generate_conclusion(report: dict) -> dict:
         score += 10
         findings.append("✅ Walk Forward 驗證具備 Alpha")
     elif assessment.get("score", 0) < 40:
+        score -= 7
+        findings.append("⚠️ Walk Forward 未通過，策略可能過擬合")
+
+    # WF 參數穩定性
+    wf_summary = wf.get("summary", {})
+    param_stab = wf_summary.get("param_stability", {})
+    if param_stab and not param_stab.get("stable", True):
+        score -= 5
+        findings.append("⚠️ 各窗口最佳參數差異大，策略對參數敏感")
+    if wf_summary.get("low_trade_windows", 0) > 0:
+        findings.append(f"⚠️ {wf_summary['low_trade_windows']} 個窗口 OOS 交易不足 5 筆")
+
+    # OOS Monte Carlo（比全樣本 MC 更可靠）
+    mc_oos = report.get("monte_carlo_oos", {})
+    if mc_oos.get("status") == "success":
+        if mc_oos.get("strategy_robust"):
+            score += 5
+            findings.append(f"✅ OOS Monte Carlo 通過（獲利機率 {mc_oos.get('profit_probability', 0)}%）")
+        else:
+            score -= 5
+            findings.append("⚠️ OOS Monte Carlo 未通過（OOS 交易重排後 P25 報酬為負）")
+
+    # MC/WF 交叉驗證
+    if mc.get("strategy_robust") and not assessment.get("has_alpha"):
         score -= 10
-        findings.append("❌ Walk Forward 未通過，策略可能過擬合")
+        findings.append("⚠️ MC/WF 矛盾：MC 顯示穩健但 WF 未通過，可能過擬合")
+    if assessment.get("has_alpha") and mc.get("ruin_probability", 0) > 5:
+        score -= 10
+        findings.append("⚠️ MC/WF 矛盾：WF 有 Alpha 但 MC 破產風險高，策略不穩定")
 
     score = max(0, min(100, score))
 
@@ -1442,7 +1498,28 @@ async def _exec_generate_scenarios(args: dict, default_symbol: str, default_tf: 
         result = scenario_predictor.predict_scenarios(
             df=df, symbol=symbol, timeframe=timeframe, forward_bars=forward_bars,
         )
-        return {"status": "success", **result.to_dict()}
+        output = {"status": "success", **result.to_dict()}
+
+        # 附加歷史準確率驗證（如果數據量足夠）
+        if len(df) >= 200:
+            try:
+                validation = scenario_predictor.validate_past_predictions(
+                    df=df, symbol=symbol, timeframe=timeframe,
+                    forward_bars=forward_bars, n_eval_points=15,
+                )
+                if validation.get("status") == "success":
+                    output["historical_accuracy"] = {
+                        "direction_accuracy_pct": validation["direction_accuracy_pct"],
+                        "probability_calibration": validation["probability_calibration"],
+                        "source_contribution": validation["source_contribution"],
+                        "n_evaluations": validation["n_evaluations"],
+                    }
+                    # 根據驗證結果動態調整信號源權重
+                    scenario_predictor.calibrate_weights(validation)
+            except Exception as e_val:
+                logger.warning(f"情境預測驗證失敗: {e_val}")
+
+        return output
     except Exception as e:
         return {"status": "error", "message": f"情境預測失敗: {str(e)}"}
 
