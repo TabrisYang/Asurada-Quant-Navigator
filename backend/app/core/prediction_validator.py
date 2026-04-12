@@ -112,6 +112,15 @@ def _validate_one(pred: dict, now: datetime) -> str:
     stop = pred["stop_price"]
     direction = pred["direction"]
 
+    # 滑價緩衝：目標價需多穿越 0.1%，止損提前 0.1% 觸發
+    slippage_buffer = 0.001
+    if direction == "long":
+        effective_target = target * (1 + slippage_buffer)
+        effective_stop = stop * (1 + slippage_buffer)
+    else:
+        effective_target = target * (1 - slippage_buffer)
+        effective_stop = stop * (1 - slippage_buffer)
+
     highs = df["high"].values
     lows = df["low"].values
     closes = df["close"].values
@@ -124,9 +133,9 @@ def _validate_one(pred: dict, now: datetime) -> str:
         hit_target_idx = None
         hit_stop_idx = None
         for i in range(len(df)):
-            if hit_target_idx is None and highs[i] >= target:
+            if hit_target_idx is None and highs[i] >= effective_target:
                 hit_target_idx = i
-            if hit_stop_idx is None and lows[i] <= stop:
+            if hit_stop_idx is None and lows[i] <= effective_stop:
                 hit_stop_idx = i
     else:  # short
         mfe_pct = float((entry - min(lows)) / entry * 100)
@@ -136,9 +145,9 @@ def _validate_one(pred: dict, now: datetime) -> str:
         hit_target_idx = None
         hit_stop_idx = None
         for i in range(len(df)):
-            if hit_target_idx is None and lows[i] <= target:
+            if hit_target_idx is None and lows[i] <= effective_target:
                 hit_target_idx = i
-            if hit_stop_idx is None and highs[i] >= stop:
+            if hit_stop_idx is None and highs[i] >= effective_stop:
                 hit_stop_idx = i
 
     # 判定結果：先碰到哪個就算哪個

@@ -208,12 +208,32 @@ class PredictionTracker:
             hours = prediction["timeframe_hours"]
             expires = now + timedelta(hours=hours)
 
-            # 多時間框架矛盾檢測（直接查詢，避免遞迴鎖）
+            # 多時間框架矛盾檢測 + 限制
             rows = self._conn.execute(
                 "SELECT timeframe, direction FROM predictions WHERE status='active' AND symbol=?",
                 (symbol,),
             ).fetchall()
             conflicts = [r for r in rows if r["direction"] != prediction["direction"]]
+            same_dir = [r for r in rows if r["direction"] == prediction["direction"]]
+
+            # 限制：同一 symbol 最多 3 筆活躍預測
+            if len(rows) >= 3:
+                logger.warning(
+                    f"預測數量已達上限: {symbol} 已有 {len(rows)} 筆活躍預測，拒絕新增"
+                )
+                return -1
+
+            # 限制：矛盾方向預測不超過 1 筆（允許一筆對沖，但不允許混亂）
+            if len(conflicts) >= 1:
+                conflict_info = ", ".join(
+                    f"{r['timeframe']} {r['direction']}" for r in conflicts
+                )
+                logger.warning(
+                    f"預測方向衝突過多: 新={prediction['direction']} {timeframe} "
+                    f"vs 現有={conflict_info}（{symbol}），已有矛盾預測，拒絕新增"
+                )
+                return -1
+
             if conflicts:
                 conflict_info = ", ".join(
                     f"{r['timeframe']} {r['direction']}" for r in conflicts
@@ -373,7 +393,17 @@ class PredictionTracker:
 
         preds = [dict(r) for r in rows]
         now = taipei_now()
-        decay_lambda = 0.02  # half-life ~35 days
+
+        # 自適應時間衰減：近期連續錯誤時加速衰減（更重視近期表現）
+        # 基礎 λ=0.02（半衰期 ~35 天），近 5 筆全錯時 λ=0.05（半衰期 ~14 天）
+        recent_preds = sorted(preds, key=lambda p: p["created_at"], reverse=True)[:5]
+        recent_wrong = sum(1 for p in recent_preds if p["status"] == "hit_stop")
+        if recent_wrong >= 4:
+            decay_lambda = 0.05  # 近期表現差 → 加速衰減，更重視最新數據
+        elif recent_wrong >= 3:
+            decay_lambda = 0.035
+        else:
+            decay_lambda = 0.02  # 正常半衰期 ~35 天
 
         hit_target_w = 0.0
         hit_stop_w = 0.0
@@ -454,7 +484,9 @@ class PredictionTracker:
             "worst_outcome_pct": round(float(np.min(outcomes_arr)), 2) if has_outcomes else None,
             "indicator_performance": indicator_stats,
             "confidence_calibration": conf_calibration,
-            "decay_halflife_days": 35,
+            "decay_lambda": decay_lambda,
+            "decay_halflife_days": round(0.693 / decay_lambda, 1),
+            "decay_adaptive": decay_lambda != 0.02,
             "sample_sufficient": len(preds) >= 8,
         }
 
@@ -485,6 +517,67 @@ class PredictionTracker:
                     "samples": total,
                 }
             return result
+
+    def get_regime_stats(
+        self, symbol: Optional[str] = None, days: int = 90,
+    ) -> dict:
+        """取得各 regime 的預測準確率比較。"""
+        with self._lock:
+            self._ensure_db()
+            cutoff = (taipei_now() - timedelta(days=days)).isoformat()
+            query = "SELECT regime, status FROM predictions WHERE status != 'active' AND created_at > ?"
+            params: list = [cutoff]
+            if symbol:
+                query += " AND symbol = ?"
+                params.append(symbol)
+
+            rows = self._conn.execute(query, params).fetchall()
+            if not rows:
+                return {"total": 0, "regimes": {}}
+
+            regime_data: dict[str, dict] = {}
+            for r in rows:
+                regime = r["regime"] or "unknown"
+                if regime not in regime_data:
+                    regime_data[regime] = {"wins": 0, "losses": 0, "expired": 0, "total": 0}
+                regime_data[regime]["total"] += 1
+                if r["status"] == "hit_target":
+                    regime_data[regime]["wins"] += 1
+                elif r["status"] == "hit_stop":
+                    regime_data[regime]["losses"] += 1
+                else:
+                    regime_data[regime]["expired"] += 1
+
+            result = {}
+            for regime, data in regime_data.items():
+                decided = data["wins"] + data["losses"]
+                win_rate = round(data["wins"] / decided * 100, 1) if decided > 0 else 0
+                result[regime] = {
+                    "win_rate": win_rate,
+                    "wins": data["wins"],
+                    "losses": data["losses"],
+                    "expired": data["expired"],
+                    "total": data["total"],
+                    "reliable": decided >= 5,
+                }
+
+            # 找出最強和最弱的 regime
+            reliable = {k: v for k, v in result.items() if v["reliable"]}
+            best = max(reliable, key=lambda k: reliable[k]["win_rate"]) if reliable else None
+            worst = min(reliable, key=lambda k: reliable[k]["win_rate"]) if reliable else None
+
+            return {
+                "total": len(rows),
+                "regimes": result,
+                "best_regime": best,
+                "worst_regime": worst,
+                "recommendation": (
+                    f"模型在 {best} 市場表現最好（{result[best]['win_rate']}%），"
+                    f"在 {worst} 市場表現最差（{result[worst]['win_rate']}%）"
+                    if best and worst and best != worst
+                    else "樣本不足，無法區分 regime 表現差異"
+                ),
+            }
 
     def get_recent_streak(
         self, symbol: Optional[str] = None, n: int = 10,

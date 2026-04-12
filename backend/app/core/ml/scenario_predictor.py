@@ -538,6 +538,51 @@ def _build_scenarios(
     return scenarios
 
 
+# ─── 跨幣相關性 ──────────────────────────────────
+
+def _check_btc_correlation(df: pd.DataFrame, symbol: str, timeframe: str) -> Optional[dict]:
+    """檢查當前幣種與 BTC 的走勢相關性。
+
+    如果高度正相關且 BTC 正在下跌，發出警告。
+    """
+    try:
+        from app.data.fetchers.crypto_engine import crypto_engine
+
+        btc_df = crypto_engine.load_local_data("BTC/USDT", timeframe)
+        if btc_df is None or btc_df.empty or len(btc_df) < 30:
+            return None
+
+        # 對齊時間，取最近 60 根 K 線
+        n = min(60, len(df), len(btc_df))
+        coin_returns = np.diff(df["close"].values[-n:]) / df["close"].values[-n:-1]
+        btc_returns = np.diff(btc_df["close"].values[-n:]) / btc_df["close"].values[-n:-1]
+
+        if len(coin_returns) != len(btc_returns):
+            return None
+
+        corr = float(np.corrcoef(coin_returns, btc_returns)[0, 1])
+        if np.isnan(corr):
+            return None
+
+        # BTC 近 5 根走勢
+        btc_recent = btc_df["close"].values[-6:]
+        btc_change = (btc_recent[-1] / btc_recent[0] - 1) * 100
+
+        result = {
+            "correlation": round(corr, 3),
+            "btc_recent_change_pct": round(btc_change, 2),
+        }
+
+        if corr > 0.7 and btc_change < -3:
+            result["warning"] = f"與 BTC 高度相關（{corr:.2f}）且 BTC 近期下跌 {btc_change:.1f}%，山寨幣可能連帶受壓"
+        elif corr > 0.7 and btc_change > 3:
+            result["note"] = f"與 BTC 高度相關（{corr:.2f}），BTC 上漲 {btc_change:.1f}% 對此幣有利"
+
+        return result
+    except Exception:
+        return None
+
+
 # ─── 主入口 ──────────────────────────────────────
 
 class ScenarioPredictor:
@@ -682,6 +727,13 @@ class ScenarioPredictor:
                 "details": regime.get("details", {}),
             },
         }
+
+        # 跨幣相關性警告：非 BTC 的幣種檢查與 BTC 的走勢關聯
+        correlation_warning = None
+        if "BTC" not in symbol.upper():
+            correlation_warning = _check_btc_correlation(df, symbol, timeframe)
+            if correlation_warning:
+                signal_sources["btc_correlation"] = correlation_warning
 
         logger.info(
             f"情境預測 [{symbol} {timeframe}]: 完成 — "
