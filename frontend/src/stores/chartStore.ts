@@ -152,6 +152,7 @@ export const useChartStore = create<ChartStore>((set, get) => ({
       messages: [...state.messages, divider],
       conversationId: null,
       lastFactorScan: null,
+      annotations: [],
     };
   }),
   setTimeframe: (timeframe) => set({ timeframe, lastFactorScan: null }),

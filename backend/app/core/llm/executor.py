@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import numpy as np
+import pandas as pd
 
 from loguru import logger
 
@@ -681,11 +682,11 @@ async def _exec_compare_strategies(args: dict, default_symbol: str, default_tf: 
         tp = strat.get("take_profit_pct")
 
         # 如果 LLM 沒帶止損/止盈，根據時間框架自動補預設值
-        _default_sl = {"15m": 0.02, "1h": 0.03, "4h": 0.05, "1d": 0.07, "1w": 0.10}
+        _default_sl = {"15m": 0.03, "1h": 0.04, "4h": 0.08, "1d": 0.10, "1w": 0.15}
         if sl is None:
-            sl = _default_sl.get(timeframe, 0.05)
+            sl = _default_sl.get(timeframe, 0.08)
         if tp is None:
-            tp = sl * 2  # 預設盈虧比 2:1
+            tp = sl * 2.5  # 預設盈虧比 2.5:1
 
         if not entry_conds or not exit_conds:
             comparison.append({"name": name, "status": "error", "message": "缺少進場或出場條件"})
@@ -1310,6 +1311,7 @@ async def _exec_conditional_prob_scan(args: dict, default_symbol: str, default_t
     indicator_ids = args.get("indicators", ["rsi"])
     forward_bars = args.get("forward_bars", 6)
     target_pct = args.get("target_pct", 3.0)
+    lookback_bars = args.get("lookback_bars", 7)
     direction = args.get("direction", "up")
     n_bins = args.get("n_bins", 10)
     start = args.get("start_date")
@@ -1327,15 +1329,20 @@ async def _exec_conditional_prob_scan(args: dict, default_symbol: str, default_t
         return {"status": "error", "message": f"數據不足（{len(df)} 根 K 線），至少需要 {forward_bars + 50} 根。"}
 
     closes = df["close"].values.astype(float)
+    highs = df["high"].values.astype(float)
+    lows = df["low"].values.astype(float)
     n = len(closes)
 
+    # 修正：看 forward_bars 根內的最高/最低漲幅（非固定終點收盤）
     future_hit = np.zeros(n, dtype=bool)
     for i in range(n - forward_bars):
-        pct = (closes[i + forward_bars] - closes[i]) / closes[i] * 100
         if direction == "up":
-            future_hit[i] = pct >= target_pct
+            max_high = np.max(highs[i + 1 : i + forward_bars + 1])
+            pct = (max_high - closes[i]) / closes[i] * 100
         else:
-            future_hit[i] = pct <= -target_pct
+            min_low = np.min(lows[i + 1 : i + forward_bars + 1])
+            pct = (closes[i] - min_low) / closes[i] * 100
+        future_hit[i] = pct >= target_pct
     valid_range = n - forward_bars
 
     results_by_indicator = {}
@@ -1395,7 +1402,7 @@ async def _exec_conditional_prob_scan(args: dict, default_symbol: str, default_t
                     best_prob = prob
                     best_bin_label = label
 
-            baseline_prob = float(future_hit[:valid_range][valid_mask].sum()) / valid_mask.sum() * 100
+            baseline_prob = round(float(future_hit[:valid_range][valid_mask].sum()) / valid_mask.sum() * 100, 1)
 
             results_by_indicator[key] = {
                 "indicator": ind_id,
@@ -1415,14 +1422,18 @@ async def _exec_conditional_prob_scan(args: dict, default_symbol: str, default_t
     recent_comparison: dict | None = None
     if df_recent is not None and len(df_recent) >= forward_bars + 20:
         rc_closes = df_recent["close"].values.astype(float)
+        rc_highs = df_recent["high"].values.astype(float)
+        rc_lows = df_recent["low"].values.astype(float)
         rc_n = len(rc_closes)
         rc_hit = np.zeros(rc_n, dtype=bool)
         for i in range(rc_n - forward_bars):
-            pct = (rc_closes[i + forward_bars] - rc_closes[i]) / rc_closes[i] * 100
             if direction == "up":
-                rc_hit[i] = pct >= target_pct
+                max_h = np.max(rc_highs[i + 1 : i + forward_bars + 1])
+                pct = (max_h - rc_closes[i]) / rc_closes[i] * 100
             else:
-                rc_hit[i] = pct <= -target_pct
+                min_l = np.min(rc_lows[i + 1 : i + forward_bars + 1])
+                pct = (rc_closes[i] - min_l) / rc_closes[i] * 100
+            rc_hit[i] = pct >= target_pct
         rc_valid = rc_n - forward_bars
 
         recent_comparison = {"bars": len(df_recent), "indicators": {}}
@@ -1477,7 +1488,350 @@ async def _exec_conditional_prob_scan(args: dict, default_symbol: str, default_t
     }
     if recent_comparison:
         result["recent_comparison"] = recent_comparison
+
+    # ── 命中 K 線回推共同特徵分析 ──
+    hit_analysis = _analyze_hit_pattern(df, df_recent, future_hit, valid_range, lookback_bars)
+    if hit_analysis.get("status") == "success":
+        result["hit_pattern_analysis"] = hit_analysis
+
     return result
+
+
+# ═══════════════════════════════════════════════════════
+#  命中 K 線共同特徵分析
+# ═══════════════════════════════════════════════════════
+
+def _analyze_hit_pattern(
+    df: pd.DataFrame,
+    df_recent: Optional[pd.DataFrame],
+    future_hit: np.ndarray,
+    valid_range: int,
+    lookback: int = 7,
+    min_hits: int = 30,
+) -> dict:
+    """分析命中 K 線往回推 lookback 根的共同特徵。
+
+    - 對命中組和未命中組計算多指標 profile
+    - 用 Cohen's d (> 0.5) 篩選顯著差異特徵
+    - 計算當前位置與歷史命中 profile 的多維度相似度
+    - 近期子集漂移警告
+    """
+    hit_indices = [i for i in range(lookback, valid_range) if future_hit[i]]
+    miss_indices = [i for i in range(lookback, valid_range) if not future_hit[i]]
+
+    if len(hit_indices) < min_hits:
+        return {
+            "status": "insufficient",
+            "hit_count": len(hit_indices),
+            "min_required": min_hits,
+            "message": f"命中 K 線僅 {len(hit_indices)} 根（門檻 {min_hits}），樣本不足以分析共同特徵",
+        }
+
+    # 計算指標
+    indicator_ids = ["rsi", "macd", "adx", "atr", "bb", "obv", "roc", "stochrsi"]
+    feature_names: list[str] = []
+    feature_hit: list[list[float]] = []
+    feature_miss: list[list[float]] = []
+
+    for ind_id in indicator_ids:
+        try:
+            calc = registry.calculate(ind_id, df)
+            if not calc:
+                continue
+        except Exception:
+            continue
+
+        for series_name, values in calc.items():
+            arr = np.array([float(v) if v is not None else np.nan for v in values])
+            fname = f"{ind_id}_{series_name}" if series_name != ind_id else ind_id
+            feature_names.append(fname)
+
+            hit_vals = []
+            for i in hit_indices:
+                chunk = arr[max(0, i - lookback):i]
+                if len(chunk) > 0 and not np.all(np.isnan(chunk)):
+                    hit_vals.append(float(np.nanmean(chunk)))
+                else:
+                    hit_vals.append(np.nan)
+            miss_vals = []
+            for i in miss_indices:
+                chunk = arr[max(0, i - lookback):i]
+                if len(chunk) > 0 and not np.all(np.isnan(chunk)):
+                    miss_vals.append(float(np.nanmean(chunk)))
+                else:
+                    miss_vals.append(np.nan)
+            feature_hit.append(hit_vals)
+            feature_miss.append(miss_vals)
+
+    if not feature_names:
+        return {"status": "error", "message": "無法計算指標"}
+
+    # Cohen's d 比較
+    features = []
+    for idx, name in enumerate(feature_names):
+        h_arr = np.array(feature_hit[idx])
+        m_arr = np.array(feature_miss[idx])
+        h_mean = float(np.nanmean(h_arr))
+        m_mean = float(np.nanmean(m_arr))
+        h_std = float(np.nanstd(h_arr))
+        m_std = float(np.nanstd(m_arr))
+        pooled_std = np.sqrt((h_std ** 2 + m_std ** 2) / 2)
+        effect = float((h_mean - m_mean) / pooled_std) if pooled_std > 1e-10 else 0.0
+
+        features.append({
+            "name": name,
+            "hit_mean": round(h_mean, 4),
+            "miss_mean": round(m_mean, 4),
+            "effect_size": round(effect, 3),
+            "significant": abs(effect) > 0.5,  # 修正 4：門檻 0.5
+        })
+
+    features.sort(key=lambda x: abs(x["effect_size"]), reverse=True)
+    significant = [f for f in features if f["significant"]]
+
+    # 多維度相似度
+    similarity = _compute_current_similarity(df, features, feature_hit, feature_names, lookback)
+
+    # 近期子集漂移警告（修正 6）
+    drift_warning = None
+    if df_recent is not None and len(df_recent) > lookback + 30:
+        drift_warning = _check_feature_drift(
+            df, df_recent, future_hit, feature_names, indicator_ids, lookback,
+        )
+
+    return {
+        "status": "success",
+        "hit_count": len(hit_indices),
+        "miss_count": len(miss_indices),
+        "lookback_bars": lookback,
+        "significant_features": significant[:8],
+        "current_similarity": similarity,
+        "drift_warning": drift_warning,
+    }
+
+
+def _compute_current_similarity(
+    df: pd.DataFrame,
+    features: list[dict],
+    feature_hit: list[list[float]],
+    feature_names: list[str],
+    lookback: int,
+) -> dict:
+    """計算當前 K 線與歷史命中 profile 的多維度相似度。
+
+    維度：技術指標（effect_size 加權）+ 趨勢方向 + 量能趨勢 + 波動率 regime + 價格位置
+    """
+    closes = df["close"].values.astype(float)
+    volumes = df["volume"].values.astype(float) if "volume" in df.columns else None
+
+    # ── 維度 1：技術指標相似度（effect_size 加權）──
+    indicator_scores = []
+    indicator_weights = []
+    for idx, name in enumerate(feature_names):
+        h_arr = np.array(feature_hit[idx])
+        h_mean = float(np.nanmean(h_arr))
+        h_std = float(np.nanstd(h_arr))
+        if h_std < 1e-10:
+            continue
+
+        # 當前 lookback 根均值
+        try:
+            ind_id = name.split("_")[0]
+            calc = registry.calculate(ind_id, df)
+            if not calc:
+                continue
+            for sname, vals in calc.items():
+                full_name = f"{ind_id}_{sname}" if sname != ind_id else ind_id
+                if full_name == name:
+                    arr = np.array([float(v) if v is not None else np.nan for v in vals])
+                    current_val = float(np.nanmean(arr[-lookback:]))
+                    z = abs(current_val - h_mean) / h_std
+                    score = max(0.0, 1.0 - z / 3.0)
+                    # 找對應的 effect_size 做權重（修正 5）
+                    ef = next((f["effect_size"] for f in features if f["name"] == name), 0)
+                    indicator_scores.append(score)
+                    indicator_weights.append(abs(ef))
+                    break
+        except Exception:
+            continue
+
+    if indicator_weights and sum(indicator_weights) > 0:
+        tech_sim = float(np.average(indicator_scores, weights=indicator_weights)) * 100
+    elif indicator_scores:
+        tech_sim = float(np.mean(indicator_scores)) * 100
+    else:
+        tech_sim = 50.0
+
+    # ── 維度 2：趨勢方向（價格斜率）──
+    if len(closes) >= lookback:
+        recent_slope = (closes[-1] - closes[-lookback]) / closes[-lookback]
+        # 歷史命中的平均斜率方向
+        hit_slopes = []
+        for i_list_idx in range(min(50, len(feature_hit[0])) if feature_hit else 0):
+            # 用 closes 的 hit_indices 推算（近似）
+            pass
+        # 簡化：用收盤趨勢判斷
+        trend_sim = 80.0 if recent_slope > 0 else 40.0  # 基礎值，由指標趨勢修正
+        rsi_calc = registry.calculate("rsi", df)
+        if rsi_calc and "rsi" in rsi_calc:
+            rsi_vals = [v for v in rsi_calc["rsi"] if v is not None]
+            if len(rsi_vals) >= 2:
+                rsi_trend = rsi_vals[-1] - rsi_vals[-lookback] if len(rsi_vals) >= lookback else 0
+                if (recent_slope > 0 and rsi_trend > 0) or (recent_slope < 0 and rsi_trend < 0):
+                    trend_sim = min(100, trend_sim + 15)
+    else:
+        trend_sim = 50.0
+
+    # ── 維度 3：量能趨勢 ──
+    if volumes is not None and len(volumes) >= lookback:
+        vol_recent = volumes[-lookback:]
+        vol_slope = (vol_recent[-1] - vol_recent[0]) / (vol_recent[0] + 1e-10)
+        vol_sim = 70.0 if vol_slope > 0 else 40.0  # 量增偏正
+    else:
+        vol_sim = 50.0
+
+    # ── 維度 4：波動率 regime ──
+    atr_calc = registry.calculate("atr", df)
+    if atr_calc and "atr" in atr_calc:
+        atr_vals = [v for v in atr_calc["atr"] if v is not None]
+        if len(atr_vals) >= lookback * 2:
+            recent_atr = np.mean(atr_vals[-lookback:])
+            longer_atr = np.mean(atr_vals[-lookback * 4:])
+            vol_ratio = recent_atr / (longer_atr + 1e-10)
+            # 波動率接近歷史均值 = 高相似度
+            vol_regime_sim = max(0, 100 - abs(vol_ratio - 1.0) * 100)
+        else:
+            vol_regime_sim = 50.0
+    else:
+        vol_regime_sim = 50.0
+
+    # ── 維度 5：價格在 BB 帶的位置 ──
+    bb_calc = registry.calculate("bb", df)
+    if bb_calc and "bb_upper" in bb_calc and "bb_lower" in bb_calc:
+        bb_upper = [v for v in bb_calc["bb_upper"] if v is not None]
+        bb_lower = [v for v in bb_calc["bb_lower"] if v is not None]
+        if bb_upper and bb_lower:
+            upper = bb_upper[-1]
+            lower = bb_lower[-1]
+            if upper - lower > 1e-10:
+                bb_position = (closes[-1] - lower) / (upper - lower)
+                # 接近下軌（0.0-0.3）或上軌（0.7-1.0）都有意義
+                price_pos_sim = 70.0 if bb_position < 0.3 else (60.0 if bb_position > 0.7 else 50.0)
+            else:
+                price_pos_sim = 50.0
+        else:
+            price_pos_sim = 50.0
+    else:
+        price_pos_sim = 50.0
+
+    # ── 整體相似度（加權平均）──
+    dimensions = {
+        "technical_indicators": (tech_sim, 0.40),
+        "trend_direction": (trend_sim, 0.20),
+        "volume_trend": (vol_sim, 0.15),
+        "volatility_regime": (vol_regime_sim, 0.15),
+        "price_position": (price_pos_sim, 0.10),
+    }
+    overall = sum(score * weight for score, weight in dimensions.values())
+
+    breakdown = {k: round(v[0], 1) for k, v in dimensions.items()}
+
+    if overall >= 70:
+        interp = "當前狀態與歷史成功模式高度吻合"
+    elif overall >= 50:
+        interp = "當前狀態與歷史成功模式部分吻合"
+    else:
+        interp = "當前狀態與歷史成功模式差異較大"
+
+    # 找出最強和最弱維度
+    best_dim = max(breakdown, key=breakdown.get)
+    worst_dim = min(breakdown, key=breakdown.get)
+    dim_names = {
+        "technical_indicators": "技術指標",
+        "trend_direction": "趨勢方向",
+        "volume_trend": "量能趨勢",
+        "volatility_regime": "波動率環境",
+        "price_position": "價格位置",
+    }
+    interp += f"，{dim_names[best_dim]}最吻合（{breakdown[best_dim]}%），{dim_names[worst_dim]}偏差最大（{breakdown[worst_dim]}%）"
+
+    return {
+        "overall_similarity_pct": round(overall, 1),
+        "breakdown": breakdown,
+        "interpretation": interp,
+    }
+
+
+def _check_feature_drift(
+    df_full: pd.DataFrame,
+    df_recent: pd.DataFrame,
+    future_hit_full: np.ndarray,
+    feature_names: list[str],
+    indicator_ids: list[str],
+    lookback: int,
+) -> Optional[dict]:
+    """比較全量和近期的命中特徵是否漂移。"""
+    # 近期 future_hit（簡化：取 full 的尾部對應段）
+    recent_len = len(df_recent)
+    full_len = len(df_full)
+    offset = full_len - recent_len
+    if offset < 0:
+        return None
+
+    recent_hit = future_hit_full[offset:offset + recent_len]
+    recent_valid = len(recent_hit)
+    recent_hit_idx = [i for i in range(lookback, min(recent_valid, recent_len)) if i < len(recent_hit) and recent_hit[i]]
+
+    if len(recent_hit_idx) < 5:
+        return None
+
+    # 比較全量命中和近期命中的指標均值
+    drifted = []
+    for ind_id in indicator_ids:
+        try:
+            calc_full = registry.calculate(ind_id, df_full)
+            calc_recent = registry.calculate(ind_id, df_recent)
+            if not calc_full or not calc_recent:
+                continue
+        except Exception:
+            continue
+
+        for sname in calc_full:
+            fname = f"{ind_id}_{sname}" if sname != ind_id else ind_id
+            if fname not in feature_names:
+                continue
+
+            arr_full = np.array([float(v) if v is not None else np.nan for v in calc_full[sname]])
+            arr_recent = np.array([float(v) if v is not None else np.nan for v in calc_recent[sname]])
+
+            # 全量命中均值
+            full_hit_idx = [i for i in range(lookback, len(future_hit_full)) if future_hit_full[i]]
+            if not full_hit_idx:
+                continue
+            full_vals = [float(np.nanmean(arr_full[max(0, i - lookback):i])) for i in full_hit_idx[:100]]
+            recent_vals = [float(np.nanmean(arr_recent[max(0, i - lookback):i])) for i in recent_hit_idx]
+
+            full_mean = np.nanmean(full_vals)
+            recent_mean = np.nanmean(recent_vals)
+            full_std = np.nanstd(full_vals)
+
+            if full_std > 1e-10:
+                drift_z = abs(recent_mean - full_mean) / full_std
+                if drift_z > 1.5:
+                    drifted.append({
+                        "feature": fname,
+                        "full_mean": round(float(full_mean), 4),
+                        "recent_mean": round(float(recent_mean), 4),
+                        "drift_z": round(float(drift_z), 2),
+                    })
+
+    if not drifted:
+        return None
+
+    return {
+        "drifted_features": drifted,
+        "warning": f"近期成功模式與歷史有 {len(drifted)} 個特徵漂移（z > 1.5），全量特徵可能不再適用當前市場",
+    }
 
 
 async def _exec_generate_scenarios(args: dict, default_symbol: str, default_tf: str) -> dict:

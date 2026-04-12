@@ -252,7 +252,7 @@ type 可選：support_resistance, trend, pattern, indicator, strategy, volume, s
 
 【預測追蹤】有明確進出場數值時附加：
 ---PREDICTIONS---
-- [direction:long/short] entry=價格 target=目標 stop=止損 timeframe=48h/7d confidence=high/medium/low regime=趨勢/盤整/高波動 indicators=指標1,指標2 invalidation=推翻本次判斷的具體條件
+- [direction:long/short] entry=價格 target=目標 stop=止損 timeframe=48h/72h/7d/14d confidence=high/medium/low regime=趨勢/盤整/高波動 indicators=指標1,指標2 invalidation=推翻本次判斷的具體條件
 ---END_PREDICTIONS---
 每次最多 2 個預測。invalidation 欄位為必填 — 明確寫出「哪些條件發生將推翻本次判斷」。
 注意：PREDICTIONS 區塊會被系統自動擷取，使用者看不到。你「必須」在回覆正文中用自然語言列出策略有效期和失效條件。
@@ -493,11 +493,16 @@ _PROMPT_MODULES["output_lite"] = """
 
 【★ 策略有效期 — 必須遵守】
 提出具體交易策略（含進場/止損/目標）時，回覆正文必須包含：
-1. **策略有效期間**：從今日起算，根據 timeframe 推算結束日。例如 timeframe=48h → 有效約 2 天；timeframe=7d → 有效約 7 天
-2. **預計有效天數**：例如「本策略預計有效 2 天（48 小時）」
+1. **策略有效期間**：從今日起算，根據分析的時間框架選擇合理有效期：
+   - 15m/1h 分析 → timeframe=24h~48h（1-2 天）
+   - 4h 分析 → timeframe=72h~7d（3-7 天）
+   - 1d 分析 → timeframe=7d~14d（1-2 週）
+   - 1w 分析 → timeframe=14d~30d（2-4 週）
+   不要一律使用 48h。有效期上限不超過 30 天。超過 14 天的策略必須標註「長週期策略，期間可能需要根據市場變化調整」。
+2. **預計有效天數**：例如「本策略預計有效 5 天（120 小時）」
 3. **失效條件**：明確列出哪些指標達到什麼數值時此策略失效（具體數字，與 PREDICTIONS 的 invalidation 一致但用使用者可讀格式）
-格式範例：
-📅 策略有效期：2026-04-05 至 2026-04-07（48 小時）
+格式範例（4h 分析）：
+📅 策略有效期：2026-04-05 至 2026-04-10（5 天）
 ⚠️ 失效條件：(1) BTC 跌破 65,000（止損觸發）(2) RSI(4h) 回落至 45 以下 (3) 成交量連續 3 根低於 20 日均量 50%"""
 
 # ─── output_full（新增）──────────────────────────────
@@ -622,25 +627,37 @@ _PROMPT_MODULES["quant_research"] = """
 # ─── conditional_prob（新增）─────────────────────────────
 
 _PROMPT_MODULES["conditional_prob"] = """
-【條件機率掃描 — scan_conditional_probability】
+【條件機率掃描 + 命中特徵分析 — scan_conditional_probability】
 當使用者問「RSI 在多少時上漲機率最高」「什麼條件下後續漲 3% 機率最大」等問題時，
 必須呼叫 scan_conditional_probability 進行後端統計，不要只用文字猜測。
 
 此函式會：
 1. 把指定指標的數值範圍分成 N 個區間
-2. 統計每個區間後續 forward_bars 根 K 線漲/跌 ≥ target_pct 的機率
+2. 統計每個區間後續 forward_bars 根 K 線內「最高漲幅」≥ target_pct 的機率
 3. 找出機率最高的區間，並計算相對於基線的提升幅度 (lift)
+4. 分析命中 K 線前 lookback_bars 根的共同特徵（多指標 Cohen's d 比較）
+5. 計算當前走勢與歷史成功模式的多維度相似度
 
-重要：未指定日期範圍時，系統預設使用最近 120 根 K 線的數據，
-以確保分析結果反映當前市場環境。如用戶需要分析更長時間範圍，請主動指定 start_date。
+使用者可透過對話自訂參數，例如「往前看 10 根，預測後 12 根漲 5%」。
+未指定時使用預設值：lookback_bars=7, forward_bars=6, target_pct=3.0。
+
+回覆時「必須」說明：
+1. 回推分析了前幾根 K 線的共同特徵（lookback_bars）
+2. 預測往後幾根 K 線內的最高漲/跌幅（forward_bars）
+3. 目標漲/跌幅門檻（target_pct）
+4. 當前走勢與歷史成功模式的相似度百分比及各維度breakdown
+
+注意：基線機率使用「期間內最高漲幅」計算，數值會比固定終點高。
+回覆時「必須」同時報告 lift（條件機率 - 基線機率），lift > 10% 才有實質意義。
+禁止只報告絕對機率而不提 lift。
 
 結果解讀：
-- best_range：機率最高的指標數值區間
-- best_prob_pct：該區間的條件機率
-- baseline_prob_pct：不考慮任何條件時的基線機率
-- lift_vs_baseline：相比基線提升了多少個百分點（越高越有參考價值）
-- bins：每個區間的詳細統計（count < 5 的區間結論不可靠）
-- 必須加風險警告：條件機率不代表因果關係"""
+- best_range / best_prob_pct / lift_vs_baseline：最佳區間及提升幅度
+- hit_pattern_analysis：命中 K 線的共同特徵（significant_features）
+  - effect_size > 0.5 的特徵才標記為顯著
+  - current_similarity：當前與歷史成功模式的相似度（含 5 維度 breakdown）
+  - drift_warning：近期特徵是否漂移（漂移時全量特徵可能失效）
+- 必須加風險警告：條件機率和共同特徵不代表因果關係"""
 
 # ─── calibrate（保留）─────────────────────────────────
 
@@ -876,6 +893,7 @@ _INTENT_TO_MODULES: dict[str, list[str]] = {
     "quant_research": [
         "regime_v2", "quant_research", "backtest",
         "factor_validation", "risk_checklist", "alpha_monitor", "output_full",
+        "conditional_prob",
     ],
     "calibrate": ["calibrate"],
     "event_analysis": ["event_analysis"],
@@ -1446,10 +1464,10 @@ FUNCTION_DEFINITIONS = [
         "function": {
             "name": "scan_conditional_probability",
             "description": (
-                "條件機率掃描：掃描指定技術指標的所有數值區間，統計每個區間在後續 N 根 K 線內"
-                "價格上漲/下跌超過 X% 的條件機率，並找出機率最高的區間。"
-                "適用場景：「RSI 在多少時後續上漲 3% 機率最高」「MACD 什麼值時最容易漲」"
-                "「什麼條件下勝率最高」。後端使用 NumPy 完成計算，不消耗額外 token。"
+                "條件機率掃描 + 命中特徵分析：掃描指定技術指標的所有數值區間，統計每個區間在後續 N 根 K 線內"
+                "最高漲幅/最大跌幅超過 X% 的條件機率，找出機率最高的區間，並分析命中 K 線前 N 根的共同特徵。"
+                "還會計算當前走勢與歷史成功模式的多維度相似度（技術指標、趨勢方向、量能、波動率、價格位置）。"
+                "適用場景：「RSI 在多少時後續上漲 3% 機率最高」「什麼條件下勝率最高」「往前看 10 根預測後 12 根漲 5%」。"
             ),
             "parameters": {
                 "type": "object",
@@ -1459,9 +1477,14 @@ FUNCTION_DEFINITIONS = [
                         "items": {"type": "string"},
                         "description": "要掃描的指標 ID，如 ['rsi','macd','adx','bb','stochrsi']",
                     },
+                    "lookback_bars": {
+                        "type": "integer",
+                        "description": "回推分析前幾根 K 線的共同特徵（預設 7）。使用者說「往前看 10 根」時填入",
+                        "default": 7,
+                    },
                     "forward_bars": {
                         "type": "integer",
-                        "description": "觀察後續幾根 K 線（預設 6）",
+                        "description": "觀察後續幾根 K 線的最高漲/跌幅（預設 6）",
                         "default": 6,
                     },
                     "target_pct": {

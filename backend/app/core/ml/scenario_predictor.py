@@ -588,6 +588,15 @@ def _check_btc_correlation(df: pd.DataFrame, symbol: str, timeframe: str) -> Opt
 class ScenarioPredictor:
     """三大情境預測引擎"""
 
+    # 根據時間框架自動調整預設 forward_bars
+    _DEFAULT_FORWARD_BARS = {
+        "15m": 24,   # 6 小時
+        "1h": 12,    # 12 小時
+        "4h": 12,    # 2 天
+        "1d": 7,     # 1 週
+        "1w": 4,     # 1 個月
+    }
+
     def predict_scenarios(
         self,
         df: pd.DataFrame,
@@ -601,12 +610,16 @@ class ScenarioPredictor:
             df: OHLCV DataFrame
             symbol: 交易對
             timeframe: 時間週期
-            forward_bars: 預測有效期（K 線根數）
+            forward_bars: 預測有效期（K 線根數，預設 5 會自動根據 timeframe 調整）
 
         Returns:
             ScenarioResult 含三個情境及其機率
         """
         from app.utils.timezone import taipei_now
+
+        # 自動調整 forward_bars：只在用戶沒指定（預設值 5）時調整
+        if forward_bars == 5:
+            forward_bars = self._DEFAULT_FORWARD_BARS.get(timeframe, 5)
 
         if df is None or df.empty or len(df) < 30:
             raise ValueError(f"數據不足：需要至少 30 根 K 線，目前僅有 {len(df) if df is not None else 0} 根")
@@ -740,6 +753,10 @@ class ScenarioPredictor:
             f"看漲={bullish_prob:.1%}, 結構={regime['regime']}, "
             f"ML={'可用('+ml['reliability']+')' if ml['available'] else '不可用'}"
         )
+
+        # 加入預測視野和信心衰減說明
+        signal_sources["forecast_horizon"] = f"{forward_bars} 根 K 線（{timeframe}）"
+        signal_sources["confidence_decay_note"] = "預測信心隨時間遞減，前 1-3 根可信度最高，後段僅供參考方向"
 
         return ScenarioResult(
             symbol=symbol,
