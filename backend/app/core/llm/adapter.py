@@ -105,11 +105,13 @@ class LLMResponse:
         function_calls: Optional[list[dict[str, Any]]] = None,
         raw_response: Any = None,
         usage: Optional[TokenUsage] = None,
+        stop_reason: str = "end_turn",
     ):
         self.message = message
         self.function_calls = function_calls or []
         self.raw_response = raw_response
         self.usage = usage
+        self.stop_reason = stop_reason  # "end_turn" / "length" / "tool_use"
 
 
 class BaseLLMAdapter(ABC):
@@ -242,6 +244,7 @@ class OpenAIAdapter(BaseLLMAdapter):
                 function_calls=function_calls,
                 raw_response=response,
                 usage=usage,
+                stop_reason=choice.finish_reason or "end_turn",
             )
         except Exception as e:
             err_str = str(e)

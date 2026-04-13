@@ -260,9 +260,25 @@ export const useChartStore = create<ChartStore>((set, get) => ({
 
   // ===== 標記操作 =====
   addAnnotation: (annotation) =>
-    set((state) => ({
-      annotations: [...state.annotations, { ...annotation, visible: annotation.visible !== false }],
-    })),
+    set((state) => {
+      // 去重：比對 type + 核心數值，避免多輪 function call 產生重複標記
+      const isDuplicate = state.annotations.some((existing) => {
+        if (existing.type !== annotation.type) return false;
+        // 水平線：比對 price
+        if (annotation.type === 'horizontal_line' && existing.price === annotation.price) return true;
+        // 趨勢線：比對起終點
+        if (annotation.type === 'trend_line' && existing.startTime === annotation.startTime && existing.endTime === annotation.endTime) return true;
+        // 標記點：比對 time + text
+        if (annotation.type === 'marker' && existing.time === annotation.time && existing.text === annotation.text) return true;
+        // 通用：比對 label + price/value
+        if (existing.label === annotation.label && existing.price === annotation.price) return true;
+        return false;
+      });
+      if (isDuplicate) return state;
+      return {
+        annotations: [...state.annotations, { ...annotation, visible: annotation.visible !== false }],
+      };
+    }),
 
   removeAnnotation: (id) =>
     set((state) => ({

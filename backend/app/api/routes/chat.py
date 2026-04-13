@@ -1498,8 +1498,61 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                         _r2_text = response3.message or ""
                         logger.info(f"第三輪結果: 文字長度={len(_r2_text)}")
 
+                    # ★★ 截斷偵測 + 自動續寫 ★★
+                    # 判斷最終回應是否被 token 上限截斷
+                    _final_response = response3 if (not (response2.message or "").strip() and response2.function_calls) else response2
+                    _was_truncated = getattr(_final_response, "stop_reason", "end_turn") in ("length", "max_tokens")
+
+                    if _was_truncated and _r2_text.strip():
+                        logger.warning(f"LLM 回覆被截斷（stop_reason={_final_response.stop_reason}），啟動自動續寫")
+                        # 先串流第一段 + 提示
+                        _part1 = strip_system_distill(strip_predictions(strip_key_insights(_r2_text)))
+                        _part1 += "\n\n⏳ **分析內容較長，後續正在生成...**\n"
+                        for chunk in _split_text_for_streaming(_part1):
+                            yield _sse_event("token", {"content": chunk})
+                            await asyncio.sleep(0.02)
+
+                        # 追加續寫呼叫
+                        yield _sse_event("status", {"message": "正在生成後續分析..."})
+                        _cont_messages = list(round2_messages)
+                        _cont_messages.append({"role": "assistant", "content": _r2_text})
+                        _cont_messages.append({
+                            "role": "user",
+                            "content": "你的回覆被截斷了，請從截斷處繼續完成分析。不要重複已說過的內容，直接接續。",
+                        })
+                        _cont_task = asyncio.create_task(
+                            adapter.chat(
+                                _cont_messages, chart_state=request.chart_state,
+                                force_text=True, system_prompt=_dynamic_prompt,
+                            )
+                        )
+                        _active_tasks.append(_cont_task)
+                        _hb_sec = 0
+                        while not _cont_task.done():
+                            await asyncio.sleep(3)
+                            _hb_sec += 3
+                            yield _sse_event("status", {"message": f"AI 正在續寫分析... ({_hb_sec}秒)"})
+                        _cont_response = _cont_task.result()
+
+                        if _cont_response.usage and total_usage:
+                            total_usage.prompt_tokens += _cont_response.usage.prompt_tokens
+                            total_usage.completion_tokens += _cont_response.usage.completion_tokens
+                            total_usage.total_tokens += _cont_response.usage.total_tokens
+
+                        _cont_text = _cont_response.message or ""
+                        if _cont_text.strip():
+                            logger.info(f"續寫完成: 文字長度={len(_cont_text)}")
+                            _r2_text += "\n" + _cont_text  # 合併完整文字
+                            _cont_display = strip_system_distill(strip_predictions(strip_key_insights(_cont_text)))
+                            for chunk in _split_text_for_streaming(_cont_display):
+                                yield _sse_event("token", {"content": chunk})
+                                await asyncio.sleep(0.02)
+
+                        if len(final_text) < _MAX_FINAL_TEXT:
+                            final_text += _r2_text[:_MAX_FINAL_TEXT - len(final_text)]
+
                     # 串流文字回應（移除 KEY_INSIGHTS / PREDICTIONS + JSON 過濾）
-                    if _r2_text.strip():
+                    elif _r2_text.strip():
                         display_msg2 = strip_system_distill(strip_predictions(strip_key_insights(_r2_text)))
 
                         # ★ 方案 A：偵測並提取文字中誤輸出的 JSON function call
