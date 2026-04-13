@@ -172,6 +172,11 @@ export default function SyncPanel() {
             setSyncing(false);
 
             if (data.status === 'completed') {
+              // 把同步的標的自動加入 K 線下拉選單
+              try {
+                const { addSymbolsToList } = await import('../TopBar');
+                addSymbolsToList(selectedSymbols);
+              } catch { /* ignore */ }
               loadChartData();
               toast(`數據同步完成（${data.completed_items}/${data.total_items}）`, 'success');
             } else {

@@ -72,7 +72,7 @@ interface SymbolList {
   tw_stock: string[];
 }
 
-function loadSymbolList(): SymbolList {
+export function loadSymbolList(): SymbolList {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) return JSON.parse(raw);
@@ -80,8 +80,22 @@ function loadSymbolList(): SymbolList {
   return { crypto: [...DEFAULT_CRYPTO], tw_stock: [...DEFAULT_TW_STOCK] };
 }
 
-function saveSymbolList(list: SymbolList) {
+export function saveSymbolList(list: SymbolList) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+}
+
+/** 把新標的加入下拉選單（如果不存在） */
+export function addSymbolsToList(symbols: string[]) {
+  const list = loadSymbolList();
+  let changed = false;
+  for (const sym of symbols) {
+    if (sym.endsWith('/TWD')) {
+      if (!list.tw_stock.includes(sym)) { list.tw_stock.push(sym); changed = true; }
+    } else {
+      if (!list.crypto.includes(sym)) { list.crypto.push(sym); changed = true; }
+    }
+  }
+  if (changed) saveSymbolList(list);
 }
 
 function getTwDisplayName(sym: string): string {
@@ -210,7 +224,7 @@ export default function TopBar({ onSettingsClick }: TopBarProps) {
         // 英文字母 → 可能是指數代碼如 TWII
         stockCode = raw.toUpperCase();
       } else {
-        // 中文名稱 → 查對照表（精確 + 前綴匹配）
+        // 中文名稱 → 查本地對照表 + 後端搜尋
         if (TW_NAME_TO_CODE[raw]) {
           stockCode = TW_NAME_TO_CODE[raw];
         } else {
@@ -218,7 +232,20 @@ export default function TopBar({ onSettingsClick }: TopBarProps) {
           if (match) {
             stockCode = match.code;
           } else {
-            return; // 找不到
+            // 本地找不到 → 呼叫後端搜尋 API
+            import('../services/api').then(async ({ searchTwStock, setTwStockNameCache }) => {
+              const results = await searchTwStock(raw);
+              if (results.length > 0) {
+                const best = results[0];
+                setTwStockNameCache(best.code, best.name);
+                const sym = best.symbol;
+                if (!symbolList.tw_stock.includes(sym)) {
+                  updateList({ ...symbolList, tw_stock: [...symbolList.tw_stock, sym] });
+                }
+                setNewTwStock('');
+              }
+            });
+            return;
           }
         }
       }

@@ -1108,4 +1108,14 @@ export function setTwStockNameCache(code: string, name: string) {
   _twNameCache[code.toUpperCase()] = name;
 }
 
+/** 搜尋台股：支援代碼或中文名稱 */
+export async function searchTwStock(query: string): Promise<{ code: string; name: string; symbol: string }[]> {
+  try {
+    const res = await api.get('/chart/tw-stock-search', { params: { q: query } });
+    return res.data?.results || [];
+  } catch {
+    return [];
+  }
+}
+
 export default api;

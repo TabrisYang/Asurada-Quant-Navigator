@@ -42,6 +42,20 @@ async def list_available_data():
     return {"data": crypto_engine.list_available_data() + tw_stock_engine.list_available_data()}
 
 
+@router.get("/tw-stock-search")
+async def search_tw_stock(q: str = Query(default="")):
+    """搜尋台股：支援代碼或中文名稱"""
+    from app.data.tw_sectors import TW_STOCK_NAMES
+    if not q or len(q) < 1:
+        return {"results": []}
+    q = q.strip()
+    results = []
+    for code, name in TW_STOCK_NAMES.items():
+        if q in code or q in name:
+            results.append({"code": code, "name": name, "symbol": f"{code}/TWD"})
+    return {"results": results[:20]}
+
+
 @router.get("/data")
 async def get_chart_data(
     symbol: str = Query(default="BTC/USDT"),

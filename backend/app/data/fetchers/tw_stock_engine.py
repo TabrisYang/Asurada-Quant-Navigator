@@ -87,11 +87,11 @@ class TwStockEngine:
         if not end_date:
             end_date = datetime.now()
         if not start_date:
-            # 台股不自動 fallback，要求用戶指定
-            raise ValueError(
-                "請指定 start_date，系統不會自動決定台股數據抓取範圍。"
-                "建議設定為 2020-01-01 或更早。"
-            )
+            # 檢查是否有本地數據：有 → 增量更新不需要 start_date
+            # 沒有 → 預設從 2020-01-01 開始
+            if not filepath.exists():
+                start_date = datetime(2020, 1, 1)
+                _report("未指定起始日期，預設從 2020-01-01 開始抓取")
 
         # 斷點續傳：檢查本地數據
         existing_df = None
@@ -105,7 +105,7 @@ class TwStockEngine:
                     last_ts = existing_df["timestamp"].max()
                     last_date = last_ts.to_pydatetime().replace(tzinfo=None)
 
-                    need_backfill = first_date > start_date + timedelta(days=1)
+                    need_backfill = start_date is not None and first_date > start_date + timedelta(days=1)
                     need_forward = last_date < end_date - timedelta(days=1)
 
                     # 往前補抓歷史數據

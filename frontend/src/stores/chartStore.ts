@@ -153,6 +153,8 @@ export const useChartStore = create<ChartStore>((set, get) => ({
       conversationId: null,
       lastFactorScan: null,
       annotations: [],
+      startDate: null,
+      endDate: null,
     };
   }),
   setTimeframe: (timeframe) => set({ timeframe, lastFactorScan: null }),
