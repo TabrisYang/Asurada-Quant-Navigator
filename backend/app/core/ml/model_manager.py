@@ -479,6 +479,11 @@ class ModelManager:
         result = predictor.predict_single(X_latest, feature_names, threshold)
         result.model_id = mid
 
+        # SHAP 解釋性：分析哪些特徵驅動了這次預測
+        shap_explanation = _compute_shap_explanation(predictor, X_latest, feature_names)
+        if shap_explanation:
+            result.shap_drivers = shap_explanation
+
         model_info = self.get_model_status(symbol, timeframe, mid)
         if model_info:
             result.model_quality = {
@@ -1109,4 +1114,43 @@ class ModelManager:
 
 
 # 全域單例
+def _compute_shap_explanation(predictor, X: np.ndarray, feature_names: list[str]) -> Optional[dict]:
+    """計算 SHAP 值，解釋預測的特徵貢獻。"""
+    try:
+        import shap
+        model = getattr(predictor, "model", None)
+        if model is None:
+            return None
+
+        explainer = shap.TreeExplainer(model)
+        shap_values = explainer.shap_values(X[-1:])
+
+        # LightGBM/XGBoost 可能回傳 list（多類別）
+        if isinstance(shap_values, list):
+            sv = shap_values[1] if len(shap_values) > 1 else shap_values[0]
+        else:
+            sv = shap_values
+
+        if sv.ndim > 1:
+            sv = sv[0]
+
+        # 排序：貢獻最大的 top 5 特徵
+        pairs = list(zip(feature_names, sv))
+        pairs.sort(key=lambda x: abs(x[1]), reverse=True)
+        top5 = pairs[:5]
+
+        total_push = float(np.sum(sv))
+        return {
+            "top_drivers": [
+                {"feature": f, "shap_value": round(float(v), 4), "direction": "bullish" if v > 0 else "bearish"}
+                for f, v in top5
+            ],
+            "overall_push": "bullish" if total_push > 0 else "bearish",
+            "total_shap": round(total_push, 4),
+        }
+    except Exception as e:
+        logger.debug(f"SHAP 計算失敗: {e}")
+        return None
+
+
 model_manager = ModelManager()

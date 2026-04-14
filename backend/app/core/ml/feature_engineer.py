@@ -214,6 +214,120 @@ def build_features(
     return X, y, window_names, valid_mask, label_stats
 
 
+# ═══════════════════════════════════════════════════
+#  因子淨化：VIF + 殘差正交化
+# ═══════════════════════════════════════════════════
+
+# 因子群分組（用於殘差正交化）
+_FACTOR_GROUPS = {
+    "trend": ["sma", "ema", "supertrend", "donchian", "ichimoku"],
+    "momentum": ["rsi", "macd", "roc", "stochrsi", "bias"],
+    "volatility": ["atr", "bb", "keltner", "hv", "vol_squeeze"],
+    "volume": ["obv", "cvd", "rel_vol", "volume_ratio"],
+    "structure": ["adx", "market_structure", "psar"],
+}
+
+
+def orthogonalize_features(
+    X: np.ndarray,
+    feature_names: list[str],
+    vif_threshold: float = 10.0,
+) -> tuple[np.ndarray, list[str], dict]:
+    """因子淨化：VIF 共線性檢查 + 群內殘差正交化。
+
+    Args:
+        X: 特徵矩陣 (n_samples, n_features)
+        feature_names: 特徵名稱列表
+        vif_threshold: VIF 閾值，>10 視為高共線性
+
+    Returns:
+        (X_clean, clean_names, report)
+    """
+    from statsmodels.stats.outliers_influence import variance_inflation_factor
+
+    if X.shape[1] < 2 or X.shape[0] < X.shape[1]:
+        return X, feature_names, {"status": "skipped", "reason": "特徵數不足或樣本太少"}
+
+    # 替換 NaN/Inf
+    X_clean = X.copy()
+    X_clean = np.nan_to_num(X_clean, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # 1. VIF 檢查
+    vif_scores = []
+    for i in range(X_clean.shape[1]):
+        try:
+            v = variance_inflation_factor(X_clean, i)
+            vif_scores.append(float(v) if np.isfinite(v) else 999.0)
+        except Exception:
+            vif_scores.append(999.0)
+
+    high_vif = [
+        {"feature": feature_names[i], "vif": round(vif_scores[i], 1)}
+        for i in range(len(feature_names))
+        if vif_scores[i] > vif_threshold
+    ]
+
+    # 2. 按群分組，群內保留 VIF 最低的，其餘用殘差取代
+    keep_mask = np.ones(len(feature_names), dtype=bool)
+    orthogonalized = []
+
+    for group_name, group_prefixes in _FACTOR_GROUPS.items():
+        # 找屬於這個群的特徵
+        group_indices = []
+        for i, name in enumerate(feature_names):
+            base = name.split("_")[0]
+            if base in group_prefixes:
+                group_indices.append(i)
+
+        if len(group_indices) < 2:
+            continue
+
+        # 保留 VIF 最低的作為主因子
+        group_vifs = [(idx, vif_scores[idx]) for idx in group_indices]
+        group_vifs.sort(key=lambda x: x[1])
+        primary_idx = group_vifs[0][0]
+
+        # 其餘因子用殘差正交化（去掉主因子的影響）
+        for idx, _ in group_vifs[1:]:
+            if vif_scores[idx] > vif_threshold:
+                # 用 OLS 殘差取代：y = a*primary + b → residual = y - predicted
+                primary_col = X_clean[:, primary_idx]
+                target_col = X_clean[:, idx]
+                denom = np.dot(primary_col, primary_col)
+                if denom > 1e-10:
+                    beta = np.dot(primary_col, target_col) / denom
+                    residual = target_col - beta * primary_col
+                    X_clean[:, idx] = residual
+                    orthogonalized.append(feature_names[idx])
+
+    # 3. 移除仍然極高 VIF（>50）的特徵
+    final_keep = []
+    for i in range(len(feature_names)):
+        if vif_scores[i] > 50 and feature_names[i] not in orthogonalized:
+            keep_mask[i] = False
+        else:
+            final_keep.append(i)
+
+    X_result = X_clean[:, keep_mask]
+    names_result = [feature_names[i] for i in range(len(feature_names)) if keep_mask[i]]
+
+    report = {
+        "status": "success",
+        "original_features": len(feature_names),
+        "retained_features": len(names_result),
+        "removed_count": len(feature_names) - len(names_result),
+        "high_vif_features": high_vif[:10],
+        "orthogonalized": orthogonalized,
+    }
+
+    logger.info(
+        f"因子淨化完成: {len(feature_names)} → {len(names_result)} 特徵 "
+        f"(移除 {len(feature_names) - len(names_result)}，正交化 {len(orthogonalized)})"
+    )
+
+    return X_result, names_result, report
+
+
 def build_latest_features(
     df: pd.DataFrame,
     feature_set: str = "standard",

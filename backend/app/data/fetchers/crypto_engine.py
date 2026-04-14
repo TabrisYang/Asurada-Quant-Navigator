@@ -585,6 +585,14 @@ class CryptoDataEngine:
         # 更新元數據
         self._update_metadata(symbol, timeframe, len(combined))
 
+        # ── 抓取衍生品數據（Funding Rate + OI + 多空比）──
+        try:
+            await self._fetch_and_save_derivatives(
+                symbol, timeframe, start_date, end_date, progress_callback,
+            )
+        except Exception as e:
+            logger.warning(f"衍生品數據抓取失敗（不影響主數據）: {e}")
+
         return combined
 
     # ─────────────────────────────────────────────
@@ -670,6 +678,149 @@ class CryptoDataEngine:
     def get_metadata(self) -> dict:
         """取得完整同步元數據"""
         return self._load_metadata()
+
+    # ─────────────────────────────────────────────
+    # 衍生品數據（Funding Rate / OI / Long-Short Ratio）
+    # ─────────────────────────────────────────────
+
+    async def _fetch_and_save_derivatives(
+        self,
+        symbol: str,
+        timeframe: str,
+        start_date: Optional[datetime],
+        end_date: Optional[datetime],
+        progress_callback: Optional[Callable] = None,
+    ):
+        """平行抓取 Binance Futures 衍生品數據並存 CSV。"""
+        import aiohttp
+
+        def _report(msg: str):
+            logger.info(msg)
+            if progress_callback:
+                progress_callback(msg)
+
+        # 只有主要幣種才有衍生品數據
+        base = symbol.split("/")[0].upper()
+        supported = {"BTC", "ETH", "SOL", "ADA", "XRP", "DOGE", "AVAX", "LINK", "DOT", "MATIC"}
+        if base not in supported:
+            return
+
+        _report(f"抓取衍生品數據: {symbol}...")
+
+        safe_name = symbol.replace("/", "_")
+        deriv_file = self.data_dir / f"{safe_name}_derivatives_{timeframe}.csv"
+
+        # Binance API 基礎 URL
+        base_url = "https://fapi.binance.com"
+        binance_symbol = symbol.replace("/", "").replace("USDT", "USDT")
+
+        async with aiohttp.ClientSession() as session:
+            tasks = [
+                self._fetch_funding_rate(session, base_url, binance_symbol, start_date, end_date),
+                self._fetch_open_interest_hist(session, base_url, binance_symbol, timeframe, start_date, end_date),
+                self._fetch_long_short_ratio(session, base_url, binance_symbol, timeframe, start_date, end_date),
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        funding = results[0] if not isinstance(results[0], Exception) else []
+        oi = results[1] if not isinstance(results[1], Exception) else []
+        ls = results[2] if not isinstance(results[2], Exception) else []
+
+        # 合併成 DataFrame
+        dfs = []
+        if funding:
+            df_f = pd.DataFrame(funding)
+            df_f["timestamp"] = pd.to_datetime(df_f["fundingTime"], unit="ms")
+            df_f = df_f.rename(columns={"fundingRate": "funding_rate"})
+            df_f = df_f[["timestamp", "funding_rate"]].drop_duplicates("timestamp")
+            df_f["funding_rate"] = df_f["funding_rate"].astype(float)
+            dfs.append(("funding_rate", df_f))
+
+        if oi:
+            df_o = pd.DataFrame(oi)
+            df_o["timestamp"] = pd.to_datetime(df_o["timestamp"], unit="ms")
+            df_o = df_o.rename(columns={"sumOpenInterestValue": "open_interest"})
+            df_o = df_o[["timestamp", "open_interest"]].drop_duplicates("timestamp")
+            df_o["open_interest"] = df_o["open_interest"].astype(float)
+            dfs.append(("open_interest", df_o))
+
+        if ls:
+            df_ls = pd.DataFrame(ls)
+            df_ls["timestamp"] = pd.to_datetime(df_ls["timestamp"], unit="ms")
+            df_ls = df_ls.rename(columns={"longShortRatio": "long_short_ratio"})
+            df_ls = df_ls[["timestamp", "long_short_ratio"]].drop_duplicates("timestamp")
+            df_ls["long_short_ratio"] = df_ls["long_short_ratio"].astype(float)
+            dfs.append(("long_short_ratio", df_ls))
+
+        if not dfs:
+            _report("衍生品數據：所有 API 均未回傳數據")
+            return
+
+        # 合併（以時間為 key）
+        merged = dfs[0][1]
+        for _, df_extra in dfs[1:]:
+            merged = pd.merge(merged, df_extra, on="timestamp", how="outer")
+        merged = merged.sort_values("timestamp").reset_index(drop=True)
+
+        # 存檔
+        merged.to_csv(deriv_file, index=False)
+        _report(f"衍生品數據已儲存: {deriv_file.name}（{len(merged)} 筆）")
+
+    @staticmethod
+    async def _fetch_funding_rate(session, base_url, symbol, start_date, end_date):
+        """Binance Futures Funding Rate"""
+        params = {"symbol": symbol, "limit": 1000}
+        if start_date:
+            params["startTime"] = int(start_date.timestamp() * 1000)
+        if end_date:
+            params["endTime"] = int(end_date.timestamp() * 1000)
+        async with session.get(f"{base_url}/fapi/v1/fundingRate", params=params) as resp:
+            if resp.status == 200:
+                return await resp.json()
+        return []
+
+    @staticmethod
+    async def _fetch_open_interest_hist(session, base_url, symbol, timeframe, start_date, end_date):
+        """Binance Futures Open Interest History"""
+        period_map = {"15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d"}
+        period = period_map.get(timeframe, "1d")
+        params = {"symbol": symbol, "period": period, "limit": 500}
+        if start_date:
+            params["startTime"] = int(start_date.timestamp() * 1000)
+        if end_date:
+            params["endTime"] = int(end_date.timestamp() * 1000)
+        async with session.get(f"{base_url}/futures/data/openInterestHist", params=params) as resp:
+            if resp.status == 200:
+                return await resp.json()
+        return []
+
+    @staticmethod
+    async def _fetch_long_short_ratio(session, base_url, symbol, timeframe, start_date, end_date):
+        """Binance Futures Global Long/Short Account Ratio"""
+        period_map = {"15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d"}
+        period = period_map.get(timeframe, "1d")
+        params = {"symbol": symbol, "period": period, "limit": 500}
+        if start_date:
+            params["startTime"] = int(start_date.timestamp() * 1000)
+        if end_date:
+            params["endTime"] = int(end_date.timestamp() * 1000)
+        async with session.get(f"{base_url}/futures/data/globalLongShortAccountRatio", params=params) as resp:
+            if resp.status == 200:
+                return await resp.json()
+        return []
+
+    def load_derivatives(self, symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
+        """讀取衍生品數據（Funding Rate / OI / Long-Short Ratio）。"""
+        safe_name = normalize_symbol(symbol).replace("/", "_")
+        deriv_file = self.data_dir / f"{safe_name}_derivatives_{timeframe}.csv"
+        if not deriv_file.exists():
+            return None
+        try:
+            df = pd.read_csv(deriv_file)
+            df["timestamp"] = pd.to_datetime(df["timestamp"])
+            return df
+        except Exception:
+            return None
 
 
 # 全域單例
