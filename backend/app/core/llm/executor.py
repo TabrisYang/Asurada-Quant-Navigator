@@ -270,6 +270,9 @@ async def execute_function_calls(
                 elif name == "analyze_sector":
                     result = await _exec_analyze_sector(args)
                     return {"function": name, "result": result}
+                elif name == "analyze_momentum":
+                    result = await _exec_analyze_momentum(args, default_symbol, default_timeframe)
+                    return {"function": name, "result": result}
                 elif name == "list_sectors":
                     result = await _exec_list_sectors()
                     return {"function": name, "result": result}
@@ -2027,3 +2030,22 @@ async def _exec_list_sectors() -> dict:
     """列出所有可分析的台股族群"""
     from app.data.tw_sectors import list_sectors
     return {"status": "success", "sectors": list_sectors()}
+
+
+async def _exec_analyze_momentum(args: dict, default_symbol: str, default_tf: str) -> dict:
+    """動能交易分析"""
+    from app.core.momentum_analyzer import analyze_momentum
+
+    symbol = args.get("symbol", default_symbol)
+    timeframe = args.get("timeframe", default_tf)
+
+    df = _load_local_data(symbol, timeframe)
+    if df is None or df.empty:
+        return {"status": "error", "message": f"找不到 {symbol} {timeframe} 的本地數據，請先同步"}
+
+    # 嘗試載入 BTC 作為基準
+    benchmark_df = None
+    if "BTC" not in symbol.upper():
+        benchmark_df = _load_local_data("BTC/USDT", timeframe)
+
+    return await analyze_momentum(df, symbol, timeframe, benchmark_df)

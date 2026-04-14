@@ -87,6 +87,10 @@ _INTENT_KEYWORDS: dict[str, list[str]] = {
         "市場體制", "regime", "gmm", "garch", "hmm", "波動率預測",
         "市場環境", "市場狀態", "體制分析",
     ],
+    "momentum_analysis": [
+        "動能", "動量", "momentum", "追強", "動能分析",
+        "相對強弱", "roc", "加速", "減速", "動量反轉",
+    ],
     "sector_analysis": [
         "族群", "概念股", "板塊", "產業分析", "sector",
         "半導體族群", "金融股", "航運股", "哪些族群",
@@ -959,6 +963,21 @@ _PROMPT_MODULES["regime_analysis_mode"] = """
 5. 💡 Regime 適合什麼策略：趨勢/均值回歸/觀望
 6. ⚠️ Regime 切換風險：距離下一次 regime 變化可能還有多久"""
 
+# ─── 動能分析模式 ─────────────────────────────────
+
+_PROMPT_MODULES["momentum_analysis_mode"] = """
+【動能交易分析模式 — analyze_momentum】
+必須呼叫 analyze_momentum 取得完整動量數據。
+
+輸出格式：
+1. 📊 多週期動量因子（5/10/20/60 根報酬率 + 經典動量因子 + 方向一致性）
+2. ⚡ 動量加速/減速（ROC + 加速度 + 狀態判定 + RSI 動量）
+3. 💪 相對動量（vs BTC/大盤的 RS ratio + 超額報酬）— 若有數據
+4. 🔄 動量反轉偵測（RSI 背離 + MACD 柱狀圖變化 + StochRSI 超買超賣）
+5. 📈 動量策略回測（RSI 追強 / RSI 反轉 / ADX 趨勢追蹤，含勝率/Sharpe/MDD）
+6. 🎯 綜合動量評分（-10~+10 分 + 方向判定）
+7. 💡 操作建議（基於動量狀態 + 最佳策略 + 反轉信號）"""
+
 _PROMPT_MODULES["sector_analysis"] = """
 【台股族群/概念股分析 — analyze_sector / list_sectors】
 當使用者提到任何台股產業族群、概念股、板塊分析時，你「必須」呼叫 analyze_sector 函式。
@@ -1041,6 +1060,9 @@ _INTENT_TO_MODULES: dict[str, list[str]] = {
     "regime_analysis": [
         "regime_v2", "analysis_v2", "output_lite", "regime_analysis_mode",
     ],
+    "momentum_analysis": [
+        "regime_v2", "output_lite", "risk_checklist", "momentum_analysis_mode",
+    ],
     "sector_analysis": [
         "regime_v2", "sector_analysis", "output_lite", "risk_checklist",
     ],
@@ -1082,6 +1104,7 @@ def assemble_system_prompt(intents: set[str], teaching_mode: bool = False) -> st
         "quant_research", "calibrate", "backtest",
         "sector_analysis",
         "factor_validation_mode", "strategy_backtest_mode", "regime_analysis_mode",
+        "momentum_analysis_mode",
     )
 
     parts = [_PROMPT_CORE]
@@ -1742,6 +1765,26 @@ FUNCTION_DEFINITIONS = [
             "parameters": {
                 "type": "object",
                 "properties": {},
+            },
+        },
+    },
+    # ─── 動能分析 ───
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_momentum",
+            "description": (
+                "動能交易分析：多週期動量因子、動量加速/減速偵測、相對動量（vs BTC）、"
+                "動量反轉偵測（RSI/MACD 背離）、動量策略回測（追強/反轉/趨勢三種）。"
+                "適用場景：「動能分析」「動量排名」「追強勢」「動量反轉」「相對強弱」。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "交易對，留空使用當前"},
+                    "timeframe": {"type": "string", "description": "時間框架"},
+                },
+                "required": [],
             },
         },
     },

@@ -60,6 +60,17 @@ const ANALYSIS_CATEGORIES = [
     ],
   },
   {
+    tab: '動能分析',
+    mode: 'momentum_analysis',
+    allPrompt: '對 {symbol} 進行完整動能交易分析（多週期動量 + 加速度 + 相對強弱 + 反轉偵測 + 策略回測）',
+    items: [
+      { label: '多週期動量', prompt: '分析 {symbol} 的多週期動量因子和方向一致性' },
+      { label: '動量加速/減速', prompt: '分析 {symbol} 的動量加速度，是在加速還是減速' },
+      { label: '相對強弱', prompt: '比較 {symbol} vs BTC 的相對動量強弱' },
+      { label: '動量反轉偵測', prompt: '偵測 {symbol} 是否有動量反轉信號（RSI/MACD 背離等）' },
+    ],
+  },
+  {
     tab: '完整分析',
     allPrompt: '對 {symbol} 進行完整量化研究 + 因子驗證與監控 + 完整分析三階段',
     items: [

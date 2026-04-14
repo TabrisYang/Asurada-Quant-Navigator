@@ -707,6 +707,14 @@ def _build_messages(
             f"使用者備註：{request.message if request.message.strip() else '請分析當前市場體制'}"
         )
         messages.append({"role": "user", "content": ra_prefix})
+    elif request.mode == "momentum_analysis":
+        ma_prefix = (
+            "[系統指令：使用者點擊了「動能分析」按鈕]\n"
+            "你必須呼叫 analyze_momentum 取得完整動量數據。\n"
+            "專注報告：多週期動量、加速/減速、相對強弱、反轉信號、動量策略回測、綜合評分。\n\n"
+            f"使用者備註：{request.message if request.message.strip() else '請分析當前標的的動能狀態'}"
+        )
+        messages.append({"role": "user", "content": ma_prefix})
     elif request.mode == "calibrate":
         calibrate_prefix = (
             "[系統指令：使用者點擊了「校準指標」按鈕，要求對當前標的執行指標參數校準]\n"
@@ -856,6 +864,47 @@ def _format_function_results(function_calls: list[dict], exec_result: dict) -> s
                 ha = r.get("historical_accuracy", {})
                 if ha:
                     parts.append(f"情境預測歷史準確率: {ha.get('direction_accuracy_pct', '?')}%（{ha.get('n_evaluations', '?')} 次評估）")
+            elif fname == "analyze_momentum":
+                parts.append(f"📊 動能分析 — {r.get('symbol', '?')} {r.get('timeframe', '?')}（{r.get('total_bars', 0)} 根）")
+                # 動量因子
+                mf = r.get("momentum_factors", {})
+                for k, v in mf.items():
+                    if k.startswith("mom_"):
+                        parts.append(f"  {v.get('label', k)}: {v.get('return_pct', '?')}%")
+                cm = mf.get("classic_momentum", {})
+                if cm:
+                    parts.append(f"  經典動量: {cm.get('value', '?')} ({cm.get('interpretation', '')})")
+                cons = mf.get("consistency", {})
+                if cons:
+                    parts.append(f"  方向一致性: {cons.get('interpretation', '?')}")
+                # 動量加速
+                ms = r.get("momentum_shift", {})
+                if ms:
+                    parts.append(f"\n動量狀態: {ms.get('state', '?')} | ROC5={ms.get('roc_5', '?')}% | 加速度={ms.get('acceleration', '?')}")
+                    if ms.get("shift_detected"):
+                        parts.append(f"  ⚡ 轉折: {ms.get('shift_type', '?')}")
+                # 相對動量
+                rm = r.get("relative_momentum", {})
+                if rm and rm.get("available"):
+                    parts.append(f"\n相對動量（vs BTC）: {rm.get('interpretation', '?')}")
+                    for pk, pv in rm.get("periods", {}).items():
+                        parts.append(f"  {pk}: 標的 {pv.get('target_return', '?')}% vs BTC {pv.get('benchmark_return', '?')}% → RS={pv.get('relative_strength', '?')}")
+                # 反轉
+                rev = r.get("reversal_detection", {})
+                if rev:
+                    parts.append(f"\n反轉信號: {rev.get('net_direction', '?')}（多 {rev.get('bullish_signals', 0)} / 空 {rev.get('bearish_signals', 0)}）")
+                    for sig in rev.get("signals", []):
+                        parts.append(f"  {'🟢' if sig.get('direction') == 'bullish' else '🔴'} {sig.get('type', '?')}")
+                # 策略回測
+                sb = r.get("strategy_backtest", {})
+                if sb:
+                    parts.append(f"\n動量策略回測: 最佳={sb.get('best_strategy_name', '?')}")
+                    for sk, sv in sb.get("strategies", {}).items():
+                        parts.append(f"  {sv.get('name', sk)}: 勝率={sv.get('win_rate', '?')}% Sharpe={sv.get('sharpe', '?')} 報酬={sv.get('return_pct', '?')}%")
+                # 綜合評分
+                mscore = r.get("momentum_score", {})
+                if mscore:
+                    parts.append(f"\n綜合動量評分: {mscore.get('score', '?')}/{mscore.get('max_possible', 10)} → {mscore.get('direction', '?')}")
             elif fname == "detect_smc_structure":
                 parts.append(f"📊 SMC 訂單流分析 — {r.get('symbol', '?')} {r.get('timeframe', '?')}")
                 parts.append(f"結構方向: HTF={r.get('trend_htf', '?')} / LTF={r.get('trend_ltf', '?')} / 共振={'✅' if r.get('mtf_aligned') else '❌'}")
@@ -1412,6 +1461,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                         "factor_validation": ["run_quant_research"],
                         "strategy_backtest": ["run_quant_research"],
                         "regime_analysis": ["generate_scenarios"],
+                        "momentum_analysis": ["analyze_momentum"],
                     }
                     _already_executed = _llm_called_funcs | {
                         r.get("function") for r in exec_result.get("results", []) if isinstance(r, dict)
