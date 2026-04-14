@@ -1109,8 +1109,41 @@ async def _exec_quant_research(args: dict, default_symbol: str, default_tf: str,
                         report["monte_carlo_oos"] = mc_oos
                 else:
                     report["walk_forward"] = wf
+
+            # ── 5b. CPCV（數據 ≥ 500 根時才跑）──
+            if len(df) >= 500:
+                _sub(f"CPCV 分析中（{len(df)} 根 × 10 組合）...")
+                logger.info(f"量化研究 [{symbol}]: CPCV 分析中...")
+                from app.core.backtest.cpcv import run_cpcv
+                cpcv = run_cpcv(
+                    df, entry_conditions, exit_conditions,
+                    n_groups=5, direction=direction,
+                    stop_loss_pct=stop_loss, take_profit_pct=take_profit,
+                    leverage=leverage, optimize_sl_tp=True,
+                )
+                if cpcv.get("status") == "success":
+                    report["cpcv"] = {
+                        "metrics_distribution": cpcv.get("metrics_distribution"),
+                        "assessment": cpcv.get("assessment"),
+                        "n_combinations": cpcv.get("valid_combinations"),
+                    }
+                else:
+                    report["cpcv"] = cpcv
+
         except Exception as e:
             report["backtest"] = {"error": str(e)}
+
+    # ── 5c. GMM Regime 分類 ──
+    if len(df) >= 100:
+        _sub("GMM 市場體制分類中...")
+        logger.info(f"量化研究 [{symbol}]: GMM Regime 分類中...")
+        try:
+            from app.core.ml.regime_model import regime_model
+            regime_result = regime_model.fit_predict(df)
+            if regime_result.get("status") == "success":
+                report["gmm_regime"] = regime_result
+        except Exception as e:
+            logger.warning(f"GMM Regime 分類失敗: {e}")
 
     # ── 6. 動態倉位建議（MC 回饋調控 Kelly） ──
     _sub("動態倉位計算中...")
