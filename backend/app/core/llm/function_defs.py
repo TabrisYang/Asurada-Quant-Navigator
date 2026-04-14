@@ -346,11 +346,17 @@ _PROMPT_MODULES["analysis_v2"] = """
   Order Block、FVG（合理價值缺口）、Liquidity Sweep（流動性掃單）
   停損聚集區觸發、VWAP 偏離、Supply/Demand Zone
 
-維度 6 — 市場情緒（如有數據）：
-  Fear & Greed、Funding Rate、未平倉量趨勢
+維度 6 — 市場情緒與微觀結構（如有數據）：
+  Fear & Greed、Funding Rate、未平倉量(OI)趨勢、多空比(Long/Short Ratio)
+  若回傳中有衍生品數據，必須引用 funding_rate、open_interest、long_short_ratio
 
 維度 7 — 風險管理：
   ATR 止損距離、Kelly 建議倉位、Max Drawdown、Trailing Stop
+
+維度 8 — 市場體制（GMM/HMM/GARCH，若有數據）：
+  若回傳中有 gmm_regime：引用當前 regime 名稱 + 機率 + 歷史佔比
+  若回傳中有 garch_volatility：引用波動率方向（expanding/contracting）+ 建議止損倍率
+  若回傳中有 hmm_regime：引用當前狀態 + 預期持續 K 線數
 
 【因子共線性防護】
 - MACD 和 RSI 都在衡量動能 → 不可當獨立證據加總
@@ -376,6 +382,8 @@ _PROMPT_MODULES["analysis_v2"] = """
 - 強度：弱 / 中 / 強
 - 信心：來自因子一致性 + 近期有效性 + Regime 相容性
 - 推翻條件（Invalidation）：明確指出哪些條件發生將推翻本次判斷
+- 若有 GMM regime 數據：說明當前處於哪個市場環境 + 策略是否適合此環境
+- 若有 GARCH 波動率：說明波動率方向 + 對止損設定的影響
 
 【每個維度分析的輸出格式】
 每個分析維度的結論必須遵循「數值 → 閾值 → 機制」三段式：
@@ -511,18 +519,38 @@ _PROMPT_MODULES["output_full"] = """
 【完整量化研究輸出格式】
 嚴格按以下結構輸出，缺乏數據的項目直接跳過，不要硬塞無效內容：
 
-【1. 市場狀態】Regime / Structure / 時框對齊 / Regime 與策略相容性
+【1. 市場體制】
+  - GMM Regime：當前處於哪個 regime（強多/弱多/盤整/強空）+ 機率 + 歷史佔比
+  - HMM 狀態：當前狀態 + 預期持續 K 線數
+  - GARCH 波動率：expanding/contracting + 建議止損倍率
+  - 若無 GMM/HMM/GARCH 數據，退回傳統 Regime 分析
 【2. 分析假設】本次主要市場假設
 【3. 候選因子】名稱、邏輯、預期方向、狀態標記（★★★/★★/★/✗）
+  - 若有 VIF 因子淨化報告，說明移除了多少共線特徵
 【4. 因子驗證】近期有效性、與系統反饋比對
-【5. 因子相關性】共線性、假分散風險
-【6. 多因子評分】多頭分/空頭分/中性分/信號一致性/信心等級
+【5. 因子相關性】共線性、假分散風險、正交化處理說明
+【6. 多因子評分 + SHAP 解釋】
+  - 多頭分/空頭分/中性分/信號一致性/信心等級
+  - 若有 shap_drivers：列出 top 5 驅動特徵 + 每個特徵推向看多還是看空
 【7. 預測結果】方向/強度/時間範圍/信心/推翻條件/策略有效期（起始日至結束日）
 【8. 策略判斷】適合方向/是否建議部署/倉位建議
 【9. 績效風險】(若有) Expectancy/Win Rate/Sharpe/MDD/最大連輸/成本風險
-【10. Monte Carlo】(若有) 最大可能回撤/破產風險/建議倉位區間
-【11. Alpha 監控】保留/升權/降權/淘汰/觀察/無法判定的因子
-【12. 最終建議】交易建議/最大優勢/最大風險/下一步檢查
+【10. Monte Carlo + OOS MC】
+  - 全樣本 MC：最大可能回撤/破產風險/建議倉位區間
+  - OOS MC（若有）：用 Walk Forward 的 OOS 交易跑的 MC，比全樣本更可靠
+【11. Walk Forward + CPCV 驗證】
+  - WF：一致性/decay/參數穩定性
+  - CPCV（若有）：10 組合一致性/P25 報酬/score — 比 WF 更嚴格
+  - 三者交叉驗證結論
+【12. 預測校準】
+  - Brier Score / ECE（若有）：預測信心度是否校準
+  - 貝氏後驗勝率 + 95% 信賴區間（若有）
+【13. 衍生品信號】（若有 funding_rate/open_interest/long_short_ratio）
+  - Funding Rate 極端值 → 槓桿擠壓風險
+  - OI 暴增/暴減 → 新倉位進場/平倉
+  - 多空比偏離 → 散戶情緒反指標
+【14. Alpha 監控】保留/升權/降權/淘汰/觀察/無法判定的因子
+【15. 最終建議】交易建議/最大優勢/最大風險/下一步檢查
 
 交易建議類型：強烈看多 / 偏多 / 中性偏多 / 觀望 / 暫停交易 / 中性偏空 / 偏空 / 強烈看空 / 僅適合小倉位試單 / 僅適合研究不適合實盤"""
 
@@ -596,18 +624,39 @@ _PROMPT_MODULES["quant_research"] = """
 【完整量化研究 — run_quant_research】
 必須呼叫 run_quant_research，它會一次完成：
 1. 因子 IC 分析（預測力 + 近期 IC + Alpha Decay 曲線）
-2. 因子相關性（冗餘排除）
-3. 策略回測（Sortino、Expectancy）
-4. Monte Carlo 模擬（穩定性、破產風險）
-5. Walk Forward 驗證（過擬合檢測）
-6. 動態倉位建議（Kelly + ATR）
+2. 因子相關性（冗餘排除 + VIF 因子淨化）
+3. 策略回測（Sortino、Expectancy）+ SHAP 特徵解釋
+4. Monte Carlo 模擬（穩定性、破產風險）+ OOS Monte Carlo
+5. Walk Forward 驗證（per-window SL/TP 優化 + 參數穩定性）
+6. CPCV 組合淨化交叉驗證（C(5,2)=10 組合，比 WF 更嚴格）
+7. GMM 市場體制分類（4 regime：強多/弱多/盤整/強空 + 機率）
+8. GARCH 波動率預測（expanding/contracting + 動態止損倍率）
+9. HMM 狀態轉移（各 regime 預期持續時間）
+10. 動態倉位建議（Kelly + ATR + MC 回饋）
 
-結果解讀：
+結果解讀 — 回覆時「必須」引用以下所有有數據的欄位：
+
+基礎指標：
 - overall_score ≥ 75 → 品質高
 - has_alpha = true → 具備超額報酬
 - Monte Carlo profit_probability > 80% → 穩健
 - Walk Forward consistency_ratio > 70% → 一致
 - 破產風險 > 5% → 必須降槓桿
+
+進階指標（若有數據必須引用，不可忽略）：
+- gmm_regime → 報告當前 regime 名稱、機率、歷史佔比
+- garch_volatility → 報告波動率方向 + 建議止損倍率
+- hmm_regime → 報告當前狀態 + 預期持續 K 線數
+- cpcv → 報告一致性%、P25 報酬、score、verdict
+- monte_carlo_oos → OOS 交易的 MC 結果（比全樣本更可靠）
+- calibration_metrics → Brier Score、ECE（在預測績效段引用）
+- bayesian_posterior → 後驗勝率 + 95% 信賴區間
+- shap_drivers → 預測的 top 5 驅動特徵（解釋為什麼看多/空）
+
+MC/WF/CPCV 交叉驗證：
+- 三者結論一致 → 高信心
+- MC pass + WF/CPCV fail → 可能過擬合，降低信心
+- WF pass + CPCV fail → 策略不夠穩健
 
 【★★ 因子相關問題的強制規則 ★★】
 當使用者提到以下任何概念時：
@@ -812,17 +861,26 @@ _PROMPT_MODULES["output_deep_phase3"] = """
 1. 🔬 因子預測力排名（IC 分析 + Alpha Decay 趨勢）
    - 列出 top 因子的 IC 值、衰退狀態
    - 正相關 vs 負相關因子分開
-2. 🎲 Monte Carlo 壓力測試
-   - 獲利機率 / 破產風險 / 報酬分佈（p25/p50/p75）
-   - 策略是否穩健
-3. 📐 Walk Forward 驗證
-   - 是否有 Alpha / 一致性評分 / 各視窗表現
-4. 💰 倉位管理建議
-   - Kelly 建議 / ATR 波動率調整 / 最終建議倉位
-5. 🏆 三階段總結
-   - 市場環境（第一階段結論）
-   - 最佳策略（第二階段結論）
-   - 量化驗證結果（本階段結論）
+   - 若有 SHAP：列出 top 5 驅動特徵 + 每個推向看多/看空
+2. 🌐 市場體制（GMM/HMM/GARCH）
+   - GMM：當前 regime + 機率 + 歷史佔比
+   - HMM：預期持續 K 線數（regime 會維持多久）
+   - GARCH：波動率方向 + 止損倍率建議
+3. 🎲 Monte Carlo + OOS MC
+   - 全樣本 MC：獲利機率 / 破產風險 / 報酬分佈
+   - OOS MC（若有）：用 WF 的 OOS 交易，更可靠
+4. 📐 Walk Forward + CPCV 驗證
+   - WF：一致性 / decay / 參數穩定性
+   - CPCV（若有）：10 組合一致性 / P25 報酬 / 比 WF 更嚴格
+   - 三者交叉驗證結論
+5. 📊 預測校準（若有 calibration_metrics）
+   - Brier Score / ECE / 貝氏後驗勝率
+6. 💰 倉位管理建議
+   - Kelly 建議 / ATR 波動率調整 / MC 回饋 / 最終建議倉位
+7. 🏆 三階段總結
+   - 市場環境（第一階段結論）+ GMM regime
+   - 最佳策略（第二階段結論）+ SHAP 驅動因子
+   - 量化驗證結果（本階段結論）+ CPCV/WF/MC 交叉驗證
    - 最終建議：部署 / 觀望 / 暫停 + 理由
 
 【結尾格式】
