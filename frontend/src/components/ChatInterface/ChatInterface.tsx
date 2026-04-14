@@ -146,6 +146,8 @@ export default function ChatInterface() {
   const [knowledgeLoading, setKnowledgeLoading] = useState(false);
   const [editDraft, setEditDraft] = useState<string[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const userScrolledUpRef = useRef(false);
   const isComposingRef = useRef(false);
   const streamingMsgIdRef = useRef<string | null>(null);
   const messages = useChartStore((s) => s.messages);
@@ -300,9 +302,24 @@ export default function ChatInterface() {
     }
   }, [llmConfig.sessionId, llmConfig.provider]);
 
-  // 自動捲動到最新訊息
+  // 智慧捲動：只有用戶在底部附近才自動捲動，用戶往上看歷史時不打擾
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const container = messagesContainerRef.current;
+    if (!container) return;
+
+    const handleScroll = () => {
+      const { scrollTop, scrollHeight, clientHeight } = container;
+      // 距離底部 < 150px 視為「在底部」
+      userScrolledUpRef.current = scrollHeight - scrollTop - clientHeight > 150;
+    };
+    container.addEventListener('scroll', handleScroll);
+    return () => container.removeEventListener('scroll', handleScroll);
+  }, []);
+
+  useEffect(() => {
+    if (!userScrolledUpRef.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
   }, [messages]);
 
   const handleSend = useCallback(async (sendMode?: string) => {
@@ -751,7 +768,7 @@ export default function ChatInterface() {
       </div>
 
       {/* 訊息列表 */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-3">
+      <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 space-y-3">
         {messages.length === 0 && (
           <div className="text-center py-8" style={{ color: 'var(--text-secondary)' }}>
             <p className="text-sm mb-4">歡迎使用阿斯拉量化系統</p>
