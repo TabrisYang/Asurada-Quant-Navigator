@@ -165,6 +165,17 @@ class PredictionTracker:
         except sqlite3.OperationalError:
             pass  # 欄位已存在
 
+        # Beta-Binomial 貝氏參數表
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS bayesian_params (
+                symbol TEXT NOT NULL,
+                alpha REAL NOT NULL DEFAULT 2.0,
+                beta REAL NOT NULL DEFAULT 2.0,
+                updated_at TEXT,
+                PRIMARY KEY (symbol)
+            )
+        """)
+
         # 遷移：加入 invalidation 欄位（若不存在）
         try:
             self._conn.execute(
@@ -328,6 +339,10 @@ class PredictionTracker:
         with self._lock:
             self._ensure_db()
             validated_time = hit_at if hit_at else taipei_now().isoformat()
+            # 查詢 symbol 用於貝氏更新
+            row = self._conn.execute("SELECT symbol FROM predictions WHERE id=?", (pred_id,)).fetchone()
+            pred_symbol = row["symbol"] if row else None
+
             self._conn.execute(
                 """UPDATE predictions
                    SET status=?, validated_at=?, actual_outcome_pct=?,
@@ -344,6 +359,13 @@ class PredictionTracker:
                 ),
             )
             self._conn.commit()
+
+            # 自動更新 Beta-Binomial 參數
+            if pred_symbol and status in ("hit_target", "hit_stop"):
+                try:
+                    self.update_bayesian(pred_symbol, status == "hit_target")
+                except Exception:
+                    pass  # 貝氏更新失敗不影響主流程
 
     def clear_all(self, symbol: Optional[str] = None) -> int:
         """清除所有預測紀錄。若提供 symbol 則只清除該幣對。"""
@@ -472,6 +494,12 @@ class PredictionTracker:
                     "samples": total,
                 }
 
+        # Brier Score + ECE 校準指標
+        calibration = _compute_calibration_metrics(preds)
+
+        # Beta-Binomial 貝氏後驗
+        bayesian = self._get_bayesian_posterior(symbol)
+
         return {
             "total": len(preds),
             "win_rate_weighted": round(win_rate * 100, 1),
@@ -484,6 +512,8 @@ class PredictionTracker:
             "worst_outcome_pct": round(float(np.min(outcomes_arr)), 2) if has_outcomes else None,
             "indicator_performance": indicator_stats,
             "confidence_calibration": conf_calibration,
+            "calibration_metrics": calibration,
+            "bayesian_posterior": bayesian,
             "decay_lambda": decay_lambda,
             "decay_halflife_days": round(0.693 / decay_lambda, 1),
             "decay_adaptive": decay_lambda != 0.02,
@@ -717,6 +747,128 @@ class PredictionTracker:
                 (limit,),
             ).fetchall()
             return [dict(r) for r in rows]
+
+
+    # ═══════════════════════════════════════════════════
+    #  Beta-Binomial 貝氏更新
+    # ═══════════════════════════════════════════════════
+
+    def _get_bayesian_posterior(self, symbol: Optional[str] = None) -> dict:
+        """取得 Beta-Binomial 後驗分佈參數。"""
+        key = symbol or "__global__"
+        try:
+            row = self._conn.execute(
+                "SELECT alpha, beta FROM bayesian_params WHERE symbol=?", (key,)
+            ).fetchone()
+            if row:
+                a, b = row["alpha"], row["beta"]
+            else:
+                a, b = 2.0, 2.0  # 弱先驗
+        except Exception:
+            a, b = 2.0, 2.0
+
+        mean = a / (a + b)
+        # 95% credible interval（Beta 分佈的近似）
+        from scipy.stats import beta as beta_dist
+        try:
+            ci_low, ci_high = beta_dist.ppf([0.025, 0.975], a, b)
+        except Exception:
+            ci_low, ci_high = 0.0, 1.0
+
+        return {
+            "alpha": round(a, 2),
+            "beta": round(b, 2),
+            "posterior_mean": round(mean * 100, 1),
+            "credible_interval_95": [round(ci_low * 100, 1), round(ci_high * 100, 1)],
+            "total_observations": int(a + b - 4),  # 減去先驗的 alpha=2, beta=2
+        }
+
+    def update_bayesian(self, symbol: str, is_win: bool):
+        """每次預測驗證後更新 Beta 參數。"""
+        with self._lock:
+            self._ensure_db()
+            key = symbol or "__global__"
+            row = self._conn.execute(
+                "SELECT alpha, beta FROM bayesian_params WHERE symbol=?", (key,)
+            ).fetchone()
+
+            if row:
+                a, b = row["alpha"], row["beta"]
+            else:
+                a, b = 2.0, 2.0
+
+            if is_win:
+                a += 1
+            else:
+                b += 1
+
+            self._conn.execute(
+                "INSERT OR REPLACE INTO bayesian_params (symbol, alpha, beta, updated_at) VALUES (?, ?, ?, ?)",
+                (key, a, b, taipei_now().isoformat()),
+            )
+            # 同時更新全域
+            if key != "__global__":
+                self.update_bayesian("__global__", is_win)
+
+            self._conn.commit()
+
+
+# ═══════════════════════════════════════════════════
+#  校準指標函式（模組層級）
+# ═══════════════════════════════════════════════════
+
+def _compute_calibration_metrics(preds: list[dict]) -> dict:
+    """計算 Brier Score、ECE、Reliability Curve。"""
+    if not preds:
+        return {"brier_score": None, "ece": None, "reliability_curve": []}
+
+    # 信心度映射：high=0.8, medium=0.5, low=0.3
+    conf_to_prob = {"high": 0.8, "medium": 0.5, "low": 0.3}
+    predicted_probs = []
+    actual_outcomes = []
+
+    for p in preds:
+        conf = p.get("confidence", "medium")
+        prob = conf_to_prob.get(conf, 0.5)
+        predicted_probs.append(prob)
+        actual_outcomes.append(1.0 if p["status"] == "hit_target" else 0.0)
+
+    predicted = np.array(predicted_probs)
+    actual = np.array(actual_outcomes)
+
+    # Brier Score: mean((predicted - actual)^2)，越低越好，隨機 = 0.25
+    brier = float(np.mean((predicted - actual) ** 2))
+
+    # ECE: Expected Calibration Error
+    bins = [0.0, 0.35, 0.55, 0.75, 1.01]
+    reliability = []
+    ece = 0.0
+    for i in range(len(bins) - 1):
+        mask = (predicted >= bins[i]) & (predicted < bins[i + 1])
+        n_bin = mask.sum()
+        if n_bin == 0:
+            continue
+        avg_pred = float(predicted[mask].mean())
+        avg_actual = float(actual[mask].mean())
+        ece += abs(avg_actual - avg_pred) * (n_bin / len(preds))
+        reliability.append({
+            "bin": f"{bins[i]:.0%}-{bins[i+1]:.0%}",
+            "avg_predicted": round(avg_pred * 100, 1),
+            "avg_actual": round(avg_actual * 100, 1),
+            "count": int(n_bin),
+            "gap": round((avg_actual - avg_pred) * 100, 1),
+        })
+
+    return {
+        "brier_score": round(brier, 4),
+        "ece": round(ece, 4),
+        "reliability_curve": reliability,
+        "interpretation": (
+            "校準良好" if ece < 0.05
+            else "校準中等" if ece < 0.10
+            else "校準偏差大，預測機率與實際不符"
+        ),
+    }
 
 
 prediction_tracker = PredictionTracker()

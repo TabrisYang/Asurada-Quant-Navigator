@@ -76,8 +76,9 @@ def build_features(
     target_direction: str = "up",
     target_threshold: float = 0.03,
     lookback_window: int = 7,
+    **kwargs,
 ) -> tuple[np.ndarray, np.ndarray, list[str], np.ndarray, dict]:
-    """從 OHLCV 數據建構窗口特徵矩陣 + 幅度門檻標籤
+    """從 OHLCV 數據建構窗口特徵矩陣 + 多種標籤
 
     Args:
         df: OHLCV DataFrame (需含 open/high/low/close/volume 欄位)
@@ -87,6 +88,7 @@ def build_features(
         target_direction: "up" = 預測上漲，"down" = 預測下跌
         target_threshold: 幅度門檻（例如 0.03 = 3%）
         lookback_window: 回看窗口（對每個特徵計算統計摘要的 K 線數）
+        label_type: 標籤類型 "direction"/"amplitude"/"path"（預設 amplitude）
 
     Returns:
         (X, y, feature_names, valid_mask, label_stats)
@@ -143,17 +145,47 @@ def build_features(
         raw_matrix, raw_names, lookback_window,
     )
 
-    # ── 計算標籤：未來 N 根是否達到幅度門檻 ──
-    # 安全邊界：label 只看 [i+1, i+forward_period] 的價格變化，
-    # 而 window feature 最多用到 index i-1 的指標值（_build_window_features
-    # 取 raw_matrix[i-window:i]，即 i-window ~ i-1），不存在洩漏。
+    # ── 計算標籤 ──
+    # 支援四種標籤類型：direction / amplitude / path / 預設(legacy)
+    label_type = kwargs.get("label_type", "amplitude")  # 向下相容：預設用幅度
+    high = df["high"].values.astype(float) if "high" in df.columns else close
+    low = df["low"].values.astype(float) if "low" in df.columns else close
+
     y_full = np.full(n, np.nan)
     for i in range(n - forward_period):
-        pct = (close[i + forward_period] - close[i]) / close[i] if close[i] != 0 else 0.0
-        if target_direction == "down":
-            y_full[i] = 1.0 if pct <= -target_threshold else 0.0
+        if close[i] == 0:
+            continue
+        future = slice(i + 1, i + forward_period + 1)
+
+        if label_type == "direction":
+            # 方向標籤：終點收盤 vs 當前收盤
+            pct = (close[i + forward_period] - close[i]) / close[i]
+            y_full[i] = 1.0 if pct > 0 else 0.0
+
+        elif label_type == "path":
+            # 路徑標籤：先碰到 TP 還是先碰到 SL（First-Touch Probability）
+            hit_tp = False
+            for j in range(i + 1, min(i + forward_period + 1, n)):
+                if target_direction == "up":
+                    up_pct = (high[j] - close[i]) / close[i]
+                    down_pct = (close[i] - low[j]) / close[i]
+                else:
+                    up_pct = (close[i] - low[j]) / close[i]
+                    down_pct = (high[j] - close[i]) / close[i]
+                if up_pct >= target_threshold:
+                    hit_tp = True
+                    break
+                if down_pct >= target_threshold:
+                    break
+            y_full[i] = 1.0 if hit_tp else 0.0
+
         else:
-            y_full[i] = 1.0 if pct >= target_threshold else 0.0
+            # amplitude 幅度標籤（預設）：N 根內最高漲幅是否達標
+            if target_direction == "down":
+                max_move = (close[i] - np.min(low[future])) / close[i]
+            else:
+                max_move = (np.max(high[future]) - close[i]) / close[i]
+            y_full[i] = 1.0 if max_move >= target_threshold else 0.0
 
     # ── 過濾有效行 ──
     # 雙重保障：排除最後 forward_period 行（label 區域不完整）和 window 暖機行
