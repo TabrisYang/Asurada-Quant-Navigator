@@ -75,6 +75,18 @@ _INTENT_KEYWORDS: dict[str, list[str]] = {
     "deep_phase3": [
         "完整分析三", "完整分析3", "全面分析三", "深度分析三",
     ],
+    "factor_validation": [
+        "因子驗證", "因子排名", "ic排名", "哪個因子", "哪些因子有效",
+        "因子分析", "factor validation", "因子評分",
+    ],
+    "strategy_backtest": [
+        "策略回測", "回測驗證", "backtest", "策略驗證", "mc驗證",
+        "walk forward", "cpcv", "過擬合",
+    ],
+    "regime_analysis": [
+        "市場體制", "regime", "gmm", "garch", "hmm", "波動率預測",
+        "市場環境", "市場狀態", "體制分析",
+    ],
     "sector_analysis": [
         "族群", "概念股", "板塊", "產業分析", "sector",
         "半導體族群", "金融股", "航運股", "哪些族群",
@@ -904,6 +916,49 @@ _PROMPT_MODULES["teaching"] = """
 
 # ─── sector_analysis（族群/概念股分析）─────────────────
 
+# ─── 因子驗證模式 ─────────────────────────────────
+
+_PROMPT_MODULES["factor_validation_mode"] = """
+【因子驗證模式 — 專注因子分析】
+必須呼叫 run_quant_research 取得因子數據。
+本模式專注於因子分析，不需要跑完整的策略回測。
+
+輸出格式：
+1. 📊 因子 IC 排名（正/負 IC 分開，含近期 vs 長期、Decay 趨勢）
+2. 🔗 雙因子組合 IC（combo_top，最強組合）
+3. 📐 因子群 Bucket 評分（趨勢/動量/波動/量能/結構各幾分）
+4. 📈 條件機率掃描（若有 hit_pattern_analysis）
+5. ⚠️ 因子共線性警告（VIF 高的因子）
+6. 💡 建議：哪些因子值得用、哪些該淘汰"""
+
+# ─── 策略回測模式 ─────────────────────────────────
+
+_PROMPT_MODULES["strategy_backtest_mode"] = """
+【策略回測模式 — 專注驗證】
+必須呼叫 run_quant_research 取得回測數據。
+
+輸出格式：
+1. 📊 回測績效（勝率/PF/Sharpe/Sortino/MDD/Expectancy）
+2. 🎲 Monte Carlo（獲利機率/破產風險/報酬分佈）+ OOS MC
+3. 📐 Walk Forward（一致性/decay/參數穩定性）
+4. 🔬 CPCV（10 組合一致性/P25 報酬/更嚴格的過擬合檢測）
+5. 🔄 三者交叉驗證：MC/WF/CPCV 是否一致
+6. 💰 倉位建議（Kelly + GARCH 動態止損）"""
+
+# ─── 市場體制模式 ─────────────────────────────────
+
+_PROMPT_MODULES["regime_analysis_mode"] = """
+【市場體制模式 — 專注 Regime 分析】
+必須呼叫 generate_scenarios 取得 GMM/GARCH/HMM 數據。
+
+輸出格式：
+1. 🌐 GMM Regime（4 種體制 + 當前機率 + 歷史佔比 + 各 regime 平均報酬）
+2. 📈 GARCH 波動率預測（expanding/contracting + 動態止損倍率）
+3. 🔄 HMM 狀態轉移（當前狀態 + 預期持續 K 線數 + 轉移機率）
+4. 📊 因子群 Bucket 評分（五群方向性打分）
+5. 💡 Regime 適合什麼策略：趨勢/均值回歸/觀望
+6. ⚠️ Regime 切換風險：距離下一次 regime 變化可能還有多久"""
+
 _PROMPT_MODULES["sector_analysis"] = """
 【台股族群/概念股分析 — analyze_sector / list_sectors】
 當使用者提到任何台股產業族群、概念股、板塊分析時，你「必須」呼叫 analyze_sector 函式。
@@ -975,6 +1030,17 @@ _INTENT_TO_MODULES: dict[str, list[str]] = {
         "quant_research", "calibrate", "alpha_monitor",
         "risk_checklist", "output_full", "output_deep_phase3",
     ],
+    "factor_validation": [
+        "regime_v2", "quant_research", "factor_validation",
+        "conditional_prob", "output_lite", "factor_validation_mode",
+    ],
+    "strategy_backtest": [
+        "regime_v2", "backtest", "quant_research",
+        "risk_checklist", "output_lite", "strategy_backtest_mode",
+    ],
+    "regime_analysis": [
+        "regime_v2", "analysis_v2", "output_lite", "regime_analysis_mode",
+    ],
     "sector_analysis": [
         "regime_v2", "sector_analysis", "output_lite", "risk_checklist",
     ],
@@ -1015,6 +1081,7 @@ def assemble_system_prompt(intents: set[str], teaching_mode: bool = False) -> st
         "drawing", "event_analysis", "conditional_prob", "scenario", "smc",
         "quant_research", "calibrate", "backtest",
         "sector_analysis",
+        "factor_validation_mode", "strategy_backtest_mode", "regime_analysis_mode",
     )
 
     parts = [_PROMPT_CORE]

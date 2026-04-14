@@ -133,6 +133,27 @@ def build_features(
         except Exception as e:
             logger.debug(f"特徵工程：指標 {ind_id} 計算失敗: {e}")
 
+    # ── 交互項特徵（捕捉非線性共振）──
+    # 交互項用 raw_cols 的實際 key
+    _INTERACTION_PAIRS = [
+        ("rsi_rsi", "bb_bandwidth"),       # RSI 超賣 + BB 壓縮 = 爆發前兆
+        ("adx_adx", "rsi_rsi"),            # 強趨勢 + 動量方向
+        ("obv_obv", "volume_ratio"),       # 量能確認
+        ("macd_histogram", "rsi_rsi"),     # 動量雙確認
+        ("atr_atr", "adx_adx"),            # 波動率 × 趨勢強度
+    ]
+    for col_a, col_b in _INTERACTION_PAIRS:
+        if col_a in raw_cols and col_b in raw_cols:
+            arr_a = raw_cols[col_a]
+            arr_b = raw_cols[col_b]
+            # 標準化後相乘（避免量級差異）
+            std_a = np.nanstd(arr_a)
+            std_b = np.nanstd(arr_b)
+            if std_a > 1e-10 and std_b > 1e-10:
+                normed_a = (arr_a - np.nanmean(arr_a)) / std_a
+                normed_b = (arr_b - np.nanmean(arr_b)) / std_b
+                raw_cols[f"x_{col_a}_{col_b}"] = normed_a * normed_b
+
     raw_names = list(raw_cols.keys())
     if not raw_names:
         empty_stats = _empty_label_stats()
@@ -344,6 +365,124 @@ def orthogonalize_features(
     )
 
     return X_result, names_result, report
+
+
+# ═══════════════════════════════════════════════════
+#  因子群 Bucket 評分
+# ═══════════════════════════════════════════════════
+
+def compute_bucket_scores(df: pd.DataFrame) -> dict:
+    """按趨勢/動量/波動/量能/結構五群計算方向性評分。
+
+    每群 -2~+2 分（強空~強多），合計 -10~+10。
+    """
+    scores = {}
+
+    # 趨勢群
+    trend_score = 0
+    adx_calc = registry.calculate("adx", df)
+    if adx_calc:
+        adx_val = [v for v in adx_calc.get("adx", []) if v is not None]
+        di_plus = [v for v in adx_calc.get("+di", adx_calc.get("di_plus", [])) if v is not None]
+        di_minus = [v for v in adx_calc.get("-di", adx_calc.get("di_minus", [])) if v is not None]
+        if adx_val and di_plus and di_minus:
+            if adx_val[-1] > 25:
+                trend_score += 1 if di_plus[-1] > di_minus[-1] else -1
+            if adx_val[-1] > 40:
+                trend_score += 1 if di_plus[-1] > di_minus[-1] else -1
+    scores["趨勢"] = max(-2, min(2, trend_score))
+
+    # 動量群
+    momentum_score = 0
+    rsi_calc = registry.calculate("rsi", df)
+    if rsi_calc and "rsi" in rsi_calc:
+        rsi_vals = [v for v in rsi_calc["rsi"] if v is not None]
+        if rsi_vals:
+            r = rsi_vals[-1]
+            if r > 60: momentum_score += 1
+            if r > 70: momentum_score += 1
+            if r < 40: momentum_score -= 1
+            if r < 30: momentum_score -= 1
+    macd_calc = registry.calculate("macd", df)
+    if macd_calc:
+        keys = list(macd_calc.keys())
+        if len(keys) >= 3:
+            hist = [v for v in macd_calc[keys[2]] if v is not None]
+            if hist:
+                if hist[-1] > 0: momentum_score += 1
+                else: momentum_score -= 1
+    scores["動量"] = max(-2, min(2, momentum_score))
+
+    # 波動群
+    vol_score = 0
+    bb_calc = registry.calculate("bb", df)
+    if bb_calc and "bb_upper" in bb_calc and "bb_lower" in bb_calc:
+        upper = [v for v in bb_calc["bb_upper"] if v is not None]
+        lower = [v for v in bb_calc["bb_lower"] if v is not None]
+        close_val = float(df["close"].values[-1])
+        if upper and lower:
+            bb_range = upper[-1] - lower[-1]
+            bb_pos = (close_val - lower[-1]) / bb_range if bb_range > 0 else 0.5
+            if bb_pos > 0.8: vol_score += 1  # 靠近上軌
+            if bb_pos < 0.2: vol_score -= 1  # 靠近下軌
+    scores["波動"] = max(-2, min(2, vol_score))
+
+    # 量能群
+    volume_score = 0
+    obv_calc = registry.calculate("obv", df)
+    if obv_calc and "obv" in obv_calc:
+        obv_vals = [v for v in obv_calc["obv"] if v is not None]
+        if len(obv_vals) >= 10:
+            obv_trend = obv_vals[-1] - obv_vals[-10]
+            if obv_trend > 0: volume_score += 1
+            else: volume_score -= 1
+    vol_arr = df["volume"].values.astype(float)
+    if len(vol_arr) >= 20:
+        recent_vol = np.mean(vol_arr[-5:])
+        avg_vol = np.mean(vol_arr[-20:])
+        if avg_vol > 0:
+            ratio = recent_vol / avg_vol
+            if ratio > 1.5: volume_score += 1
+            elif ratio < 0.5: volume_score -= 1
+    scores["量能"] = max(-2, min(2, volume_score))
+
+    # 結構群
+    structure_score = 0
+    try:
+        ms_calc = registry.calculate("market_structure", df)
+        if ms_calc:
+            struct_vals = list(ms_calc.values())[0]
+            struct_last = [v for v in struct_vals if v is not None]
+            if struct_last:
+                s = struct_last[-1]
+                if s > 0: structure_score += 1
+                if s < 0: structure_score -= 1
+    except Exception:
+        pass
+    scores["結構"] = max(-2, min(2, structure_score))
+
+    total = sum(scores.values())
+    if total >= 5:
+        direction = "強烈看多"
+    elif total >= 3:
+        direction = "偏多"
+    elif total >= 1:
+        direction = "中性偏多"
+    elif total <= -5:
+        direction = "強烈看空"
+    elif total <= -3:
+        direction = "偏空"
+    elif total <= -1:
+        direction = "中性偏空"
+    else:
+        direction = "中性"
+
+    return {
+        "scores": scores,
+        "total": total,
+        "max_possible": 10,
+        "direction": direction,
+    }
 
 
 def build_latest_features(

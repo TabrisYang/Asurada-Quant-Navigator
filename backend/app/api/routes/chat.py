@@ -680,6 +680,33 @@ def _build_messages(
             f"使用者的策略描述：{request.message}"
         )
         messages.append({"role": "user", "content": quant_prefix})
+    elif request.mode == "factor_validation":
+        fv_prefix = (
+            "[系統指令：使用者點擊了「因子驗證」按鈕]\n"
+            "你必須呼叫 run_quant_research 取得因子 IC 數據。\n"
+            "專注報告：因子 IC 排名、雙因子組合 IC、Bucket 評分、共線性警告。\n"
+            "不需要詳細的策略回測分析。\n\n"
+            f"使用者備註：{request.message if request.message.strip() else '請分析當前標的的因子有效性'}"
+        )
+        messages.append({"role": "user", "content": fv_prefix})
+    elif request.mode == "strategy_backtest":
+        sb_prefix = (
+            "[系統指令：使用者點擊了「策略回測」按鈕]\n"
+            "你必須呼叫 run_quant_research 取得回測 + MC + WF + CPCV 數據。\n"
+            "專注報告：回測績效、Monte Carlo、Walk Forward、CPCV 交叉驗證、倉位建議。\n"
+            "不需要詳細的因子 IC 分析。\n\n"
+            f"使用者備註：{request.message if request.message.strip() else '請驗證當前標的的策略穩定性'}"
+        )
+        messages.append({"role": "user", "content": sb_prefix})
+    elif request.mode == "regime_analysis":
+        ra_prefix = (
+            "[系統指令：使用者點擊了「市場體制」按鈕]\n"
+            "你必須呼叫 generate_scenarios 取得 GMM/GARCH/HMM 市場體制數據。\n"
+            "專注報告：GMM regime 分類、GARCH 波動率預測、HMM 狀態轉移、Bucket 評分。\n"
+            "說明當前 regime 適合什麼策略。\n\n"
+            f"使用者備註：{request.message if request.message.strip() else '請分析當前市場體制'}"
+        )
+        messages.append({"role": "user", "content": ra_prefix})
     elif request.mode == "calibrate":
         calibrate_prefix = (
             "[系統指令：使用者點擊了「校準指標」按鈕，要求對當前標的執行指標參數校準]\n"
@@ -806,6 +833,13 @@ def _format_function_results(function_calls: list[dict], exec_result: dict) -> s
                 if w:
                     w_str = ", ".join(f"{k}({v*100:.0f}%)" for k, v in w.items())
                     parts.append(f"\n信心來源權重: {w_str}")
+                # Bucket 因子群評分
+                bucket = r.get("bucket_scores", {})
+                if bucket:
+                    parts.append(f"\n因子群 Bucket 評分（合計 {bucket.get('total', 0)}/{bucket.get('max_possible', 10)}）→ {bucket.get('direction', '?')}")
+                    for group_name, group_score in bucket.get("scores", {}).items():
+                        indicator = "▲" if group_score > 0 else ("▼" if group_score < 0 else "▬")
+                        parts.append(f"  {group_name}: {indicator} {group_score:+d}")
                 # 附加 GMM/GARCH/HMM（基礎分析也有）
                 gmm_s = r.get("gmm_regime", {})
                 if gmm_s and gmm_s.get("status") == "success":
@@ -881,6 +915,20 @@ def _format_function_results(function_calls: list[dict], exec_result: dict) -> s
                 corr = r.get("factor_correlation", {})
                 if corr.get("recommendation"):
                     parts.append(f"因子相關性: {corr['recommendation']}")
+                # 組合因子 IC（combo_top）
+                fscan = r.get("factor_scan", {})
+                combo_top = fscan.get("combo_top", [])
+                if combo_top:
+                    parts.append(f"\n雙因子組合 IC（top {len(combo_top)}）:")
+                    for combo in combo_top[:5]:
+                        parts.append(f"  {combo.get('factor_a', '?')} + {combo.get('factor_b', '?')}: combo_IC={combo.get('combo_ic', '?')}")
+                # Bucket 因子群評分
+                bucket_qr = r.get("bucket_scores", {})
+                if bucket_qr:
+                    parts.append(f"\n因子群 Bucket 評分（合計 {bucket_qr.get('total', 0)}/{bucket_qr.get('max_possible', 10)}）→ {bucket_qr.get('direction', '?')}")
+                    for grp_name, grp_score in bucket_qr.get("scores", {}).items():
+                        ind = "▲" if grp_score > 0 else ("▼" if grp_score < 0 else "▬")
+                        parts.append(f"  {grp_name}: {ind} {grp_score:+d}")
                 # 回測
                 bt = r.get("backtest", {})
                 if bt and not bt.get("error"):
@@ -1361,6 +1409,9 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                         "deep_analysis": ["generate_scenarios", "detect_smc_structure"],
                         "deep_phase2": ["compare_strategies", "scan_conditional_probability"],
                         "deep_phase3": ["run_quant_research"],
+                        "factor_validation": ["run_quant_research"],
+                        "strategy_backtest": ["run_quant_research"],
+                        "regime_analysis": ["generate_scenarios"],
                     }
                     _already_executed = _llm_called_funcs | {
                         r.get("function") for r in exec_result.get("results", []) if isinstance(r, dict)

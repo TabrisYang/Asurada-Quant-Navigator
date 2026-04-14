@@ -27,20 +27,43 @@ const ANALYSIS_CATEGORIES = [
     ],
   },
   {
-    tab: '進階量化',
-    allPrompt: '對 {symbol} 進行完整進階量化分析（策略回測驗證 + 條件機率掃描 + 事件型態分析 + 指標參數校準）',
+    tab: '因子驗證',
+    mode: 'factor_validation',
+    allPrompt: '對 {symbol} 進行因子驗證（因子 IC 排名 + 組合 IC + Bucket 評分 + 條件機率）',
     items: [
-      { label: '策略回測驗證', prompt: '回測比較 {symbol} 的多種交易策略績效' },
+      { label: '因子 IC 排名', prompt: '分析 {symbol} 哪些因子最有效、IC 排名如何' },
+      { label: '組合因子分析', prompt: '分析 {symbol} 的雙因子組合 IC，哪些因子搭配效果最好' },
       { label: '條件機率掃描', prompt: '掃描 {symbol} 各指標的條件機率，找出最佳進場區間' },
-      { label: '事件型態分析', prompt: '分析 {symbol} 歷史上大漲大跌前的共通特徵' },
+      { label: '因子群評分', prompt: '對 {symbol} 進行趨勢/動量/波動/量能/結構五群 Bucket 評分' },
+    ],
+  },
+  {
+    tab: '策略回測',
+    mode: 'strategy_backtest',
+    allPrompt: '對 {symbol} 進行策略回測驗證（回測 + Monte Carlo + Walk Forward + CPCV 交叉驗證）',
+    items: [
+      { label: '多策略比較', prompt: '回測比較 {symbol} 的多種交易策略績效' },
+      { label: 'MC + WF 驗證', prompt: '對 {symbol} 進行 Monte Carlo 穩定性測試和 Walk Forward 過擬合檢測' },
+      { label: 'CPCV 嚴格驗證', prompt: '對 {symbol} 進行 CPCV 組合淨化交叉驗證（最嚴格的過擬合檢測）' },
       { label: '指標參數校準', prompt: '校準 {symbol} 的最佳指標參數' },
+    ],
+  },
+  {
+    tab: '市場體制',
+    mode: 'regime_analysis',
+    allPrompt: '對 {symbol} 進行市場體制分析（GMM Regime + GARCH 波動率 + HMM 狀態轉移）',
+    items: [
+      { label: 'GMM Regime 分類', prompt: '用 GMM 分析 {symbol} 當前處於哪種市場體制（強多/弱多/盤整/強空）' },
+      { label: 'GARCH 波動率', prompt: '用 GARCH 預測 {symbol} 未來波動率是擴張還是收斂' },
+      { label: 'HMM 狀態轉移', prompt: '用 HMM 分析 {symbol} 當前 regime 還會持續多久' },
+      { label: '事件型態分析', prompt: '分析 {symbol} 歷史上大漲大跌前的共通特徵' },
     ],
   },
   {
     tab: '完整分析',
     allPrompt: '對 {symbol} 進行完整量化研究 + 因子驗證與監控 + 完整分析三階段',
     items: [
-      { label: '完整量化研究', prompt: '對 {symbol} 進行完整量化研究（因子IC + Monte Carlo + Walk Forward）' },
+      { label: '完整量化研究', prompt: '對 {symbol} 進行完整量化研究（因子IC + Monte Carlo + Walk Forward + CPCV + GMM/GARCH/HMM）' },
       { label: '因子驗證與監控', prompt: '驗證 {symbol} 當前哪些因子有效、哪些已衰退' },
       { label: '完整分析三階段', prompt: '完整分析一 {symbol}' },
     ],
@@ -685,7 +708,14 @@ export default function ChatInterface() {
             <button
               onClick={() => {
                 const sym = useChartStore.getState().symbol || 'BTC/USDT';
-                setInput(ANALYSIS_CATEGORIES[activeAnalysisTab].allPrompt.replace('{symbol}', sym));
+                const cat = ANALYSIS_CATEGORIES[activeAnalysisTab];
+                const prompt = cat.allPrompt.replace('{symbol}', sym);
+                setInput(prompt);
+                // 有指定 mode 的分析類型，直接帶 mode 發送
+                const catMode = (cat as any).mode;
+                if (catMode) {
+                  setTimeout(() => handleSend(catMode), 50);
+                }
               }}
               className="px-2.5 py-1 rounded text-xs cursor-pointer transition-colors font-medium"
               style={{ background: 'var(--accent-blue)', color: '#fff' }}

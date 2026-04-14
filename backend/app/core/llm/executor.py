@@ -1133,6 +1133,14 @@ async def _exec_quant_research(args: dict, default_symbol: str, default_tf: str,
         except Exception as e:
             report["backtest"] = {"error": str(e)}
 
+    # ── 5c-0. Bucket 因子群評分 ──
+    try:
+        from app.core.ml.feature_engineer import compute_bucket_scores
+        bucket = compute_bucket_scores(df)
+        report["bucket_scores"] = bucket
+    except Exception:
+        pass
+
     # ── 5c. GMM Regime 分類 + GARCH 波動率 + HMM ──
     if len(df) >= 100:
         _sub("GMM 市場體制分類中...")
@@ -1924,6 +1932,14 @@ async def _exec_generate_scenarios(args: dict, default_symbol: str, default_tf: 
                     scenario_predictor.calibrate_weights(validation)
             except Exception as e_val:
                 logger.warning(f"情境預測驗證失敗: {e_val}")
+
+        # 附加 Bucket 因子群評分
+        try:
+            from app.core.ml.feature_engineer import compute_bucket_scores
+            bucket = compute_bucket_scores(df)
+            output["bucket_scores"] = bucket
+        except Exception as e_bucket:
+            logger.warning(f"Bucket 評分失敗: {e_bucket}")
 
         # 附加 GMM/GARCH/HMM 市場體制分析
         if len(df) >= 100:
