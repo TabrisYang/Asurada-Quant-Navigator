@@ -1925,6 +1925,23 @@ async def _exec_generate_scenarios(args: dict, default_symbol: str, default_tf: 
             except Exception as e_val:
                 logger.warning(f"情境預測驗證失敗: {e_val}")
 
+        # 附加 GMM/GARCH/HMM 市場體制分析
+        if len(df) >= 100:
+            try:
+                from app.core.ml.regime_model import regime_model
+                gmm_result = regime_model.fit_predict(df)
+                if gmm_result.get("status") == "success":
+                    output["gmm_regime"] = gmm_result
+                garch_result = regime_model.predict_volatility(df)
+                if garch_result.get("status") == "success":
+                    output["garch_volatility"] = garch_result
+                if len(df) >= 200:
+                    hmm_result = regime_model.fit_hmm(df)
+                    if hmm_result.get("status") == "success":
+                        output["hmm_regime"] = hmm_result
+            except Exception as e_regime:
+                logger.warning(f"情境預測附加 regime 分析失敗: {e_regime}")
+
         return output
     except Exception as e:
         return {"status": "error", "message": f"情境預測失敗: {str(e)}"}

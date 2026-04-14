@@ -806,6 +806,22 @@ def _format_function_results(function_calls: list[dict], exec_result: dict) -> s
                 if w:
                     w_str = ", ".join(f"{k}({v*100:.0f}%)" for k, v in w.items())
                     parts.append(f"\n信心來源權重: {w_str}")
+                # 附加 GMM/GARCH/HMM（基礎分析也有）
+                gmm_s = r.get("gmm_regime", {})
+                if gmm_s and gmm_s.get("status") == "success":
+                    parts.append(f"\nGMM 市場體制: {gmm_s.get('current_regime', '?')}")
+                    for rn, rp in gmm_s.get("regime_probabilities", {}).items():
+                        parts.append(f"  {rn}: {rp}%")
+                garch_s = r.get("garch_volatility", {})
+                if garch_s and garch_s.get("status") == "success":
+                    parts.append(f"GARCH 波動率: {garch_s.get('vol_direction', '?')} | 止損倍率 {garch_s.get('suggested_sl_multiplier', '?')}x")
+                hmm_s = r.get("hmm_regime", {})
+                if hmm_s and hmm_s.get("status") == "success":
+                    parts.append(f"HMM 狀態: {hmm_s.get('current_state', '?')} | {hmm_s.get('interpretation', '?')}")
+                # 歷史準確率
+                ha = r.get("historical_accuracy", {})
+                if ha:
+                    parts.append(f"情境預測歷史準確率: {ha.get('direction_accuracy_pct', '?')}%（{ha.get('n_evaluations', '?')} 次評估）")
             elif fname == "detect_smc_structure":
                 parts.append(f"📊 SMC 訂單流分析 — {r.get('symbol', '?')} {r.get('timeframe', '?')}")
                 parts.append(f"結構方向: HTF={r.get('trend_htf', '?')} / LTF={r.get('trend_ltf', '?')} / 共振={'✅' if r.get('mtf_aligned') else '❌'}")
@@ -890,10 +906,55 @@ def _format_function_results(function_calls: list[dict], exec_result: dict) -> s
                         parts.append(f"  Alpha: {'✅' if assessment.get('has_alpha') else '❌'} | 評分: {assessment.get('score', '?')}/100")
                         if summary:
                             parts.append(f"  視窗數: {summary.get('n_windows', '?')} | OOS 平均報酬: {summary.get('avg_oos_return', '?')}%")
+                # GMM Regime
+                gmm = r.get("gmm_regime", {})
+                if gmm and gmm.get("status") == "success":
+                    parts.append(f"\nGMM 市場體制分類:")
+                    parts.append(f"  當前 Regime: {gmm.get('current_regime', '?')}")
+                    for rname, prob in gmm.get("regime_probabilities", {}).items():
+                        parts.append(f"  {rname}: {prob}%")
+                    for rname, rstats in gmm.get("regime_stats", {}).items():
+                        parts.append(f"  {rname}: 歷史佔比 {rstats.get('pct', '?')}%, 平均報酬 {rstats.get('avg_return', '?')}%")
+                # GARCH 波動率
+                garch = r.get("garch_volatility", {})
+                if garch and garch.get("status") == "success":
+                    parts.append(f"\nGARCH 波動率預測:")
+                    parts.append(f"  當前波動率: {garch.get('current_volatility', '?')}")
+                    parts.append(f"  方向: {garch.get('vol_direction', '?')} | 止損倍率建議: {garch.get('suggested_sl_multiplier', '?')}x")
+                    parts.append(f"  解讀: {garch.get('interpretation', '?')}")
+                # HMM 狀態轉移
+                hmm = r.get("hmm_regime", {})
+                if hmm and hmm.get("status") == "success":
+                    parts.append(f"\nHMM 狀態轉移:")
+                    parts.append(f"  當前狀態: {hmm.get('current_state', '?')}")
+                    parts.append(f"  解讀: {hmm.get('interpretation', '?')}")
+                    for state_name, dur in hmm.get("expected_duration_bars", {}).items():
+                        parts.append(f"  {state_name}: 預期持續 {dur} 根 K 線")
+                # CPCV
+                cpcv_data = r.get("cpcv", {})
+                if cpcv_data:
+                    cpcv_assess = cpcv_data.get("assessment", {})
+                    cpcv_met = cpcv_data.get("metrics_distribution", {})
+                    if cpcv_assess:
+                        parts.append(f"\nCPCV 組合淨化交叉驗證（{cpcv_data.get('n_combinations', '?')} 組合）:")
+                        parts.append(f"  一致性: {cpcv_met.get('consistency_pct', '?')}%")
+                        cpcv_ret = cpcv_met.get("return_pct", {})
+                        parts.append(f"  報酬: 均值={cpcv_ret.get('mean', '?')}%, P25={cpcv_ret.get('p25', '?')}%, 中位數={cpcv_ret.get('median', '?')}%")
+                        parts.append(f"  評分: {cpcv_assess.get('score', '?')}/100 | 有邊際: {'✅' if cpcv_assess.get('has_edge') else '❌'}")
+                        parts.append(f"  結論: {cpcv_assess.get('verdict', '?')}")
+                # OOS Monte Carlo
+                mc_oos = r.get("monte_carlo_oos", {})
+                if mc_oos and mc_oos.get("status") == "success":
+                    parts.append(f"\nOOS Monte Carlo（Walk Forward OOS 交易）:")
+                    parts.append(f"  獲利機率: {mc_oos.get('profit_probability', '?')}% | 破產風險: {mc_oos.get('ruin_probability', '?')}%")
+                    parts.append(f"  策略穩健: {'✅' if mc_oos.get('strategy_robust') else '❌'}")
                 # 倉位建議
                 pos = r.get("position_sizing", {})
                 if pos and not pos.get("error"):
                     parts.append(f"\n倉位建議: {pos.get('recommendation', pos.get('summary', '?'))}")
+                    mc_adj = pos.get("mc_adjustment", {})
+                    if mc_adj:
+                        parts.append(f"  MC 調整: {mc_adj.get('reason', '?')}")
                 # 結論
                 conclusion = r.get("conclusion", {})
                 if conclusion:
