@@ -173,5 +173,142 @@ class RegimeModel:
         return regime_map
 
 
+    # ═══════════════════════════════════════════════════
+    #  GARCH(1,1) 波動率預測
+    # ═══════════════════════════════════════════════════
+
+    def predict_volatility(self, df: pd.DataFrame, horizon: int = 5) -> dict:
+        """GARCH(1,1) 預測未來波動率的擴張或收斂。
+
+        Args:
+            df: OHLCV DataFrame
+            horizon: 預測未來幾根 K 線
+
+        Returns:
+            dict: 當前波動率、預測波動率、建議止損倍率
+        """
+        from arch import arch_model
+
+        close = df["close"].values.astype(float)
+        if len(close) < 100:
+            return {"status": "insufficient_data", "message": "GARCH 需要至少 100 根 K 線"}
+
+        returns = np.diff(np.log(close)) * 100  # 百分比對數報酬
+
+        try:
+            model = arch_model(returns, vol="Garch", p=1, q=1, dist="t", rescale=False)
+            result = model.fit(disp="off", show_warning=False)
+
+            forecast = result.forecast(horizon=horizon)
+            predicted_var = forecast.variance.values[-1]
+            predicted_vol = np.sqrt(predicted_var)
+
+            current_vol = float(pd.Series(returns).rolling(14).std().iloc[-1])
+            avg_predicted = float(np.mean(predicted_vol))
+            vol_expanding = avg_predicted > current_vol * 1.1
+
+            # 動態止損倍率：波動率擴張時放寬
+            if vol_expanding:
+                sl_mult = min(2.0, avg_predicted / current_vol) if current_vol > 0 else 1.5
+            else:
+                sl_mult = 1.0
+
+            return {
+                "status": "success",
+                "current_volatility": round(current_vol, 4),
+                "predicted_volatility": [round(float(v), 4) for v in predicted_vol],
+                "avg_predicted": round(avg_predicted, 4),
+                "vol_direction": "expanding" if vol_expanding else "contracting",
+                "suggested_sl_multiplier": round(sl_mult, 2),
+                "interpretation": (
+                    f"波動率預測{'擴張' if vol_expanding else '收斂'}，"
+                    f"建議止損倍率 {sl_mult:.1f}x"
+                ),
+            }
+        except Exception as e:
+            logger.warning(f"GARCH 預測失敗: {e}")
+            return {"status": "error", "message": str(e)}
+
+    # ═══════════════════════════════════════════════════
+    #  HMM 狀態轉移模型
+    # ═══════════════════════════════════════════════════
+
+    def fit_hmm(
+        self,
+        df: pd.DataFrame,
+        n_states: int = 4,
+        min_samples: int = 200,
+    ) -> dict:
+        """Hidden Markov Model：加入狀態轉移機率，預測 regime 持續時間。
+
+        Args:
+            df: OHLCV DataFrame
+            n_states: 隱含狀態數
+            min_samples: 最少需要的 K 線數
+
+        Returns:
+            dict: 當前狀態、轉移矩陣、各狀態預期持續時間
+        """
+        from hmmlearn.hmm import GaussianHMM
+
+        close = df["close"].values.astype(float)
+        if len(close) < min_samples:
+            return {"status": "insufficient_data", "message": f"HMM 需要至少 {min_samples} 根"}
+
+        log_returns = np.diff(np.log(close))
+        volatility = pd.Series(log_returns).rolling(14, min_periods=5).std().values
+
+        valid = ~np.isnan(volatility)
+        X = np.column_stack([log_returns[valid], volatility[valid]])
+
+        if len(X) < min_samples:
+            return {"status": "insufficient_data"}
+
+        try:
+            hmm = GaussianHMM(
+                n_components=n_states,
+                covariance_type="diag",  # diag 比 full 更穩定
+                n_iter=200,
+                random_state=42,
+            )
+            hmm.fit(X)
+
+            states = hmm.predict(X)
+            current_state = int(states[-1])
+
+            # 轉移矩陣
+            trans_mat = hmm.transmat_.round(3).tolist()
+
+            # 各狀態預期持續時間：1 / (1 - P(stay))
+            expected_duration = []
+            for i in range(n_states):
+                p_stay = hmm.transmat_[i, i]
+                duration = 1 / (1 - p_stay) if p_stay < 1 else float("inf")
+                expected_duration.append(round(duration, 1))
+
+            # 狀態命名（根據均值）
+            state_names = self._label_regimes(hmm.means_)
+
+            return {
+                "status": "success",
+                "n_states": n_states,
+                "current_state": state_names.get(current_state, f"state_{current_state}"),
+                "current_state_idx": current_state,
+                "transition_matrix": trans_mat,
+                "expected_duration_bars": {
+                    state_names.get(i, f"state_{i}"): expected_duration[i]
+                    for i in range(n_states)
+                },
+                "state_names": state_names,
+                "interpretation": (
+                    f"當前處於「{state_names.get(current_state, '?')}」，"
+                    f"預期持續 {expected_duration[current_state]:.0f} 根 K 線"
+                ),
+            }
+        except Exception as e:
+            logger.warning(f"HMM 擬合失敗: {e}")
+            return {"status": "error", "message": str(e)}
+
+
 # Singleton
 regime_model = RegimeModel()

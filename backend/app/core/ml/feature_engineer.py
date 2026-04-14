@@ -179,6 +179,24 @@ def build_features(
                     break
             y_full[i] = 1.0 if hit_tp else 0.0
 
+        elif label_type == "state":
+            # 狀態標籤：趨勢延續 / 盤整 / 假突破（依賴 GMM regime）
+            # 用簡化版：看 forward_period 內的價格行為分類
+            future_closes = close[i + 1 : i + forward_period + 1]
+            if len(future_closes) < forward_period:
+                continue
+            max_up = (np.max(high[future]) - close[i]) / close[i]
+            max_down = (close[i] - np.min(low[future])) / close[i]
+            end_move = (future_closes[-1] - close[i]) / close[i]
+            # 趨勢：單方向持續（最終漲幅 > 門檻 且 中間沒大回撤）
+            if end_move >= target_threshold and max_down < target_threshold:
+                y_full[i] = 1.0  # 趨勢延續
+            # 假突破：中間超過門檻但最終反轉
+            elif max_up >= target_threshold and end_move < 0:
+                y_full[i] = 0.0  # 假突破（歸入非趨勢）
+            else:
+                y_full[i] = 0.0  # 盤整或其他
+
         else:
             # amplitude 幅度標籤（預設）：N 根內最高漲幅是否達標
             if target_direction == "down":

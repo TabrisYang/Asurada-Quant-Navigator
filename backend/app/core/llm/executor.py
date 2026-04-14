@@ -1133,7 +1133,7 @@ async def _exec_quant_research(args: dict, default_symbol: str, default_tf: str,
         except Exception as e:
             report["backtest"] = {"error": str(e)}
 
-    # ── 5c. GMM Regime 分類 ──
+    # ── 5c. GMM Regime 分類 + GARCH 波動率 + HMM ──
     if len(df) >= 100:
         _sub("GMM 市場體制分類中...")
         logger.info(f"量化研究 [{symbol}]: GMM Regime 分類中...")
@@ -1144,6 +1144,25 @@ async def _exec_quant_research(args: dict, default_symbol: str, default_tf: str,
                 report["gmm_regime"] = regime_result
         except Exception as e:
             logger.warning(f"GMM Regime 分類失敗: {e}")
+
+        # GARCH 波動率預測
+        _sub("GARCH 波動率預測中...")
+        try:
+            garch_result = regime_model.predict_volatility(df)
+            if garch_result.get("status") == "success":
+                report["garch_volatility"] = garch_result
+        except Exception as e:
+            logger.warning(f"GARCH 預測失敗: {e}")
+
+        # HMM 狀態轉移（數據 ≥ 200 根才跑）
+        if len(df) >= 200:
+            _sub("HMM 狀態轉移分析中...")
+            try:
+                hmm_result = regime_model.fit_hmm(df)
+                if hmm_result.get("status") == "success":
+                    report["hmm_regime"] = hmm_result
+            except Exception as e:
+                logger.warning(f"HMM 分析失敗: {e}")
 
     # ── 6. 動態倉位建議（MC 回饋調控 Kelly） ──
     _sub("動態倉位計算中...")
