@@ -801,6 +801,13 @@ def _format_function_results(function_calls: list[dict], exec_result: dict) -> s
                 parts.append(f"========== {sym} 價格數據 ==========")
                 parts.append(f"幣種: {sym}，時間框架: {cu.get('timeframe', '?')}，"
                              f"共 {cu.get('dataPoints', 0)} 根 K 線")
+                # ★ 沒有數據時強制提示 LLM 呼叫下載
+                if r.get("no_data") or cu.get("dataPoints", 0) == 0:
+                    hint = r.get("hint", "")
+                    if hint:
+                        parts.append(f"⚠️ {hint}")
+                    else:
+                        parts.append(f"⚠️ 沒有本地數據。請呼叫 sync_symbol_data 下載 {sym} 的數據，不要只回覆沒有數據。")
                 ps = r.get("price_summary")
                 if ps:
                     parts.append(f"[{sym}] 期間最高: {ps.get('period_high')} ({ps.get('period_high_date')})")
