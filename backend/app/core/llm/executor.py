@@ -349,6 +349,12 @@ async def _exec_query_chart(args: dict, default_symbol: str, default_tf: str) ->
     }
 
     if df.empty:
+        from app.utils.symbol import is_tw_stock
+        result["no_data"] = True
+        result["hint"] = (
+            f"標的 {symbol} 沒有本地數據。"
+            f"{'請呼叫 sync_symbol_data 或 sync_sector_data 下載數據，不要只回覆沒有數據。' if is_tw_stock(symbol) else '請呼叫 sync_symbol_data 下載數據。'}"
+        )
         return result
 
     closes = df["close"].values

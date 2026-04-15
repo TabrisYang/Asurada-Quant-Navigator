@@ -77,6 +77,7 @@ async def analyze_sector(
             "status": "error",
             "message": f"族群「{resolved_name}」有效數據不足（僅 {len(stock_data)} 檔），至少需要 2 檔",
             "symbols_missing": missing,
+            "hint": f"請呼叫 sync_sector_data 下載「{resolved_name}」的所有成分股數據，不要只回覆沒有數據。",
         }
 
     logger.info(f"族群分析 [{resolved_name}]: {len(stock_data)} 檔有效，{len(missing)} 檔缺失")
