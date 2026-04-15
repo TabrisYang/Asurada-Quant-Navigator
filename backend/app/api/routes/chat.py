@@ -707,6 +707,14 @@ def _build_messages(
             f"使用者備註：{request.message if request.message.strip() else '請分析當前市場體制'}"
         )
         messages.append({"role": "user", "content": ra_prefix})
+    elif request.mode == "fundamental_analysis":
+        fa_prefix = (
+            "[系統指令：使用者點擊了「基本面」按鈕]\n"
+            "你必須呼叫 analyze_fundamentals 取得基本面數據。\n"
+            "專注報告：月營收趨勢、法人動向、財報指標、綜合評分。\n\n"
+            f"使用者備註：{request.message if request.message.strip() else '請分析當前標的的基本面'}"
+        )
+        messages.append({"role": "user", "content": fa_prefix})
     elif request.mode == "momentum_analysis":
         ma_prefix = (
             "[系統指令：使用者點擊了「動能分析」按鈕]\n"
@@ -864,6 +872,39 @@ def _format_function_results(function_calls: list[dict], exec_result: dict) -> s
                 ha = r.get("historical_accuracy", {})
                 if ha:
                     parts.append(f"情境預測歷史準確率: {ha.get('direction_accuracy_pct', '?')}%（{ha.get('n_evaluations', '?')} 次評估）")
+            elif fname == "analyze_fundamentals":
+                parts.append(f"📊 基本面分析 — {r.get('code', '?')} {r.get('name', '?')}")
+                # 營收
+                rev = r.get("revenue", {})
+                if rev.get("available"):
+                    parts.append(f"\n營收趨勢: {rev.get('trend', '?')}")
+                    parts.append(f"  最新月: {rev.get('latest_month', '?')} 營收={rev.get('latest_revenue', '?')}")
+                    if rev.get("mom_pct") is not None:
+                        parts.append(f"  MoM: {rev['mom_pct']}% | YoY: {rev.get('yoy_pct', '?')}%")
+                    if rev.get("consecutive_growth_months"):
+                        parts.append(f"  連續成長: {rev['consecutive_growth_months']} 個月")
+                # 法人
+                inst = r.get("institutional", {})
+                if inst.get("available"):
+                    parts.append(f"\n法人動向: {inst.get('direction', '?')}")
+                    parts.append(f"  外資近20日: {inst.get('foreign_net_20d', '?')} 張")
+                    parts.append(f"  投信近20日: {inst.get('trust_net_20d', '?')} 張")
+                    if inst.get("foreign_consecutive_buy"):
+                        parts.append(f"  外資連買: {inst['foreign_consecutive_buy']} 天")
+                # 財報
+                fin = r.get("financials", {})
+                if fin.get("available"):
+                    parts.append(f"\n財報指標:")
+                    if fin.get("pe_ratio"):
+                        parts.append(f"  本益比: {fin['pe_ratio']} ({fin.get('pe_assessment', '')})")
+                    if fin.get("eps_trailing"):
+                        parts.append(f"  EPS: {fin['eps_trailing']}")
+                    if fin.get("dividend_yield"):
+                        parts.append(f"  殖利率: {fin['dividend_yield']}% ({fin.get('yield_assessment', '')})")
+                # 評分
+                score = r.get("fundamental_score", {})
+                if score:
+                    parts.append(f"\n綜合基本面評分: {score.get('score', '?')}/{score.get('max_possible', 10)} → {score.get('direction', '?')}")
             elif fname == "sync_symbol_data":
                 if r.get("status") == "success":
                     parts.append(f"✅ 數據下載完成: {r.get('symbol', '?')} {r.get('timeframe', '?')}")
@@ -1474,6 +1515,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                         "strategy_backtest": ["run_quant_research"],
                         "regime_analysis": ["generate_scenarios"],
                         "momentum_analysis": ["analyze_momentum"],
+                        "fundamental_analysis": ["analyze_fundamentals"],
                     }
                     _already_executed = _llm_called_funcs | {
                         r.get("function") for r in exec_result.get("results", []) if isinstance(r, dict)

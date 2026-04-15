@@ -279,6 +279,9 @@ async def execute_function_calls(
                 elif name == "sync_sector_data":
                     result = await _exec_sync_sector_data(args)
                     return {"function": name, "result": result}
+                elif name == "analyze_fundamentals":
+                    result = await _exec_analyze_fundamentals(args, default_symbol)
+                    return {"function": name, "result": result}
                 elif name == "list_sectors":
                     result = await _exec_list_sectors()
                     return {"function": name, "result": result}
@@ -2158,3 +2161,15 @@ async def _exec_sync_sector_data(args: dict) -> dict:
         "details": results,
         "message": f"族群「{resolved}」下載完成：{success_count}/{len(symbols)} 檔成功",
     }
+
+
+async def _exec_analyze_fundamentals(args: dict, default_symbol: str) -> dict:
+    """台股基本面分析"""
+    from app.core.fundamental_analyzer import analyze_fundamentals
+    from app.utils.symbol import normalize_symbol, is_tw_stock
+
+    symbol = normalize_symbol(args.get("symbol", default_symbol))
+    if not is_tw_stock(symbol):
+        return {"status": "error", "message": f"{symbol} 不是台股標的，基本面分析僅支援台股"}
+
+    return await analyze_fundamentals(symbol)

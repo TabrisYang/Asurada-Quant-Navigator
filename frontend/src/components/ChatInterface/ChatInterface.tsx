@@ -60,6 +60,17 @@ const ANALYSIS_CATEGORIES = [
     ],
   },
   {
+    tab: '基本面',
+    mode: 'fundamental_analysis',
+    allPrompt: '對 {symbol} 進行基本面分析（月營收趨勢 + 法人買賣超 + 財報指標 + 綜合評分）',
+    items: [
+      { label: '月營收趨勢', prompt: '分析 {symbol} 的月營收 MoM/YoY 趨勢' },
+      { label: '法人買賣超', prompt: '分析 {symbol} 的三大法人買賣超動向' },
+      { label: '財報指標', prompt: '查看 {symbol} 的本益比、EPS、殖利率' },
+      { label: '基本面綜合', prompt: '給我 {symbol} 的基本面綜合評分和分析' },
+    ],
+  },
+  {
     tab: '動能分析',
     mode: 'momentum_analysis',
     allPrompt: '對 {symbol} 進行完整動能交易分析（多週期動量 + 加速度 + 相對強弱 + 反轉偵測 + 策略回測）',

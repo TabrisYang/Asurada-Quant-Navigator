@@ -95,6 +95,11 @@ _INTENT_KEYWORDS: dict[str, list[str]] = {
         "下載", "同步", "抓取", "下載數據", "sync", "download",
         "沒有數據", "下載K線", "抓取K線", "抓取數據",
     ],
+    "fundamental_analysis": [
+        "基本面", "營收", "法人", "外資", "投信", "本益比", "eps",
+        "殖利率", "股利", "財報", "買賣超", "持股",
+        "fundamental", "revenue", "pe ratio",
+    ],
     "sector_analysis": [
         "族群", "概念股", "板塊", "產業分析", "sector",
         "半導體族群", "金融股", "航運股", "哪些族群",
@@ -982,6 +987,26 @@ _PROMPT_MODULES["momentum_analysis_mode"] = """
 6. 🎯 綜合動量評分（-10~+10 分 + 方向判定）
 7. 💡 操作建議（基於動量狀態 + 最佳策略 + 反轉信號）"""
 
+# ─── 基本面分析模式 ─────────────────────────────────
+
+_PROMPT_MODULES["fundamental_analysis_mode"] = """
+【台股基本面分析 — analyze_fundamentals】
+當用戶提到營收、法人、外資、本益比、EPS、殖利率、財報等基本面相關問題時，
+必須呼叫 analyze_fundamentals 取得真實數據，不要用文字猜測。
+
+此函式會抓取並分析（僅限台股）：
+1. 月營收趨勢（MoM%、YoY%、連續成長月數）
+2. 三大法人買賣超（外資/投信/自營商近 20 日淨額 + 連續天數）
+3. 外資持股比例
+4. 財報摘要（本益比/EPS/殖利率/市值/52週高低）
+
+輸出格式：
+1. 📊 營收趨勢（最新月營收 + MoM/YoY + 趨勢判定）
+2. 🏦 法人動向（三大法人淨買賣超 + 連續天數 + 方向判定）
+3. 💰 財務指標（本益比/EPS/殖利率 + 評估）
+4. 🎯 綜合基本面評分（-10~+10）
+5. 💡 基本面 vs 技術面的交叉驗證建議"""
+
 # ─── 數據下載模式 ─────────────────────────────────
 
 _PROMPT_MODULES["data_sync_mode"] = """
@@ -1097,6 +1122,9 @@ _INTENT_TO_MODULES: dict[str, list[str]] = {
     "data_sync": [
         "data_sync_mode",
     ],
+    "fundamental_analysis": [
+        "output_lite", "fundamental_analysis_mode",
+    ],
     "sector_analysis": [
         "regime_v2", "sector_analysis", "output_lite", "risk_checklist",
     ],
@@ -1141,7 +1169,7 @@ def assemble_system_prompt(intents: set[str], teaching_mode: bool = False) -> st
         "quant_research", "calibrate", "backtest",
         "sector_analysis",
         "factor_validation_mode", "strategy_backtest_mode", "regime_analysis_mode",
-        "momentum_analysis_mode",
+        "momentum_analysis_mode", "fundamental_analysis_mode",
         "data_sync_mode",  # 所有模式都載入，讓 LLM 隨時能建議下載
     )
 
@@ -1803,6 +1831,28 @@ FUNCTION_DEFINITIONS = [
             "parameters": {
                 "type": "object",
                 "properties": {},
+            },
+        },
+    },
+    # ─── 基本面分析 ───
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_fundamentals",
+            "description": (
+                "台股基本面分析：月營收趨勢（MoM/YoY/連續成長）、三大法人買賣超（外資/投信/自營商）、"
+                "外資持股比例、財報摘要（本益比/EPS/殖利率）。僅限台股。"
+                "適用場景：「台積電基本面」「國巨營收」「法人買賣超」「本益比多少」。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {
+                        "type": "string",
+                        "description": "台股代碼，如 2330/TWD。留空使用當前標的",
+                    },
+                },
+                "required": [],
             },
         },
     },
