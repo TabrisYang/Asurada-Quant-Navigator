@@ -871,6 +871,11 @@ def _format_function_results(function_calls: list[dict], exec_result: dict) -> s
                     parts.append(f"  範圍: {r.get('range', '?')}")
                 else:
                     parts.append(f"❌ 下載失敗: {r.get('message', '?')}")
+            elif fname == "sync_sector_data":
+                parts.append(f"📦 族群批次下載: {r.get('sector_name', '?')}（{r.get('success', 0)}/{r.get('total', 0)} 檔成功）")
+                for d in r.get("details", []):
+                    icon = "✅" if d.get("status") == "ok" and d.get("bars", 0) > 0 else "❌"
+                    parts.append(f"  {icon} {d.get('name', '?')}（{d.get('symbol', '?')}）: {d.get('bars', 0)} 根")
             elif fname == "analyze_momentum":
                 parts.append(f"📊 動能分析 — {r.get('symbol', '?')} {r.get('timeframe', '?')}（{r.get('total_bars', 0)} 根）")
                 # 動量因子

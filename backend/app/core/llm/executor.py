@@ -276,6 +276,9 @@ async def execute_function_calls(
                 elif name == "sync_symbol_data":
                     result = await _exec_sync_symbol_data(args)
                     return {"function": name, "result": result}
+                elif name == "sync_sector_data":
+                    result = await _exec_sync_sector_data(args)
+                    return {"function": name, "result": result}
                 elif name == "list_sectors":
                     result = await _exec_list_sectors()
                     return {"function": name, "result": result}
@@ -2101,3 +2104,57 @@ async def _exec_sync_symbol_data(args: dict) -> dict:
         }
     except Exception as e:
         return {"status": "error", "message": f"下載失敗: {str(e)}"}
+
+
+async def _exec_sync_sector_data(args: dict) -> dict:
+    """批次下載整個族群的所有成分股數據"""
+    from datetime import datetime
+    from app.data.tw_sectors import get_sector_symbols, get_sector_name, get_stock_name
+
+    sector_name = args.get("sector_name", "")
+    timeframe = args.get("timeframe", "1d")
+    start_date_str = args.get("start_date", "2020-01-01")
+
+    resolved = get_sector_name(sector_name)
+    if not resolved:
+        from app.data.tw_sectors import list_sectors
+        names = [s["name"] for s in list_sectors()]
+        return {"status": "error", "message": f"找不到族群「{sector_name}」", "available": names[:10]}
+
+    symbols = get_sector_symbols(resolved)
+    if not symbols:
+        return {"status": "error", "message": f"族群「{resolved}」沒有成分股"}
+
+    try:
+        start_dt = datetime.strptime(start_date_str, "%Y-%m-%d")
+    except ValueError:
+        return {"status": "error", "message": f"日期格式錯誤: {start_date_str}"}
+
+    logger.info(f"批次下載族群 [{resolved}]: {len(symbols)} 檔, from {start_date_str}")
+
+    results = []
+    success_count = 0
+    for code in symbols:
+        symbol = f"{code}/TWD"
+        try:
+            df = await tw_stock_engine.fetch_ohlcv(
+                symbol=symbol, timeframe=timeframe, start_date=start_dt,
+            )
+            bars = len(df) if df is not None and not df.empty else 0
+            results.append({"symbol": symbol, "name": get_stock_name(code), "bars": bars, "status": "ok"})
+            if bars > 0:
+                success_count += 1
+        except Exception as e:
+            results.append({"symbol": symbol, "name": get_stock_name(code), "bars": 0, "status": f"失敗: {e}"})
+
+    return {
+        "status": "success",
+        "sector_name": resolved,
+        "total": len(symbols),
+        "success": success_count,
+        "failed": len(symbols) - success_count,
+        "timeframe": timeframe,
+        "start_date": start_date_str,
+        "details": results,
+        "message": f"族群「{resolved}」下載完成：{success_count}/{len(symbols)} 檔成功",
+    }

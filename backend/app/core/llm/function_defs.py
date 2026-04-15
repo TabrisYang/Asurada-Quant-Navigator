@@ -996,6 +996,11 @@ _PROMPT_MODULES["data_sync_mode"] = """
 3. 如果用戶已在對話中明確指定了起始日期（如「下載國巨從2023年開始」），可以直接呼叫不需再問
 4. 下載完成後回報結果（K 線數量、日期範圍），並告知用戶可以切換到該標的進行分析
 
+批次下載族群：
+- 用戶說「下載所有被動元件的數據」→ 呼叫 sync_sector_data（不是逐一呼叫 sync_symbol_data）
+- 同樣需要先確認起始日期
+- 下載完成後列出每檔的結果（成功/失敗/K線數）
+
 注意：
 - 台股代碼格式為 {代號}/TWD（如 2330/TWD）
 - 支援中文名稱（如「台積電」會自動轉為 2330/TWD）
@@ -1823,6 +1828,38 @@ FUNCTION_DEFINITIONS = [
                     },
                 },
                 "required": ["symbol", "start_date"],
+            },
+        },
+    },
+    # ─── 族群批次下載 ───
+    {
+        "type": "function",
+        "function": {
+            "name": "sync_sector_data",
+            "description": (
+                "批次下載整個台股族群/概念股的所有成分股 K 線數據。"
+                "例如「下載所有被動元件的數據」→ 自動展開 2327/2492/2428/2456/3026 並逐一下載。"
+                "在呼叫前必須先跟用戶確認起始日期。"
+                "支援 29 個族群 + 別名（如「ai」「半導體」「蘋概股」）。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sector_name": {
+                        "type": "string",
+                        "description": "族群名稱，如「被動元件」「半導體」「AI概念股」",
+                    },
+                    "timeframe": {
+                        "type": "string",
+                        "enum": ["1d", "1w"],
+                        "description": "時間框架，預設 1d",
+                    },
+                    "start_date": {
+                        "type": "string",
+                        "description": "起始日期 YYYY-MM-DD，必須由用戶確認",
+                    },
+                },
+                "required": ["sector_name", "start_date"],
             },
         },
     },
