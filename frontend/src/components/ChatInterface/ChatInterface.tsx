@@ -152,7 +152,6 @@ export default function ChatInterface() {
   const streamingMsgIdRef = useRef<string | null>(null);
   const messageQueueRef = useRef<{ text: string; mode?: string }[]>([]);
   const [queueLength, setQueueLength] = useState(0);
-  const processingQueueRef = useRef(false);
   const MAX_QUEUE = 3;
   const messages = useChartStore((s) => s.messages);
   const addMessage = useChartStore((s) => s.addMessage);
@@ -160,8 +159,7 @@ export default function ChatInterface() {
   const chatLoading = useChartStore((s) => s.chatLoading);
   const setChatLoading = useChartStore((s) => s.setChatLoading);
   const llmConfig = useChartStore((s) => s.llmConfig);
-  const getChartStateSummary = useChartStore((s) => s.getChartStateSummary);
-  const conversationId = useChartStore((s) => s.conversationId);
+  // getChartStateSummary 和 conversationId 在 _executeSend 中從 store 即時讀取
   const pendingChatMessage = useChartStore((s) => s.pendingChatMessage);
   const setPendingChatMessage = useChartStore((s) => s.setPendingChatMessage);
 
@@ -326,28 +324,15 @@ export default function ChatInterface() {
     }
   }, [messages]);
 
-  // 處理佇列中的下一個任務
-  const processNextInQueue = useCallback(async () => {
-    if (processingQueueRef.current || messageQueueRef.current.length === 0) return;
-    processingQueueRef.current = true;
-    const next = messageQueueRef.current.shift()!;
-    setQueueLength(messageQueueRef.current.length);
-    await _executeSend(next.text, next.mode);
-    processingQueueRef.current = false;
-    // 遞迴處理下一個
-    if (messageQueueRef.current.length > 0) {
-      processNextInQueue();
-    }
-  }, []);
-
   const handleSend = useCallback(async (sendMode?: string) => {
     const trimmed = input.trim();
     if (!trimmed) return;
 
+    const currentlyLoading = useChartStore.getState().chatLoading;
+
     // 如果正在分析中 → 加入佇列
-    if (chatLoading) {
+    if (currentlyLoading) {
       if (messageQueueRef.current.length >= MAX_QUEUE) {
-        // 佇列已滿，提示用戶
         const warnMsg: ChatMessage = {
           id: `system-${Date.now()}`,
           role: 'system',
@@ -357,10 +342,8 @@ export default function ChatInterface() {
         addMessage(warnMsg);
         return;
       }
-      // 加入佇列
       messageQueueRef.current.push({ text: trimmed, mode: sendMode });
       setQueueLength(messageQueueRef.current.length);
-      // 顯示排隊訊息
       const queueMsg: ChatMessage = {
         id: `user-${Date.now()}`,
         role: 'user',
@@ -380,17 +363,23 @@ export default function ChatInterface() {
     }
 
     setInput('');
-    await _executeSend(trimmed, sendMode);
+    await _executeSend(trimmed, sendMode, true);
 
     // 分析完成後自動處理佇列
-    if (messageQueueRef.current.length > 0) {
-      processNextInQueue();
+    while (messageQueueRef.current.length > 0) {
+      const next = messageQueueRef.current.shift()!;
+      setQueueLength(messageQueueRef.current.length);
+      await _executeSend(next.text, next.mode, false);
     }
-  }, [input, chatLoading, addMessage, processNextInQueue]);
+  }, [input, addMessage]);
 
-  const _executeSend = useCallback(async (trimmed: string, sendMode?: string) => {
-    // 新增使用者訊息（佇列模式下已經加過了，這裡只在直接發送時加）
-    if (!chatLoading) {
+  // 普通函式（非 useCallback）— 每次呼叫時讀取最新的 store 狀態
+  const _executeSend = async (trimmed: string, sendMode?: string, addUserMsg: boolean = true) => {
+    const store = useChartStore.getState();
+    const currentLlmConfig = store.llmConfig;
+    const currentConversationId = store.conversationId;
+
+    if (addUserMsg) {
       const userMsg: ChatMessage = {
         id: `user-${Date.now()}`,
         role: 'user',
@@ -616,10 +605,10 @@ export default function ChatInterface() {
           }
         },
       },
-      conversationId || undefined,
-      getChartStateSummary(),
-      llmConfig.provider,
-      llmConfig.sessionId,
+      currentConversationId || undefined,
+      store.getChartStateSummary(),
+      currentLlmConfig.provider,
+      currentLlmConfig.sessionId,
       chatHistory,
       sendMode,
       screenshot,
@@ -635,7 +624,7 @@ export default function ChatInterface() {
       streamingMsgIdRef.current = null;
     }
     setChatLoading(false);
-  }, [addMessage, updateMessage, setChatLoading, llmConfig, getChartStateSummary, conversationId, chatLoading]);
+  };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.nativeEvent.isComposing || isComposingRef.current) return;
