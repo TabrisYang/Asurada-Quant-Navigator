@@ -985,26 +985,29 @@ _PROMPT_MODULES["momentum_analysis_mode"] = """
 # ─── 數據下載模式 ─────────────────────────────────
 
 _PROMPT_MODULES["data_sync_mode"] = """
-【數據下載 — sync_symbol_data】
-當用戶要求下載數據，或系統偵測到標的沒有本地數據時：
+【數據下載 — sync_symbol_data / sync_sector_data】
 
-1. 「必須」先跟用戶確認以下資訊（不可自行決定起始日期）：
-   - 標的代碼和名稱（如 2327/TWD 國巨）
-   - 時間框架（預設 1d，台股僅支援 1d/1w）
-   - 起始日期（建議 2020-01-01，但必須讓用戶確認或調整）
-2. 用戶明確確認後才呼叫 sync_symbol_data
-3. 如果用戶已在對話中明確指定了起始日期（如「下載國巨從2023年開始」），可以直接呼叫不需再問
-4. 下載完成後回報結果（K 線數量、日期範圍），並告知用戶可以切換到該標的進行分析
+★★ 最重要規則：禁止只回覆「沒有數據」★★
+當你發現標的沒有本地數據（query_chart_data 回傳 0 根 K 線、或分析函式回報數據不足），
+你「禁止」只回覆「沒有數據」或「無法分析」。你「必須」主動提議幫用戶下載：
+- 單一標的 → 「我可以幫你下載 {標的} 的歷史數據，請確認起始日期（建議 2020-01-01）」
+- 整個族群 → 「我可以幫你一次下載 {族群} 所有成分股的數據，請確認起始日期」
+
+下載流程：
+1. 「必須」先跟用戶確認起始日期（不可自行決定）
+2. 用戶確認後呼叫 sync_symbol_data（單檔）或 sync_sector_data（族群批次）
+3. 如果用戶已在對話中明確指定了日期，可以直接呼叫
+4. 下載完成後回報結果，並告知用戶可以進行分析
 
 批次下載族群：
-- 用戶說「下載所有被動元件的數據」→ 呼叫 sync_sector_data（不是逐一呼叫 sync_symbol_data）
-- 同樣需要先確認起始日期
-- 下載完成後列出每檔的結果（成功/失敗/K線數）
+- 用戶說「分析被動元件」但沒有數據 → 主動提議 sync_sector_data 下載全部成分股
+- 用戶說「下載所有半導體」→ 呼叫 sync_sector_data
+- 支援 29 個族群 + 別名
 
 注意：
-- 台股代碼格式為 {代號}/TWD（如 2330/TWD）
-- 支援中文名稱（如「台積電」會自動轉為 2330/TWD）
-- 加密貨幣格式為 {幣種}/USDT（如 BTC/USDT）"""
+- 台股代碼格式為 {代號}/TWD（如 2330/TWD），支援中文名稱
+- 加密貨幣格式為 {幣種}/USDT（如 BTC/USDT）
+- 台股僅支援 1d/1w 時間框架"""
 
 _PROMPT_MODULES["sector_analysis"] = """
 【台股族群/概念股分析 — analyze_sector / list_sectors】
@@ -1112,6 +1115,9 @@ def assemble_system_prompt(intents: set[str], teaching_mode: bool = False) -> st
         for mod in _INTENT_TO_MODULES.get(intent, []):
             modules_needed.add(mod)
 
+    # 永遠載入數據下載指引（讓 LLM 在任何場景都知道可以下載數據）
+    modules_needed.add("data_sync_mode")
+
     # 自動注入用戶設定的策略模組
     try:
         from app.core.user_strategies import get_auto_inject_modules
@@ -1135,7 +1141,8 @@ def assemble_system_prompt(intents: set[str], teaching_mode: bool = False) -> st
         "quant_research", "calibrate", "backtest",
         "sector_analysis",
         "factor_validation_mode", "strategy_backtest_mode", "regime_analysis_mode",
-        "momentum_analysis_mode", "data_sync_mode",
+        "momentum_analysis_mode",
+        "data_sync_mode",  # 所有模式都載入，讓 LLM 隨時能建議下載
     )
 
     parts = [_PROMPT_CORE]
