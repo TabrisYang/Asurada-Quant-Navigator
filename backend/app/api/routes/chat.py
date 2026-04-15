@@ -864,6 +864,13 @@ def _format_function_results(function_calls: list[dict], exec_result: dict) -> s
                 ha = r.get("historical_accuracy", {})
                 if ha:
                     parts.append(f"情境預測歷史準確率: {ha.get('direction_accuracy_pct', '?')}%（{ha.get('n_evaluations', '?')} 次評估）")
+            elif fname == "sync_symbol_data":
+                if r.get("status") == "success":
+                    parts.append(f"✅ 數據下載完成: {r.get('symbol', '?')} {r.get('timeframe', '?')}")
+                    parts.append(f"  共 {r.get('bars', 0)} 根 K 線")
+                    parts.append(f"  範圍: {r.get('range', '?')}")
+                else:
+                    parts.append(f"❌ 下載失敗: {r.get('message', '?')}")
             elif fname == "analyze_momentum":
                 parts.append(f"📊 動能分析 — {r.get('symbol', '?')} {r.get('timeframe', '?')}（{r.get('total_bars', 0)} 根）")
                 # 動量因子

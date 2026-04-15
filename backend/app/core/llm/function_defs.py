@@ -91,6 +91,10 @@ _INTENT_KEYWORDS: dict[str, list[str]] = {
         "動能", "動量", "momentum", "追強", "動能分析",
         "相對強弱", "roc", "加速", "減速", "動量反轉",
     ],
+    "data_sync": [
+        "下載", "同步", "抓取", "下載數據", "sync", "download",
+        "沒有數據", "下載K線", "抓取K線", "抓取數據",
+    ],
     "sector_analysis": [
         "族群", "概念股", "板塊", "產業分析", "sector",
         "半導體族群", "金融股", "航運股", "哪些族群",
@@ -978,6 +982,25 @@ _PROMPT_MODULES["momentum_analysis_mode"] = """
 6. 🎯 綜合動量評分（-10~+10 分 + 方向判定）
 7. 💡 操作建議（基於動量狀態 + 最佳策略 + 反轉信號）"""
 
+# ─── 數據下載模式 ─────────────────────────────────
+
+_PROMPT_MODULES["data_sync_mode"] = """
+【數據下載 — sync_symbol_data】
+當用戶要求下載數據，或系統偵測到標的沒有本地數據時：
+
+1. 「必須」先跟用戶確認以下資訊（不可自行決定起始日期）：
+   - 標的代碼和名稱（如 2327/TWD 國巨）
+   - 時間框架（預設 1d，台股僅支援 1d/1w）
+   - 起始日期（建議 2020-01-01，但必須讓用戶確認或調整）
+2. 用戶明確確認後才呼叫 sync_symbol_data
+3. 如果用戶已在對話中明確指定了起始日期（如「下載國巨從2023年開始」），可以直接呼叫不需再問
+4. 下載完成後回報結果（K 線數量、日期範圍），並告知用戶可以切換到該標的進行分析
+
+注意：
+- 台股代碼格式為 {代號}/TWD（如 2330/TWD）
+- 支援中文名稱（如「台積電」會自動轉為 2330/TWD）
+- 加密貨幣格式為 {幣種}/USDT（如 BTC/USDT）"""
+
 _PROMPT_MODULES["sector_analysis"] = """
 【台股族群/概念股分析 — analyze_sector / list_sectors】
 當使用者提到任何台股產業族群、概念股、板塊分析時，你「必須」呼叫 analyze_sector 函式。
@@ -1063,6 +1086,9 @@ _INTENT_TO_MODULES: dict[str, list[str]] = {
     "momentum_analysis": [
         "regime_v2", "output_lite", "risk_checklist", "momentum_analysis_mode",
     ],
+    "data_sync": [
+        "data_sync_mode",
+    ],
     "sector_analysis": [
         "regime_v2", "sector_analysis", "output_lite", "risk_checklist",
     ],
@@ -1104,7 +1130,7 @@ def assemble_system_prompt(intents: set[str], teaching_mode: bool = False) -> st
         "quant_research", "calibrate", "backtest",
         "sector_analysis",
         "factor_validation_mode", "strategy_backtest_mode", "regime_analysis_mode",
-        "momentum_analysis_mode",
+        "momentum_analysis_mode", "data_sync_mode",
     )
 
     parts = [_PROMPT_CORE]
@@ -1765,6 +1791,38 @@ FUNCTION_DEFINITIONS = [
             "parameters": {
                 "type": "object",
                 "properties": {},
+            },
+        },
+    },
+    # ─── 數據下載 ───
+    {
+        "type": "function",
+        "function": {
+            "name": "sync_symbol_data",
+            "description": (
+                "下載指定標的的歷史 K 線數據到本地。"
+                "在呼叫此函式前，必須先跟用戶確認：(1) 標的代碼 (2) 時間框架 (3) 起始日期。"
+                "用戶明確確認後才呼叫。如果用戶已在對話中指定了日期，可以直接呼叫。"
+                "適用場景：「下載國巨的數據」「同步 BTC 資料」「抓取 2330 從 2020 年開始」。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {
+                        "type": "string",
+                        "description": "交易對，如 BTC/USDT、2330/TWD。台股用 {代號}/TWD 格式",
+                    },
+                    "timeframe": {
+                        "type": "string",
+                        "enum": ["15m", "1h", "4h", "1d", "1w"],
+                        "description": "時間框架（台股僅支援 1d/1w），預設 1d",
+                    },
+                    "start_date": {
+                        "type": "string",
+                        "description": "起始日期 YYYY-MM-DD。必須由用戶確認，不可自行決定",
+                    },
+                },
+                "required": ["symbol", "start_date"],
             },
         },
     },

@@ -273,6 +273,9 @@ async def execute_function_calls(
                 elif name == "analyze_momentum":
                     result = await _exec_analyze_momentum(args, default_symbol, default_timeframe)
                     return {"function": name, "result": result}
+                elif name == "sync_symbol_data":
+                    result = await _exec_sync_symbol_data(args)
+                    return {"function": name, "result": result}
                 elif name == "list_sectors":
                     result = await _exec_list_sectors()
                     return {"function": name, "result": result}
@@ -2049,3 +2052,52 @@ async def _exec_analyze_momentum(args: dict, default_symbol: str, default_tf: st
         benchmark_df = _load_local_data("BTC/USDT", timeframe)
 
     return await analyze_momentum(df, symbol, timeframe, benchmark_df)
+
+
+async def _exec_sync_symbol_data(args: dict) -> dict:
+    """透過對話觸發數據下載"""
+    from datetime import datetime
+    from app.utils.symbol import normalize_symbol, is_tw_stock
+
+    symbol = normalize_symbol(args.get("symbol", ""))
+    timeframe = args.get("timeframe", "1d")
+    start_date_str = args.get("start_date", "2020-01-01")
+
+    if not symbol:
+        return {"status": "error", "message": "請指定標的代碼"}
+
+    try:
+        start_dt = datetime.strptime(start_date_str, "%Y-%m-%d")
+    except ValueError:
+        return {"status": "error", "message": f"日期格式錯誤: {start_date_str}，請使用 YYYY-MM-DD"}
+
+    logger.info(f"對話觸發數據下載: {symbol} {timeframe} from {start_date_str}")
+
+    try:
+        if is_tw_stock(symbol):
+            df = await tw_stock_engine.fetch_ohlcv(
+                symbol=symbol, timeframe=timeframe,
+                start_date=start_dt,
+            )
+        else:
+            df = await crypto_engine.fetch_ohlcv(
+                symbol=symbol, timeframe=timeframe,
+                start_date=start_dt,
+            )
+
+        if df is None or df.empty:
+            return {
+                "status": "error",
+                "message": f"無法取得 {symbol} 的數據，可能代碼不正確或數據源不支援",
+            }
+
+        return {
+            "status": "success",
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "bars": len(df),
+            "range": f"{df['timestamp'].iloc[0]} ~ {df['timestamp'].iloc[-1]}",
+            "message": f"下載完成：{symbol} {timeframe}，共 {len(df)} 根 K 線",
+        }
+    except Exception as e:
+        return {"status": "error", "message": f"下載失敗: {str(e)}"}
