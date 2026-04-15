@@ -150,6 +150,10 @@ export default function ChatInterface() {
   const userScrolledUpRef = useRef(false);
   const isComposingRef = useRef(false);
   const streamingMsgIdRef = useRef<string | null>(null);
+  const messageQueueRef = useRef<{ text: string; mode?: string }[]>([]);
+  const [queueLength, setQueueLength] = useState(0);
+  const processingQueueRef = useRef(false);
+  const MAX_QUEUE = 3;
   const messages = useChartStore((s) => s.messages);
   const addMessage = useChartStore((s) => s.addMessage);
   const updateMessage = useChartStore((s) => s.updateMessage);
@@ -322,19 +326,79 @@ export default function ChatInterface() {
     }
   }, [messages]);
 
+  // 處理佇列中的下一個任務
+  const processNextInQueue = useCallback(async () => {
+    if (processingQueueRef.current || messageQueueRef.current.length === 0) return;
+    processingQueueRef.current = true;
+    const next = messageQueueRef.current.shift()!;
+    setQueueLength(messageQueueRef.current.length);
+    await _executeSend(next.text, next.mode);
+    processingQueueRef.current = false;
+    // 遞迴處理下一個
+    if (messageQueueRef.current.length > 0) {
+      processNextInQueue();
+    }
+  }, []);
+
   const handleSend = useCallback(async (sendMode?: string) => {
     const trimmed = input.trim();
-    if (!trimmed || chatLoading) return;
+    if (!trimmed) return;
 
-    // 新增使用者訊息
-    const userMsg: ChatMessage = {
-      id: `user-${Date.now()}`,
-      role: 'user',
-      content: trimmed,
-      timestamp: new Date().toISOString(),
-    };
-    addMessage(userMsg);
+    // 如果正在分析中 → 加入佇列
+    if (chatLoading) {
+      if (messageQueueRef.current.length >= MAX_QUEUE) {
+        // 佇列已滿，提示用戶
+        const warnMsg: ChatMessage = {
+          id: `system-${Date.now()}`,
+          role: 'system',
+          content: `⚠️ 排隊已滿（最多 ${MAX_QUEUE} 個），請等待目前分析完成。`,
+          timestamp: new Date().toISOString(),
+        };
+        addMessage(warnMsg);
+        return;
+      }
+      // 加入佇列
+      messageQueueRef.current.push({ text: trimmed, mode: sendMode });
+      setQueueLength(messageQueueRef.current.length);
+      // 顯示排隊訊息
+      const queueMsg: ChatMessage = {
+        id: `user-${Date.now()}`,
+        role: 'user',
+        content: trimmed,
+        timestamp: new Date().toISOString(),
+      };
+      addMessage(queueMsg);
+      const queueNotice: ChatMessage = {
+        id: `system-queue-${Date.now()}`,
+        role: 'system',
+        content: `⏳ 已加入排隊（第 ${messageQueueRef.current.length} 個），將在目前分析完成後自動執行。`,
+        timestamp: new Date().toISOString(),
+      };
+      addMessage(queueNotice);
+      setInput('');
+      return;
+    }
+
     setInput('');
+    await _executeSend(trimmed, sendMode);
+
+    // 分析完成後自動處理佇列
+    if (messageQueueRef.current.length > 0) {
+      processNextInQueue();
+    }
+  }, [input, chatLoading, addMessage, processNextInQueue]);
+
+  const _executeSend = useCallback(async (trimmed: string, sendMode?: string) => {
+    // 新增使用者訊息（佇列模式下已經加過了，這裡只在直接發送時加）
+    if (!chatLoading) {
+      const userMsg: ChatMessage = {
+        id: `user-${Date.now()}`,
+        role: 'user',
+        content: trimmed,
+        timestamp: new Date().toISOString(),
+      };
+      addMessage(userMsg);
+    }
     setChatLoading(true);
 
     // 建立空的助手訊息（等待串流填入）
@@ -571,7 +635,7 @@ export default function ChatInterface() {
       streamingMsgIdRef.current = null;
     }
     setChatLoading(false);
-  }, [input, chatLoading, addMessage, updateMessage, setChatLoading, llmConfig, getChartStateSummary, conversationId]);
+  }, [addMessage, updateMessage, setChatLoading, llmConfig, getChartStateSummary, conversationId, chatLoading]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.nativeEvent.isComposing || isComposingRef.current) return;
@@ -1029,15 +1093,25 @@ export default function ChatInterface() {
           <button
             id="chat-send-btn"
             onClick={() => handleSend()}
-            disabled={chatLoading || !input.trim()}
+            disabled={!input.trim()}
             className="px-4 py-1.5 rounded text-sm font-medium cursor-pointer transition-opacity disabled:opacity-40"
             style={{
-              background: 'var(--accent-blue)',
+              background: chatLoading ? 'var(--accent-orange, #f59e0b)' : 'var(--accent-blue)',
               color: '#fff',
             }}
           >
-            發送
+            {chatLoading ? `排隊${queueLength > 0 ? `(${queueLength})` : ''}` : '發送'}
           </button>
+          {queueLength > 0 && (
+            <button
+              onClick={() => { messageQueueRef.current = []; setQueueLength(0); }}
+              className="px-2 py-1.5 rounded text-xs cursor-pointer"
+              style={{ background: 'var(--bg-tertiary)', color: 'var(--text-secondary)' }}
+              title="清除排隊"
+            >
+              ✕
+            </button>
+          )}
           <button
             onClick={() => handleSend('quant_research')}
             disabled={chatLoading || !input.trim()}
