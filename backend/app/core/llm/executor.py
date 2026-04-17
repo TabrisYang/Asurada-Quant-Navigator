@@ -700,11 +700,11 @@ async def _exec_compare_strategies(args: dict, default_symbol: str, default_tf: 
         tp = strat.get("take_profit_pct")
 
         # 如果 LLM 沒帶止損/止盈，根據時間框架自動補預設值
-        _default_sl = {"15m": 0.03, "1h": 0.04, "4h": 0.08, "1d": 0.10, "1w": 0.15}
+        _default_sl = {"15m": 0.05, "1h": 0.06, "4h": 0.10, "1d": 0.12, "1w": 0.18}
         if sl is None:
-            sl = _default_sl.get(timeframe, 0.08)
+            sl = _default_sl.get(timeframe, 0.10)
         if tp is None:
-            tp = sl * 2.5  # 預設盈虧比 2.5:1
+            tp = sl * 2.0  # 預設盈虧比 2:1（放寬 SL 後降低 TP 倍率更務實）
 
         if not entry_conds or not exit_conds:
             comparison.append({"name": name, "status": "error", "message": "缺少進場或出場條件"})
@@ -1263,8 +1263,8 @@ def _generate_conclusion(report: dict) -> dict:
         score += 5
         findings.append(f"✅ Expectancy {bt['expectancy_pct']}% > 0，長期期望值正")
     elif bt.get("expectancy_pct", 0) <= 0 and bt.get("total_trades", 0) > 5:
-        score -= 8
-        findings.append(f"⚠️ Expectancy {bt.get('expectancy_pct', 0)}% ≤ 0，長期期望值負")
+        score -= 5
+        findings.append(f"⚠️ Expectancy {bt.get('expectancy_pct', 0)}% ≤ 0，但不排除策略參數可優化")
 
     # Monte Carlo
     mc = report.get("monte_carlo", {})
@@ -1274,15 +1274,15 @@ def _generate_conclusion(report: dict) -> dict:
         score += 10
         findings.append(f"✅ Monte Carlo 驗證通過（獲利機率 {mc.get('profit_probability', 0)}%）")
     elif mc.get("status") == "success":
-        score -= 7
+        score -= 5
         findings.append("⚠️ Monte Carlo 未通過（25%分位報酬為負）")
     if mc.get("ruin_probability", 0) > 5:
-        score -= 10
+        score -= 7
         findings.append(f"⚠️ 破產風險 {mc['ruin_probability']}%，建議降低槓桿")
     # 壓力測試
     stress = mc.get("stress_test", {})
     if stress.get("ruin_probability", 0) > 10:
-        score -= 7
+        score -= 5
         findings.append(f"⚠️ 壓力測試破產風險 {stress['ruin_probability']}%")
     # 回撤機率
     dd_probs = mc.get("drawdown_probabilities", {})
@@ -1297,7 +1297,7 @@ def _generate_conclusion(report: dict) -> dict:
         score += 10
         findings.append("✅ Walk Forward 驗證具備 Alpha")
     elif assessment.get("score", 0) < 40:
-        score -= 7
+        score -= 5
         findings.append("⚠️ Walk Forward 未通過，策略可能過擬合")
 
     # WF 參數穩定性
@@ -1321,22 +1321,25 @@ def _generate_conclusion(report: dict) -> dict:
 
     # MC/WF 交叉驗證
     if mc.get("strategy_robust") and not assessment.get("has_alpha"):
-        score -= 10
-        findings.append("⚠️ MC/WF 矛盾：MC 顯示穩健但 WF 未通過，可能過擬合")
+        score -= 5
+        findings.append("⚠️ MC/WF 不一致：MC 穩健但 WF 未通過，需謹慎")
     if assessment.get("has_alpha") and mc.get("ruin_probability", 0) > 5:
-        score -= 10
-        findings.append("⚠️ MC/WF 矛盾：WF 有 Alpha 但 MC 破產風險高，策略不穩定")
+        score -= 5
+        findings.append("⚠️ MC/WF 不一致：WF 有 Alpha 但 MC 破產風險偏高")
 
     score = max(0, min(100, score))
 
-    # 建議
-    has_alpha = score >= 60
-    if score >= 75:
+    # 建議（降低門檻，避免永遠觀望）
+    has_alpha = score >= 55
+    if score >= 70:
         stability = "高"
         leverage = "1~3x（視風險承受度）"
-    elif score >= 50:
+    elif score >= 45:
         stability = "中"
         leverage = "1~2x（建議保守）"
+    elif score >= 30:
+        stability = "低但可嘗試"
+        leverage = "1x（不開槓桿，小倉位試單）"
     else:
         stability = "低"
         leverage = "不建議開槓桿"
