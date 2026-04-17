@@ -376,11 +376,18 @@ export default function ChatInterface() {
     setInput('');
     await _executeSend(trimmed, sendMode, true);
 
-    // 分析完成後自動處理佇列
-    while (messageQueueRef.current.length > 0) {
-      const next = messageQueueRef.current.shift()!;
-      setQueueLength(messageQueueRef.current.length);
-      await _executeSend(next.text, next.mode, false);
+    // 分析完成後自動處理佇列（延遲 1 秒確保上一個回覆完全渲染）
+    if (messageQueueRef.current.length > 0) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      while (messageQueueRef.current.length > 0) {
+        const next = messageQueueRef.current.shift()!;
+        setQueueLength(messageQueueRef.current.length);
+        await _executeSend(next.text, next.mode, false);
+        // 每個任務之間也延遲，避免 SSE 衝突
+        if (messageQueueRef.current.length > 0) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
     }
   }, [input, addMessage]);
 
