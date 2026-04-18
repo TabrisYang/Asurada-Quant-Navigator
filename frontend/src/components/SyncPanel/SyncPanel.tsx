@@ -203,10 +203,20 @@ export default function SyncPanel() {
             setSyncing(false);
 
             if (data.status === 'completed') {
-              // 把同步的標的自動加入 K 線下拉選單
+              // 把同步的標的自動加入 K 線下拉選單（直接操作 localStorage）
               try {
-                const { addSymbolsToList } = await import('../TopBar');
-                addSymbolsToList(selectedSymbols);
+                const STORAGE_KEY = 'asura_custom_symbols';
+                const raw = localStorage.getItem(STORAGE_KEY);
+                const list = raw ? JSON.parse(raw) : { crypto: [], tw_stock: [] };
+                let changed = false;
+                for (const sym of selectedSymbols) {
+                  if (sym.endsWith('/TWD')) {
+                    if (!list.tw_stock.includes(sym)) { list.tw_stock.push(sym); changed = true; }
+                  } else {
+                    if (!list.crypto.includes(sym)) { list.crypto.push(sym); changed = true; }
+                  }
+                }
+                if (changed) localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
               } catch { /* ignore */ }
               // 抓取新標的的中文名稱
               for (const sym of selectedSymbols) {
