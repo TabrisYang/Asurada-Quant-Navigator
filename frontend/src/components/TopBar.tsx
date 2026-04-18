@@ -322,45 +322,27 @@ export default function TopBar({ onSettingsClick }: TopBarProps) {
           }}
         >
           {(() => {
-            // 直接從已下載清單生成（不依賴 localStorage 的 symbolList）
-            const allDownloaded = Array.from(downloadedSymbols);
-            const cryptoWithData = allDownloaded.filter((s) => !s.endsWith('/TWD')).sort();
-            const twWithData = allDownloaded.filter((s) => s.endsWith('/TWD')).sort();
-
-            // 如果還沒載入已下載清單，fallback 到 symbolList
-            if (allDownloaded.length === 0) {
-              return (
-                <>
-                  {symbolList.crypto.length > 0 && (
-                    <optgroup label="加密貨幣">
-                      {symbolList.crypto.map((s) => (
-                        <option key={s} value={s}>{s}</option>
-                      ))}
-                    </optgroup>
-                  )}
-                  {symbolList.tw_stock.length > 0 && (
-                    <optgroup label="台股">
-                      {symbolList.tw_stock.map((s) => (
-                        <option key={s} value={s}>{getDisplayName(s)}</option>
-                      ))}
-                    </optgroup>
-                  )}
-                </>
-              );
-            }
+            // 合併：已下載的 + 用戶手動加的（去重）
+            const allSymbols = new Set([
+              ...Array.from(downloadedSymbols),
+              ...symbolList.crypto,
+              ...symbolList.tw_stock,
+            ]);
+            const cryptoList = Array.from(allSymbols).filter((s) => !s.endsWith('/TWD')).sort();
+            const twList = Array.from(allSymbols).filter((s) => s.endsWith('/TWD')).sort();
 
             return (
               <>
-                {cryptoWithData.length > 0 && (
+                {cryptoList.length > 0 && (
                   <optgroup label="加密貨幣">
-                    {cryptoWithData.map((s) => (
+                    {cryptoList.map((s) => (
                       <option key={s} value={s}>{s}</option>
                     ))}
                   </optgroup>
                 )}
-                {twWithData.length > 0 && (
+                {twList.length > 0 && (
                   <optgroup label="台股">
-                    {twWithData.map((s) => (
+                    {twList.map((s) => (
                       <option key={s} value={s}>{getDisplayName(s)}</option>
                     ))}
                   </optgroup>
