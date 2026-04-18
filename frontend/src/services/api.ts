@@ -1118,7 +1118,7 @@ export async function searchTwStock(query: string): Promise<{ code: string; name
   }
 }
 
-/** 取得有下載數據的標的清單（去重） */
+/** 取得有下載數據的標的清單（去重，過濾掉數據不足的） */
 export async function fetchDownloadedSymbols(): Promise<{ symbol: string; records: number }[]> {
   try {
     const res = await api.get('/chart/available/list');
@@ -1129,7 +1129,10 @@ export async function fetchDownloadedSymbols(): Promise<{ symbol: string; record
       const existing = map.get(item.symbol) || 0;
       map.set(item.symbol, Math.max(existing, item.records));
     }
-    return Array.from(map.entries()).map(([symbol, records]) => ({ symbol, records }));
+    // 過濾：至少 10 根 K 線才算有效數據
+    return Array.from(map.entries())
+      .filter(([, records]) => records >= 10)
+      .map(([symbol, records]) => ({ symbol, records }));
   } catch {
     return [];
   }
