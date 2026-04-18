@@ -142,11 +142,21 @@ export default function TopBar({ onSettingsClick }: TopBarProps) {
   const setShowSyncPanel = useChartStore((s) => s.setShowSyncPanel);
 
   const [symbolList, setSymbolList] = useState<SymbolList>(loadSymbolList);
+  const [downloadedSymbols, setDownloadedSymbols] = useState<Set<string>>(new Set());
   const [showEditor, setShowEditor] = useState(false);
   const [newCrypto, setNewCrypto] = useState('');
   const [newTwStock, setNewTwStock] = useState('');
   const [twSuggestions, setTwSuggestions] = useState<{ code: string; name: string }[]>([]);
   const editorRef = useRef<HTMLDivElement>(null);
+
+  // 載入已下載的標的清單（用於過濾下拉選單）
+  useEffect(() => {
+    import('../services/api').then(({ fetchDownloadedSymbols }) => {
+      fetchDownloadedSymbols().then((items) => {
+        setDownloadedSymbols(new Set(items.map((i) => i.symbol)));
+      });
+    });
+  }, []);
   const [, forceUpdate] = useState(0);
 
   // 動態查詢不在靜態表中的台股名稱
@@ -304,20 +314,32 @@ export default function TopBar({ onSettingsClick }: TopBarProps) {
             color: 'var(--text-primary)',
           }}
         >
-          {symbolList.crypto.length > 0 && (
-            <optgroup label="加密貨幣">
-              {symbolList.crypto.map((s) => (
-                <option key={s} value={s}>{s}</option>
-              ))}
-            </optgroup>
-          )}
-          {symbolList.tw_stock.length > 0 && (
-            <optgroup label="台股">
-              {symbolList.tw_stock.map((s) => (
-                <option key={s} value={s}>{getDisplayName(s)}</option>
-              ))}
-            </optgroup>
-          )}
+          {(() => {
+            const cryptoWithData = downloadedSymbols.size > 0
+              ? symbolList.crypto.filter((s) => downloadedSymbols.has(s))
+              : symbolList.crypto;
+            const twWithData = downloadedSymbols.size > 0
+              ? symbolList.tw_stock.filter((s) => downloadedSymbols.has(s))
+              : symbolList.tw_stock;
+            return (
+              <>
+                {cryptoWithData.length > 0 && (
+                  <optgroup label="加密貨幣">
+                    {cryptoWithData.map((s) => (
+                      <option key={s} value={s}>{s}</option>
+                    ))}
+                  </optgroup>
+                )}
+                {twWithData.length > 0 && (
+                  <optgroup label="台股">
+                    {twWithData.map((s) => (
+                      <option key={s} value={s}>{getDisplayName(s)}</option>
+                    ))}
+                  </optgroup>
+                )}
+              </>
+            );
+          })()}
         </select>
 
         {/* 編輯按鈕 */}

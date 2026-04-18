@@ -1118,4 +1118,21 @@ export async function searchTwStock(query: string): Promise<{ code: string; name
   }
 }
 
+/** 取得有下載數據的標的清單（去重） */
+export async function fetchDownloadedSymbols(): Promise<{ symbol: string; records: number }[]> {
+  try {
+    const res = await api.get('/chart/available/list');
+    const items: { symbol: string; records: number }[] = res.data?.data || [];
+    // 去重：同一 symbol 不同 timeframe 合併，取最大 records
+    const map = new Map<string, number>();
+    for (const item of items) {
+      const existing = map.get(item.symbol) || 0;
+      map.set(item.symbol, Math.max(existing, item.records));
+    }
+    return Array.from(map.entries()).map(([symbol, records]) => ({ symbol, records }));
+  } catch {
+    return [];
+  }
+}
+
 export default api;

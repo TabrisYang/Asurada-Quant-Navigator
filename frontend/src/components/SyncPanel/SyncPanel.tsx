@@ -19,6 +19,9 @@ import {
   fetchAvailableExchanges,
   getTwStockNameSync,
   fetchTwStockName,
+  fetchDownloadedSymbols,
+  searchTwStock,
+  setTwStockNameCache,
   type SyncRequestParams,
 } from '../../services/api';
 
@@ -96,6 +99,8 @@ export default function SyncPanel() {
   const [endDate, setEndDate] = useState('');
   const [forceUpdate, setForceUpdate] = useState(false);
   const [customSymbol, setCustomSymbol] = useState('');
+  const [downloadedCrypto, setDownloadedCrypto] = useState<string[]>([]);
+  const [downloadedTw, setDownloadedTw] = useState<string[]>([]);
 
   // ===== 進度狀態 =====
   const [syncing, setSyncing] = useState(false);
@@ -105,6 +110,28 @@ export default function SyncPanel() {
 
   const logsEndRef = useRef<HTMLDivElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // 載入已下載的標的清單
+  useEffect(() => {
+    fetchDownloadedSymbols().then((items) => {
+      const crypto: string[] = [];
+      const tw: string[] = [];
+      for (const item of items) {
+        if (item.symbol.endsWith('/TWD')) {
+          if (!tw.includes(item.symbol)) tw.push(item.symbol);
+          // 預抓中文名稱
+          const code = item.symbol.split('/')[0];
+          if (!getTwStockNameSync(code)) {
+            fetchTwStockName(code);
+          }
+        } else {
+          if (!crypto.includes(item.symbol)) crypto.push(item.symbol);
+        }
+      }
+      setDownloadedCrypto(crypto.length > 0 ? crypto : DEFAULT_CRYPTO_SYMBOLS);
+      setDownloadedTw(tw.length > 0 ? tw : DEFAULT_TW_SYMBOLS);
+    });
+  }, []);
 
   // 載入交易所清單
   useEffect(() => {
@@ -239,15 +266,26 @@ export default function SyncPanel() {
     );
   };
 
-  // 自訂交易對
-  const addCustomSymbol = () => {
+  // 自訂交易對（台股自動抓中文名稱）
+  const addCustomSymbol = async () => {
     const sym = customSymbol.trim().toUpperCase();
     if (!sym) return;
     let normalized = sym;
     if (assetType === 'tw_stock') {
-      // 台股：純數字 → 加 /TWD
-      const code = sym.replace(/\.TW.*$/i, '').replace(/\/TWD$/i, '');
-      normalized = code + '/TWD';
+      // 台股：純數字或中文 → 查名稱 + 加 /TWD
+      const raw = customSymbol.trim();
+      // 先嘗試後端搜尋（支援中文名和代碼）
+      const results = await searchTwStock(raw);
+      if (results.length > 0) {
+        const best = results[0];
+        normalized = best.symbol;
+        setTwStockNameCache(best.code, best.name);
+      } else {
+        const code = sym.replace(/\.TW.*$/i, '').replace(/\/TWD$/i, '');
+        normalized = code + '/TWD';
+        // 嘗試抓名稱
+        fetchTwStockName(code);
+      }
     } else {
       // 加密貨幣
       if (!sym.includes('/')) {
@@ -298,7 +336,7 @@ export default function SyncPanel() {
   };
 
   // ===== 快速選擇 =====
-  const currentDefaults = assetType === 'crypto' ? DEFAULT_CRYPTO_SYMBOLS : DEFAULT_TW_SYMBOLS;
+  const currentDefaults = assetType === 'crypto' ? downloadedCrypto : downloadedTw;
   const currentTimeframes = assetType === 'crypto' ? ALL_TIMEFRAMES : TW_TIMEFRAMES;
   const selectAllSymbols = () => setSelectedSymbols([...currentDefaults]);
   const clearAllSymbols = () => setSelectedSymbols([]);
@@ -405,7 +443,7 @@ export default function SyncPanel() {
                     className="px-2.5 py-1 rounded text-xs cursor-pointer"
                     style={{ background: 'var(--accent-purple)', color: '#fff' }}
                   >
-                    {sym} ✕
+                    {sym}{getTwDisplayLabel(sym)} ✕
                   </button>
                 ))}
             </div>
