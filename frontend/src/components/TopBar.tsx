@@ -322,12 +322,33 @@ export default function TopBar({ onSettingsClick }: TopBarProps) {
           }}
         >
           {(() => {
-            const cryptoWithData = downloadedSymbols.size > 0
-              ? symbolList.crypto.filter((s) => downloadedSymbols.has(s))
-              : symbolList.crypto;
-            const twWithData = downloadedSymbols.size > 0
-              ? symbolList.tw_stock.filter((s) => downloadedSymbols.has(s))
-              : symbolList.tw_stock;
+            // 直接從已下載清單生成（不依賴 localStorage 的 symbolList）
+            const allDownloaded = Array.from(downloadedSymbols);
+            const cryptoWithData = allDownloaded.filter((s) => !s.endsWith('/TWD')).sort();
+            const twWithData = allDownloaded.filter((s) => s.endsWith('/TWD')).sort();
+
+            // 如果還沒載入已下載清單，fallback 到 symbolList
+            if (allDownloaded.length === 0) {
+              return (
+                <>
+                  {symbolList.crypto.length > 0 && (
+                    <optgroup label="加密貨幣">
+                      {symbolList.crypto.map((s) => (
+                        <option key={s} value={s}>{s}</option>
+                      ))}
+                    </optgroup>
+                  )}
+                  {symbolList.tw_stock.length > 0 && (
+                    <optgroup label="台股">
+                      {symbolList.tw_stock.map((s) => (
+                        <option key={s} value={s}>{getDisplayName(s)}</option>
+                      ))}
+                    </optgroup>
+                  )}
+                </>
+              );
+            }
+
             return (
               <>
                 {cryptoWithData.length > 0 && (
