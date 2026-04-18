@@ -365,9 +365,9 @@ export default function AlertPanel() {
                               <span style={{ color: '#3fb950' }}>{data.up_pct}%</span>
                               {' / '}
                               <span style={{ color: '#f85149' }}>{data.down_pct}%</span>
-                              {data.any_ci && (
+                              {(data as any).any_ci && (
                                 <span style={{ color: 'var(--text-secondary)', fontSize: '9px' }}>
-                                  {' '}CI:{data.any_ci[0]}~{data.any_ci[1]}%
+                                  {' '}CI:{(data as any).any_ci[0]}~{(data as any).any_ci[1]}%
                                 </span>
                               )}
                             </div>

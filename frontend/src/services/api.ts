@@ -1085,7 +1085,7 @@ export async function fetchTwStockName(code: string): Promise<string> {
   code = code.toUpperCase();
   if (_twNameCache[code] !== undefined) return _twNameCache[code];
   // 避免同一代碼重複請求
-  if (_twNamePending[code]) return _twNamePending[code];
+  if (_twNamePending[code] !== undefined) return _twNamePending[code];
   _twNamePending[code] = api.get('/tw-stock-name', { params: { code } })
     .then((res) => {
       const name = res.data?.name || '';

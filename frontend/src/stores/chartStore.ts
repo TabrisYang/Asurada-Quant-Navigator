@@ -266,14 +266,14 @@ export const useChartStore = create<ChartStore>((set, get) => ({
       // 去重：比對 type + 核心數值，避免多輪 function call 產生重複標記
       const isDuplicate = state.annotations.some((existing) => {
         if (existing.type !== annotation.type) return false;
+        const ea = existing as any;
+        const na = annotation as any;
         // 水平線：比對 price
-        if (annotation.type === 'horizontal_line' && existing.price === annotation.price) return true;
+        if (annotation.type === 'horizontal_line' && ea.price === na.price) return true;
         // 趨勢線：比對起終點
-        if (annotation.type === 'trend_line' && existing.startTime === annotation.startTime && existing.endTime === annotation.endTime) return true;
-        // 標記點：比對 time + text
-        if (annotation.type === 'marker' && existing.time === annotation.time && existing.text === annotation.text) return true;
-        // 通用：比對 label + price/value
-        if (existing.label === annotation.label && existing.price === annotation.price) return true;
+        if (annotation.type === 'trend_line' && ea.startTime === na.startTime && ea.endTime === na.endTime) return true;
+        // 通用：比對 label + price
+        if (ea.label && na.label && ea.label === na.label && ea.price === na.price) return true;
         return false;
       });
       if (isDuplicate) return state;
