@@ -771,15 +771,25 @@ _PROMPT_MODULES["calibrate"] = """
 
 _PROMPT_MODULES["backtest"] = """
 【回測策略多元化指引】
-必須設計多元化策略，不要每次只用 RSI + MACD：
+必須設計多元化策略，不要每次只用 RSI + MACD。
 
-策略 A — 趨勢跟蹤：supertrend 翻轉 + ADX > 25 + EMA 交叉
-策略 B — 均值回歸：RSI < 30 + BB 下軌 + StochRSI 金叉
-策略 C — 量價突破：Donchian 突破 + OBV 上升 + RelVol > 1.5
-策略 D — 動量反轉：MACD 柱轉正 + ROC > 0 + Bias 回升
-策略 E — 波動率收斂突破：BB 帶寬縮窄 + 突破上軌 + Vol_Switch 非背離
+★ 必須包含不同嚴格度的策略（避免全部條件太嚴格導致全軍覆沒）：
+- 嚴格策略（3+ 條件組合）：精確但交易次數少
+- 中等策略（2 條件組合）：平衡精確度和交易機會
+- 寬鬆策略（1-2 條件）：交易次數多，用來驗證方向性判斷
 
-未指定策略時，自動用 compare_strategies 測試至少 3 種。
+★ 必須包含至少一個做空策略：
+- 很多標的在特定時期做多全虧但做空獲利 — 如果只測做多會得出「全部虧損」的誤導性結論
+- 做空策略範例：RSI > 70 做空、supertrend 翻空 + ADX > 25 做空
+
+策略模板（混合嚴格度 + 多空方向）：
+策略 A — 趨勢跟蹤做多（中等）：ADX > 25 + supertrend 翻多
+策略 B — 均值回歸做多（嚴格）：RSI < 30 + BB 下軌 + StochRSI < 0.2
+策略 C — 動量做多（寬鬆）：MACD 柱轉正 + ROC > 0
+策略 D — 趨勢跟蹤做空（中等）：ADX > 25 + supertrend 翻空
+策略 E — 超買做空（寬鬆）：RSI > 70
+
+未指定策略時，自動用 compare_strategies 測試至少 4 種（含至少 1 個做空）。
 
 可用的回測條件指標：
 rsi, macd, bb, ema, sma, adx, supertrend, psar, stochrsi, roc, obv, rel_vol, vol_switch, atr, donchian, keltner, bias, ichimoku, vwap, trailing_stop, close, high, low
@@ -869,7 +879,7 @@ _PROMPT_MODULES["output_deep_phase2"] = """
 
 【強制呼叫函式 — 不可省略】
 你「必須」呼叫以下函式，取得真實計算數據：
-1. compare_strategies — 至少比較 3 種不同類型的策略（趨勢跟蹤/均值回歸/量價突破等）
+1. compare_strategies — 至少比較 4 種策略（含不同嚴格度 + 至少 1 個做空策略）
 2. scan_conditional_probability — 掃描關鍵指標的條件機率（例如 RSI、MACD 在什麼區間後續上漲機率最高）
 
 【輸出格式 — 嚴格按順序】
