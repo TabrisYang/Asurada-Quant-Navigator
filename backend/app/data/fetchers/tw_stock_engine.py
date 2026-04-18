@@ -158,8 +158,26 @@ class TwStockEngine:
                 # 只有 backfill 或 fetch 失敗，用現有合併資料繼續
                 combined = existing_df
             else:
-                _report(f"yfinance 未回傳任何數據: {yf_ticker}")
-                return pd.DataFrame()
+                # 自動重試：切換上市/上櫃後綴
+                from app.utils.symbol import fix_yf_ticker_if_failed
+                code = symbol.split("/")[0]
+                alt_ticker = fix_yf_ticker_if_failed(code)
+                _report(f"yfinance {yf_ticker} 無數據，嘗試 {alt_ticker}...")
+                try:
+                    new_df = await asyncio.to_thread(
+                        self._download_from_yfinance,
+                        alt_ticker, yf_interval, start_date, end_date,
+                    )
+                    if new_df is not None and not new_df.empty:
+                        _report(f"Yahoo Finance（{alt_ticker}）回傳 {len(new_df)} 筆數據")
+                        new_df = self._to_standard_format(new_df)
+                        yf_ticker = alt_ticker  # 更新成功的 ticker
+                    else:
+                        _report(f"yfinance 兩種格式都未回傳數據: {yf_ticker}, {alt_ticker}")
+                        return pd.DataFrame()
+                except Exception:
+                    _report(f"yfinance 兩種格式都未回傳數據: {yf_ticker}, {alt_ticker}")
+                    return pd.DataFrame()
         else:
             _report(f"Yahoo Finance 回傳 {len(new_df)} 筆數據")
             new_df = self._to_standard_format(new_df)

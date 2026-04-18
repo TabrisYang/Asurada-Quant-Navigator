@@ -204,7 +204,25 @@ export default function SyncPanel() {
                 const { addSymbolsToList } = await import('../TopBar');
                 addSymbolsToList(selectedSymbols);
               } catch { /* ignore */ }
+              // 刷新已下載清單（讓 SyncPanel 和 TopBar 看到新標的）
+              fetchDownloadedSymbols().then((items) => {
+                const crypto: string[] = [];
+                const tw: string[] = [];
+                for (const item of items) {
+                  if (item.symbol.endsWith('/TWD')) {
+                    if (!tw.includes(item.symbol)) tw.push(item.symbol);
+                    const code = item.symbol.split('/')[0];
+                    if (!getTwStockNameSync(code)) fetchTwStockName(code);
+                  } else {
+                    if (!crypto.includes(item.symbol)) crypto.push(item.symbol);
+                  }
+                }
+                setDownloadedCrypto(crypto.length > 0 ? crypto : DEFAULT_CRYPTO_SYMBOLS);
+                setDownloadedTw(tw.length > 0 ? tw : DEFAULT_TW_SYMBOLS);
+              });
               loadChartData();
+              // 通知 TopBar 刷新下拉選單
+              window.dispatchEvent(new Event('symbols-updated'));
               toast(`數據同步完成（${data.completed_items}/${data.total_items}）`, 'success');
             } else {
               toast('數據同步失敗，請檢查日誌', 'error');

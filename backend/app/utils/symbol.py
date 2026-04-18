@@ -102,21 +102,56 @@ def is_tw_stock(symbol: str) -> bool:
 
 # 常見上櫃股票代碼前綴（6 開頭多為上櫃）
 # 簡化判斷：4 碼且 6 開頭視為上櫃，其餘為上市
+# 已知的上櫃股票代碼前綴（非完整，但涵蓋大部分）
+_OTC_PREFIXES = {"3", "4", "5", "6", "8"}
+# 已知上市的例外（3開頭但是上市）
+_LISTED_EXCEPTIONS = {
+    "3008", "3034", "3037", "3045", "3189", "3231", "3443",
+    "3481", "3532", "3576", "3661", "3711",
+}
+# 快取：記住嘗試過的結果
+_ticker_cache: dict[str, str] = {}
+
+
 def symbol_to_yf_ticker(symbol: str) -> str:
     """將內部格式轉為 yfinance ticker
 
     2330/TWD → 2330.TW（上市）
     6547/TWD → 6547.TWO（上櫃）
     TWII/TWD → ^TWII（加權指數）
+
+    智慧判斷：先嘗試上市(.TW)，失敗後自動嘗試上櫃(.TWO)
     """
     symbol = normalize_symbol(symbol)
-    # 指數優先查映射表
     if symbol in TW_INDEX_MAP:
         return TW_INDEX_MAP[symbol]
     code = symbol.split("/")[0]
-    # 4 碼且以 6 開頭 → 上櫃 (.TWO)，否則 → 上市 (.TW)
-    suffix = ".TWO" if len(code) == 4 and code.startswith("6") else ".TW"
-    return f"{code}{suffix}"
+
+    # 查快取
+    if code in _ticker_cache:
+        return _ticker_cache[code]
+
+    # 智慧判斷
+    if code in _LISTED_EXCEPTIONS:
+        ticker = f"{code}.TW"
+    elif len(code) == 4 and code[0] in _OTC_PREFIXES:
+        ticker = f"{code}.TWO"
+    else:
+        ticker = f"{code}.TW"
+
+    _ticker_cache[code] = ticker
+    return ticker
+
+
+def fix_yf_ticker_if_failed(code: str) -> str:
+    """當 yfinance 抓取失敗時，嘗試切換上市/上櫃後綴。"""
+    current = _ticker_cache.get(code, f"{code}.TW")
+    if current.endswith(".TW"):
+        new_ticker = f"{code}.TWO"
+    else:
+        new_ticker = f"{code}.TW"
+    _ticker_cache[code] = new_ticker
+    return new_ticker
 
 
 def symbol_to_filename(symbol: str, timeframe: str) -> str:

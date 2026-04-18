@@ -150,13 +150,20 @@ export default function TopBar({ onSettingsClick }: TopBarProps) {
   const editorRef = useRef<HTMLDivElement>(null);
 
   // 載入已下載的標的清單（用於過濾下拉選單）
-  useEffect(() => {
+  const refreshDownloaded = useCallback(() => {
     import('../services/api').then(({ fetchDownloadedSymbols }) => {
       fetchDownloadedSymbols().then((items) => {
         setDownloadedSymbols(new Set(items.map((i) => i.symbol)));
       });
     });
   }, []);
+
+  useEffect(() => {
+    refreshDownloaded();
+    // 監聽同步完成事件，自動刷新
+    window.addEventListener('symbols-updated', refreshDownloaded);
+    return () => window.removeEventListener('symbols-updated', refreshDownloaded);
+  }, [refreshDownloaded]);
   const [, forceUpdate] = useState(0);
 
   // 動態查詢不在靜態表中的台股名稱
