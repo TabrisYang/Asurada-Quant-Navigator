@@ -142,28 +142,19 @@ export default function TopBar({ onSettingsClick }: TopBarProps) {
   const setShowSyncPanel = useChartStore((s) => s.setShowSyncPanel);
 
   const [symbolList, setSymbolList] = useState<SymbolList>(loadSymbolList);
-  const [downloadedSymbols, setDownloadedSymbols] = useState<Set<string>>(new Set());
+  // downloadedSymbols 已移除 — 下拉選單只從 symbolList 生成
   const [showEditor, setShowEditor] = useState(false);
   const [newCrypto, setNewCrypto] = useState('');
   const [newTwStock, setNewTwStock] = useState('');
   const [twSuggestions, setTwSuggestions] = useState<{ code: string; name: string }[]>([]);
   const editorRef = useRef<HTMLDivElement>(null);
 
-  // 載入已下載的標的清單（用於過濾下拉選單）
-  const refreshDownloaded = useCallback(() => {
-    import('../services/api').then(({ fetchDownloadedSymbols }) => {
-      fetchDownloadedSymbols().then((items) => {
-        setDownloadedSymbols(new Set(items.map((i) => i.symbol)));
-      });
-    });
-  }, []);
-
+  // 監聽同步完成事件，重新載入 symbolList
   useEffect(() => {
-    refreshDownloaded();
-    // 監聽同步完成事件，自動刷新
-    window.addEventListener('symbols-updated', refreshDownloaded);
-    return () => window.removeEventListener('symbols-updated', refreshDownloaded);
-  }, [refreshDownloaded]);
+    const onUpdated = () => setSymbolList(loadSymbolList());
+    window.addEventListener('symbols-updated', onUpdated);
+    return () => window.removeEventListener('symbols-updated', onUpdated);
+  }, []);
   const [, forceUpdate] = useState(0);
 
   // 動態查詢不在靜態表中的台股名稱
@@ -321,35 +312,20 @@ export default function TopBar({ onSettingsClick }: TopBarProps) {
             color: 'var(--text-primary)',
           }}
         >
-          {(() => {
-            // 合併：已下載的 + 用戶手動加的（去重）
-            const allSymbols = new Set([
-              ...Array.from(downloadedSymbols),
-              ...symbolList.crypto,
-              ...symbolList.tw_stock,
-            ]);
-            const cryptoList = Array.from(allSymbols).filter((s) => !s.endsWith('/TWD')).sort();
-            const twList = Array.from(allSymbols).filter((s) => s.endsWith('/TWD')).sort();
-
-            return (
-              <>
-                {cryptoList.length > 0 && (
-                  <optgroup label="加密貨幣">
-                    {cryptoList.map((s) => (
-                      <option key={s} value={s}>{s}</option>
-                    ))}
-                  </optgroup>
-                )}
-                {twList.length > 0 && (
-                  <optgroup label="台股">
-                    {twList.map((s) => (
-                      <option key={s} value={s}>{getDisplayName(s)}</option>
-                    ))}
-                  </optgroup>
-                )}
-              </>
-            );
-          })()}
+          {symbolList.crypto.length > 0 && (
+            <optgroup label="加密貨幣">
+              {symbolList.crypto.map((s) => (
+                <option key={s} value={s}>{s}</option>
+              ))}
+            </optgroup>
+          )}
+          {symbolList.tw_stock.length > 0 && (
+            <optgroup label="台股">
+              {symbolList.tw_stock.map((s) => (
+                <option key={s} value={s}>{getDisplayName(s)}</option>
+              ))}
+            </optgroup>
+          )}
         </select>
 
         {/* 編輯按鈕 */}
