@@ -19,7 +19,6 @@ import {
   fetchAvailableExchanges,
   getTwStockNameSync,
   fetchTwStockName,
-  fetchDownloadedSymbols,
   searchTwStock,
   setTwStockNameCache,
   type SyncRequestParams,
@@ -99,8 +98,19 @@ export default function SyncPanel() {
   const [endDate, setEndDate] = useState('');
   const [forceUpdate, setForceUpdate] = useState(false);
   const [customSymbol, setCustomSymbol] = useState('');
-  const [downloadedCrypto, setDownloadedCrypto] = useState<string[]>([]);
-  const [downloadedTw, setDownloadedTw] = useState<string[]>([]);
+  // 用戶管理的同步清單（localStorage 持久化）
+  const [syncCryptoList, setSyncCryptoList] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem('asura_sync_crypto');
+      return saved ? JSON.parse(saved) : DEFAULT_CRYPTO_SYMBOLS;
+    } catch { return DEFAULT_CRYPTO_SYMBOLS; }
+  });
+  const [syncTwList, setSyncTwList] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem('asura_sync_tw');
+      return saved ? JSON.parse(saved) : DEFAULT_TW_SYMBOLS;
+    } catch { return DEFAULT_TW_SYMBOLS; }
+  });
 
   // ===== 進度狀態 =====
   const [syncing, setSyncing] = useState(false);
@@ -111,27 +121,21 @@ export default function SyncPanel() {
   const logsEndRef = useRef<HTMLDivElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // 載入已下載的標的清單
+  // 持久化同步清單
   useEffect(() => {
-    fetchDownloadedSymbols().then((items) => {
-      const crypto: string[] = [];
-      const tw: string[] = [];
-      for (const item of items) {
-        if (item.symbol.endsWith('/TWD')) {
-          if (!tw.includes(item.symbol)) tw.push(item.symbol);
-          // 預抓中文名稱
-          const code = item.symbol.split('/')[0];
-          if (!getTwStockNameSync(code)) {
-            fetchTwStockName(code);
-          }
-        } else {
-          if (!crypto.includes(item.symbol)) crypto.push(item.symbol);
-        }
-      }
-      setDownloadedCrypto(crypto.length > 0 ? crypto : DEFAULT_CRYPTO_SYMBOLS);
-      setDownloadedTw(tw.length > 0 ? tw : DEFAULT_TW_SYMBOLS);
-    });
-  }, []);
+    localStorage.setItem('asura_sync_crypto', JSON.stringify(syncCryptoList));
+  }, [syncCryptoList]);
+  useEffect(() => {
+    localStorage.setItem('asura_sync_tw', JSON.stringify(syncTwList));
+  }, [syncTwList]);
+
+  // 預抓台股中文名稱
+  useEffect(() => {
+    for (const sym of syncTwList) {
+      const code = sym.split('/')[0];
+      if (!getTwStockNameSync(code)) fetchTwStockName(code);
+    }
+  }, [syncTwList]);
 
   // 載入交易所清單
   useEffect(() => {
@@ -204,22 +208,13 @@ export default function SyncPanel() {
                 const { addSymbolsToList } = await import('../TopBar');
                 addSymbolsToList(selectedSymbols);
               } catch { /* ignore */ }
-              // 刷新已下載清單（讓 SyncPanel 和 TopBar 看到新標的）
-              fetchDownloadedSymbols().then((items) => {
-                const crypto: string[] = [];
-                const tw: string[] = [];
-                for (const item of items) {
-                  if (item.symbol.endsWith('/TWD')) {
-                    if (!tw.includes(item.symbol)) tw.push(item.symbol);
-                    const code = item.symbol.split('/')[0];
-                    if (!getTwStockNameSync(code)) fetchTwStockName(code);
-                  } else {
-                    if (!crypto.includes(item.symbol)) crypto.push(item.symbol);
-                  }
+              // 抓取新標的的中文名稱
+              for (const sym of selectedSymbols) {
+                if (sym.endsWith('/TWD')) {
+                  const code = sym.split('/')[0];
+                  if (!getTwStockNameSync(code)) fetchTwStockName(code);
                 }
-                setDownloadedCrypto(crypto.length > 0 ? crypto : DEFAULT_CRYPTO_SYMBOLS);
-                setDownloadedTw(tw.length > 0 ? tw : DEFAULT_TW_SYMBOLS);
-              });
+              }
               loadChartData();
               // 通知 TopBar 刷新下拉選單
               window.dispatchEvent(new Event('symbols-updated'));
@@ -312,6 +307,16 @@ export default function SyncPanel() {
         else normalized = sym + '/USDT';
       }
     }
+    // 加入同步清單（持久化）
+    if (assetType === 'tw_stock') {
+      if (!syncTwList.includes(normalized)) {
+        setSyncTwList((prev) => [...prev, normalized]);
+      }
+    } else {
+      if (!syncCryptoList.includes(normalized)) {
+        setSyncCryptoList((prev) => [...prev, normalized]);
+      }
+    }
     if (!selectedSymbols.includes(normalized)) {
       setSelectedSymbols((prev) => [...prev, normalized]);
     }
@@ -354,7 +359,7 @@ export default function SyncPanel() {
   };
 
   // ===== 快速選擇 =====
-  const currentDefaults = assetType === 'crypto' ? downloadedCrypto : downloadedTw;
+  const currentDefaults = assetType === 'crypto' ? syncCryptoList : syncTwList;
   const currentTimeframes = assetType === 'crypto' ? ALL_TIMEFRAMES : TW_TIMEFRAMES;
   const selectAllSymbols = () => setSelectedSymbols([...currentDefaults]);
   const clearAllSymbols = () => setSelectedSymbols([]);
@@ -448,22 +453,23 @@ export default function SyncPanel() {
                   }}
                 >
                   {sym}{getTwDisplayLabel(sym)}
+                  {!syncing && (
+                    <span
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        // 從同步清單移除
+                        if (assetType === 'tw_stock') {
+                          setSyncTwList((prev) => prev.filter((s) => s !== sym));
+                        } else {
+                          setSyncCryptoList((prev) => prev.filter((s) => s !== sym));
+                        }
+                        setSelectedSymbols((prev) => prev.filter((s) => s !== sym));
+                      }}
+                      style={{ marginLeft: '4px', opacity: 0.5, cursor: 'pointer' }}
+                    >✕</span>
+                  )}
                 </button>
               ))}
-              {/* 已選但不在預設列表的 */}
-              {selectedSymbols
-                .filter((s) => !currentDefaults.includes(s))
-                .map((sym) => (
-                  <button
-                    key={sym}
-                    onClick={() => toggleSymbol(sym)}
-                    disabled={syncing}
-                    className="px-2.5 py-1 rounded text-xs cursor-pointer"
-                    style={{ background: 'var(--accent-purple)', color: '#fff' }}
-                  >
-                    {sym}{getTwDisplayLabel(sym)} ✕
-                  </button>
-                ))}
             </div>
             <div className="flex items-center gap-2">
               <input
