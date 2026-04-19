@@ -44,15 +44,31 @@ async def list_available_data():
 
 @router.get("/tw-stock-search")
 async def search_tw_stock(q: str = Query(default="")):
-    """搜尋台股：支援代碼或中文名稱"""
-    from app.data.tw_sectors import TW_STOCK_NAMES
+    """搜尋台股：支援代碼或中文名稱（TWSE/TPEx 官方 + 靜態表）"""
     if not q or len(q) < 1:
         return {"results": []}
     q = q.strip()
     results = []
-    for code, name in TW_STOCK_NAMES.items():
+
+    # 先從 TWSE 名稱庫搜尋（最完整）
+    from app.api.routes.data_sync import _tw_name_cache, _load_twse_name_db
+    if len(_tw_name_cache) < 100:
+        await _load_twse_name_db()
+
+    for code, name in _tw_name_cache.items():
         if q in code or q in name:
             results.append({"code": code, "name": name, "symbol": f"{code}/TWD"})
+        if len(results) >= 20:
+            break
+
+    # 補充靜態表（可能有 TWSE 沒有的）
+    if len(results) < 20:
+        from app.data.tw_sectors import TW_STOCK_NAMES
+        for code, name in TW_STOCK_NAMES.items():
+            if q in code or q in name:
+                if not any(r["code"] == code for r in results):
+                    results.append({"code": code, "name": name, "symbol": f"{code}/TWD"})
+
     return {"results": results[:20]}
 
 

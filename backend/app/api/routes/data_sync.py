@@ -282,16 +282,58 @@ _tw_name_cache: dict[str, str] = {
     "TWII": "加權指數",
     "TWOII": "櫃買指數",
 }
+_tw_name_db_loaded = False
+
+
+async def _load_twse_name_db():
+    """從 TWSE/TPEx 官方 API 批次載入所有台股中文名稱"""
+    global _tw_name_db_loaded
+    if _tw_name_db_loaded:
+        return
+
+    import aiohttp
+    try:
+        async with aiohttp.ClientSession() as session:
+            # 上市公司
+            async with session.get(
+                "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY_ALL?response=json",
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    for row in data.get("data", []):
+                        if len(row) >= 2 and row[0].strip():
+                            _tw_name_cache[row[0].strip()] = row[1].strip()
+
+            # 上櫃公司
+            async with session.get(
+                "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes",
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    for row in data:
+                        code = row.get("SecuritiesCompanyCode", "").strip()
+                        name = row.get("CompanyName", "").strip()
+                        if code and name:
+                            _tw_name_cache[code] = name
+
+        _tw_name_db_loaded = True
+        logger.info(f"台股名稱資料庫已載入：{len(_tw_name_cache)} 筆")
+    except Exception as e:
+        logger.warning(f"載入 TWSE 名稱資料庫失敗: {e}")
 
 
 @router.get("/tw-stock-name")
 async def get_tw_stock_name(code: str):
-    """用 yfinance 查詢台股中文名稱"""
+    """查詢台股中文名稱（TWSE/TPEx 官方資料）"""
     code = code.strip().upper()
+
+    # 1. 查快取
     if code in _tw_name_cache:
         return {"code": code, "name": _tw_name_cache[code]}
 
-    # 先查 tw_sectors 的靜態表
+    # 2. 查 tw_sectors 靜態表
     try:
         from app.data.tw_sectors import get_stock_name
         static_name = get_stock_name(code)
@@ -301,22 +343,17 @@ async def get_tw_stock_name(code: str):
     except Exception:
         pass
 
-    # yfinance 查詢
+    # 3. 嘗試載入 TWSE 完整名稱庫
+    await _load_twse_name_db()
+    if code in _tw_name_cache:
+        return {"code": code, "name": _tw_name_cache[code]}
+
+    # 4. Fallback: yfinance
     try:
         import yfinance as yf
         ticker = symbol_to_yf_ticker(f"{code}/TWD")
         info = yf.Ticker(ticker).info
         name = info.get("shortName") or info.get("longName") or ""
-        if not name or name.isascii():
-            name = info.get("longName") or info.get("shortName") or ""
-        if name:
-            _tw_name_cache[code] = name
-            return {"code": code, "name": name}
-        # 嘗試切換上市/上櫃
-        from app.utils.symbol import fix_yf_ticker_if_failed
-        alt = fix_yf_ticker_if_failed(code)
-        info2 = yf.Ticker(alt).info
-        name = info2.get("shortName") or info2.get("longName") or ""
         if name:
             _tw_name_cache[code] = name
         return {"code": code, "name": name}
