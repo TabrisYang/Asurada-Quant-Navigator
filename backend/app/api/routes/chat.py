@@ -1027,10 +1027,11 @@ def _format_function_results(function_calls: list[dict], exec_result: dict) -> s
                 # 組合因子 IC（combo_top）
                 fscan = r.get("factor_scan", {})
                 combo_top = fscan.get("combo_top", [])
-                if combo_top:
-                    parts.append(f"\n雙因子組合 IC（top {len(combo_top)}）:")
+                if combo_top and isinstance(combo_top, list):
+                    parts.append(f"\n雙因子組合 IC（top {min(5, len(combo_top))}）:")
                     for combo in combo_top[:5]:
-                        parts.append(f"  {combo.get('factor_a', '?')} + {combo.get('factor_b', '?')}: combo_IC={combo.get('combo_ic', '?')}")
+                        if isinstance(combo, dict):
+                            parts.append(f"  {combo.get('factor_a', '?')} + {combo.get('factor_b', '?')}: combo_IC={combo.get('combo_ic', '?')}")
                 # Bucket 因子群評分
                 bucket_qr = r.get("bucket_scores", {})
                 if bucket_qr:
