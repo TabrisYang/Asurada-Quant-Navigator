@@ -158,6 +158,14 @@ echo -e "${YELLOW}[6/6]${NC} 啟動服務..."
 # 確保 data 目錄存在
 mkdir -p "$ROOT_DIR/backend/data"
 
+# 自動清理殘留的 port 8000 進程
+OLD_PID=$(lsof -ti :8000 2>/dev/null)
+if [ -n "$OLD_PID" ]; then
+  echo -e "  ${YELLOW}清理殘留進程 (PID: $OLD_PID)...${NC}"
+  kill -9 $OLD_PID 2>/dev/null
+  sleep 1
+fi
+
 # 啟動後端（背景執行）
 echo -e "  ${YELLOW}啟動後端 (port 8000)...${NC}"
 cd "$ROOT_DIR/backend"

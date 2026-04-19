@@ -291,35 +291,36 @@ async def _load_twse_name_db():
     if _tw_name_db_loaded:
         return
 
-    import aiohttp
+    import httpx
     try:
-        async with aiohttp.ClientSession() as session:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             # 上市公司
-            async with session.get(
-                "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY_ALL?response=json",
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
+            try:
+                resp = await client.get("https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY_ALL?response=json")
+                if resp.status_code == 200:
+                    data = resp.json()
                     for row in data.get("data", []):
                         if len(row) >= 2 and row[0].strip():
                             _tw_name_cache[row[0].strip()] = row[1].strip()
+            except Exception as e1:
+                logger.debug(f"TWSE 上市名稱載入失敗: {e1}")
 
             # 上櫃公司
-            async with session.get(
-                "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes",
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    for row in data:
+            try:
+                resp2 = await client.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes")
+                if resp2.status_code == 200:
+                    data2 = resp2.json()
+                    for row in data2:
                         code = row.get("SecuritiesCompanyCode", "").strip()
                         name = row.get("CompanyName", "").strip()
                         if code and name:
                             _tw_name_cache[code] = name
+            except Exception as e2:
+                logger.debug(f"TPEx 上櫃名稱載入失敗: {e2}")
 
-        _tw_name_db_loaded = True
-        logger.info(f"台股名稱資料庫已載入：{len(_tw_name_cache)} 筆")
+        if len(_tw_name_cache) > 10:
+            _tw_name_db_loaded = True
+            logger.info(f"台股名稱資料庫已載入：{len(_tw_name_cache)} 筆")
     except Exception as e:
         logger.warning(f"載入 TWSE 名稱資料庫失敗: {e}")
 
