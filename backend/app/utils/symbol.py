@@ -102,25 +102,58 @@ def is_tw_stock(symbol: str) -> bool:
 
 # 常見上櫃股票代碼前綴（6 開頭多為上櫃）
 # 簡化判斷：4 碼且 6 開頭視為上櫃，其餘為上市
-# 已知的上櫃股票代碼前綴（非完整，但涵蓋大部分）
-_OTC_PREFIXES = {"3", "4", "5", "6", "8"}
-# 已知上市的例外（3開頭但是上市）
-_LISTED_EXCEPTIONS = {
-    "3008", "3034", "3037", "3045", "3189", "3231", "3443",
-    "3481", "3532", "3576", "3661", "3711",
-}
-# 快取：記住嘗試過的結果
+# 快取：記住嘗試過的結果（從 TWSE/TPEx API 自動判斷）
 _ticker_cache: dict[str, str] = {}
+# 上市/上櫃分類快取（從 TWSE API 載入）
+_listed_codes: set[str] = set()  # 上市代碼
+_otc_codes: set[str] = set()     # 上櫃代碼
+_market_db_loaded = False
+
+
+def _load_market_classification():
+    """從 TWSE/TPEx API 載入所有上市/上櫃代碼（同步版，啟動時呼叫一次）"""
+    global _market_db_loaded
+    if _market_db_loaded:
+        return
+
+    import requests
+    try:
+        # 上市
+        r = requests.get(
+            "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY_ALL?response=json",
+            timeout=10,
+        )
+        if r.status_code == 200:
+            for row in r.json().get("data", []):
+                if len(row) >= 2 and row[0].strip():
+                    _listed_codes.add(row[0].strip())
+    except Exception:
+        pass
+
+    try:
+        # 上櫃
+        r2 = requests.get(
+            "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes",
+            timeout=10,
+        )
+        if r2.status_code == 200:
+            for row in r2.json():
+                code = row.get("SecuritiesCompanyCode", "").strip()
+                if code:
+                    _otc_codes.add(code)
+    except Exception:
+        pass
+
+    if _listed_codes or _otc_codes:
+        _market_db_loaded = True
 
 
 def symbol_to_yf_ticker(symbol: str) -> str:
     """將內部格式轉為 yfinance ticker
 
-    2330/TWD → 2330.TW（上市）
-    6547/TWD → 6547.TWO（上櫃）
-    TWII/TWD → ^TWII（加權指數）
-
-    智慧判斷：先嘗試上市(.TW)，失敗後自動嘗試上櫃(.TWO)
+    自動判斷上市(.TW)/上櫃(.TWO)：
+    - 優先查 TWSE/TPEx 官方分類（最準確）
+    - 未載入時用預設規則
     """
     symbol = normalize_symbol(symbol)
     if symbol in TW_INDEX_MAP:
@@ -131,12 +164,17 @@ def symbol_to_yf_ticker(symbol: str) -> str:
     if code in _ticker_cache:
         return _ticker_cache[code]
 
-    # 智慧判斷
-    if code in _LISTED_EXCEPTIONS:
+    # 嘗試載入官方分類
+    if not _market_db_loaded:
+        _load_market_classification()
+
+    # 用官方資料判斷
+    if code in _listed_codes:
         ticker = f"{code}.TW"
-    elif len(code) == 4 and code[0] in _OTC_PREFIXES:
+    elif code in _otc_codes:
         ticker = f"{code}.TWO"
     else:
+        # 預設用 .TW，失敗時 fix_yf_ticker_if_failed 會切換
         ticker = f"{code}.TW"
 
     _ticker_cache[code] = ticker
