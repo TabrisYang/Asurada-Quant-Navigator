@@ -375,21 +375,27 @@ export default function ChatInterface() {
 
     setInput('');
     await _executeSend(trimmed, sendMode, true);
+  }, [input, addMessage]);
 
-    // 分析完成後自動處理佇列（延遲 1 秒確保上一個回覆完全渲染）
-    if (messageQueueRef.current.length > 0) {
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      while (messageQueueRef.current.length > 0) {
+  // 獨立的佇列處理：監聽 chatLoading 變為 false 時，自動處理下一個排隊任務
+  const processingQueueRef = useRef(false);
+  useEffect(() => {
+    if (chatLoading || processingQueueRef.current) return;
+    if (messageQueueRef.current.length === 0) return;
+
+    processingQueueRef.current = true;
+    const processNext = async () => {
+      await new Promise(resolve => setTimeout(resolve, 1500));
+
+      if (messageQueueRef.current.length > 0) {
         const next = messageQueueRef.current.shift()!;
         setQueueLength(messageQueueRef.current.length);
         await _executeSend(next.text, next.mode, false);
-        // 每個任務之間也延遲，避免 SSE 衝突
-        if (messageQueueRef.current.length > 0) {
-          await new Promise(resolve => setTimeout(resolve, 1000));
-        }
       }
-    }
-  }, [input, addMessage]);
+      processingQueueRef.current = false;
+    };
+    processNext();
+  }, [chatLoading]);
 
   // 普通函式（非 useCallback）— 每次呼叫時讀取最新的 store 狀態
   const _executeSend = async (trimmed: string, sendMode?: string, addUserMsg: boolean = true) => {
