@@ -28,7 +28,7 @@ async def discover_models(
     elif provider == "claude":
         return _discover_claude_static()
     elif provider == "claude_subscription":
-        return _discover_claude_subscription_static()
+        return await _discover_claude_subscription()
     elif provider == "ollama":
         return await _discover_ollama(base_url or "http://localhost:11434")
     else:
@@ -161,19 +161,72 @@ async def _discover_openai(api_key: Optional[str]) -> list[dict]:
 # ─── Claude ──────────────────────────────────────
 
 def _discover_claude_static() -> list[dict]:
-    """Anthropic 沒有 list models API，回傳已知可用模型"""
+    """Anthropic API 已知可用模型"""
     return [
-        {"id": "claude-sonnet-4-20250514", "name": "Claude Sonnet 4", "description": "推理能力強，最新旗艦模型"},
+        {"id": "claude-opus-4-20250514", "name": "Claude Opus 4.6", "description": "最強推理模型"},
+        {"id": "claude-sonnet-4-20250514", "name": "Claude Sonnet 4.6", "description": "推理能力強，旗艦模型"},
         {"id": "claude-3-5-sonnet-20241022", "name": "Claude 3.5 Sonnet", "description": "性價比高"},
         {"id": "claude-3-5-haiku-20241022", "name": "Claude 3.5 Haiku", "description": "回應最快，成本最低"},
     ]
 
 
+async def _discover_claude_subscription() -> list[dict]:
+    """動態偵測 Claude 訂閱制可用模型（透過 claude CLI）"""
+    import asyncio
+
+    # 嘗試用 claude CLI 查詢可用模型
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "claude", "--print", "--model", "sonnet",
+            "-p", "List all available Claude model IDs in a simple list, one per line. Only output model IDs like claude-opus-4-6, claude-sonnet-4-6, etc.",
+            "--max-turns", "0",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+        text = stdout.decode().strip()
+
+        # 解析模型 ID
+        models = []
+        seen = set()
+        for line in text.split("\n"):
+            line = line.strip().strip("`").strip("- ")
+            if line.startswith("claude-") and line not in seen:
+                seen.add(line)
+                # 生成顯示名稱
+                name = line
+                desc = ""
+                if "opus" in line:
+                    name = f"Claude Opus ({line})"
+                    desc = "最強推理模型（需 Max 訂閱）"
+                elif "sonnet" in line and "3-5" not in line and "3.5" not in line:
+                    name = f"Claude Sonnet ({line})"
+                    desc = "推理能力強，旗艦模型"
+                elif "3-5-sonnet" in line or "3.5-sonnet" in line:
+                    name = f"Claude 3.5 Sonnet ({line})"
+                    desc = "性價比高"
+                elif "haiku" in line:
+                    name = f"Claude Haiku ({line})"
+                    desc = "回應最快"
+                else:
+                    name = line
+                    desc = ""
+                models.append({"id": line, "name": name, "description": desc})
+
+        if models:
+            return models
+    except Exception as e:
+        logger.debug(f"Claude CLI 模型偵測失敗: {e}")
+
+    # Fallback：靜態清單
+    return _discover_claude_subscription_static()
+
+
 def _discover_claude_subscription_static() -> list[dict]:
-    """Claude 訂閱制可用模型（含 Opus，實際可用性取決於訂閱等級）"""
+    """Fallback 靜態模型清單"""
     return [
-        {"id": "claude-opus-4-20250514", "name": "Claude Opus 4", "description": "最強推理模型（需 Max 訂閱）"},
-        {"id": "claude-sonnet-4-20250514", "name": "Claude Sonnet 4", "description": "推理能力強，最新旗艦模型"},
+        {"id": "claude-opus-4-6", "name": "Claude Opus 4.6 (1M context)", "description": "最強推理模型（需 Max 訂閱）"},
+        {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "description": "推理能力強，旗艦模型"},
         {"id": "claude-3-5-sonnet-20241022", "name": "Claude 3.5 Sonnet", "description": "性價比高"},
         {"id": "claude-3-5-haiku-20241022", "name": "Claude 3.5 Haiku", "description": "回應最快"},
     ]
