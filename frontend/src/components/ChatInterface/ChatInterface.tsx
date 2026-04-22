@@ -377,33 +377,50 @@ export default function ChatInterface() {
     await _executeSend(trimmed, sendMode, true);
   }, [input, addMessage]);
 
-  // 獨立的佇列處理：監聽 chatLoading 變為 false 時，自動處理下一個排隊任務
-  const processingQueueRef = useRef(false);
-  useEffect(() => {
-    if (chatLoading || processingQueueRef.current) return;
+  // 佇列處理（由 _executeSend 結束時直接呼叫，不依賴 useEffect）
+  const _processQueue = async () => {
     if (messageQueueRef.current.length === 0) return;
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    if (messageQueueRef.current.length > 0 && !abortRef.current) {
+      const next = messageQueueRef.current.shift()!;
+      setQueueLength(messageQueueRef.current.length);
+      const startNotice: ChatMessage = {
+        id: `system-queue-start-${Date.now()}`,
+        role: 'system',
+        content: `▶️ 排隊任務開始執行：${next.text.slice(0, 50)}${next.text.length > 50 ? '...' : ''}`,
+        timestamp: new Date().toISOString(),
+      };
+      addMessage(startNotice);
+      await _executeSend(next.text, next.mode, false);
+    }
+  };
 
-    processingQueueRef.current = true;
-    const processNext = async () => {
-      await new Promise(resolve => setTimeout(resolve, 1500));
-
-      if (messageQueueRef.current.length > 0) {
-        const next = messageQueueRef.current.shift()!;
-        setQueueLength(messageQueueRef.current.length);
-        // 通知用戶排隊任務開始執行
-        const startNotice: ChatMessage = {
-          id: `system-queue-start-${Date.now()}`,
-          role: 'system',
-          content: `▶️ 排隊任務開始執行：${next.text.slice(0, 50)}${next.text.length > 50 ? '...' : ''}`,
-          timestamp: new Date().toISOString(),
-        };
-        addMessage(startNotice);
-        await _executeSend(next.text, next.mode, false);
-      }
-      processingQueueRef.current = false;
+  // 終止執行（停止當前分析 + 清空佇列）
+  const abortRef = useRef(false);
+  const handleAbort = () => {
+    abortRef.current = true;
+    messageQueueRef.current = [];
+    setQueueLength(0);
+    setChatLoading(false);
+    if (streamingMsgIdRef.current) {
+      const currentMsg = useChartStore.getState().messages.find(m => m.id === streamingMsgIdRef.current);
+      updateMessage(streamingMsgIdRef.current, {
+        isThinking: false,
+        isStreaming: false,
+        statusText: undefined,
+        content: (currentMsg?.content || '') + '\n\n⛔ 已終止',
+      });
+      streamingMsgIdRef.current = null;
+    }
+    const abortMsg: ChatMessage = {
+      id: `system-abort-${Date.now()}`,
+      role: 'system',
+      content: '⛔ 已終止分析，可以繼續輸入新的問題。',
+      timestamp: new Date().toISOString(),
     };
-    processNext();
-  }, [chatLoading]);
+    addMessage(abortMsg);
+    setTimeout(() => { abortRef.current = false; }, 500);
+  };
 
   // 普通函式（非 useCallback）— 每次呼叫時讀取最新的 store 狀態
   const _executeSend = async (trimmed: string, sendMode?: string, addUserMsg: boolean = true) => {
@@ -656,6 +673,11 @@ export default function ChatInterface() {
       streamingMsgIdRef.current = null;
     }
     setChatLoading(false);
+
+    // 處理佇列中的下一個任務
+    if (!abortRef.current) {
+      await _processQueue();
+    }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -1123,7 +1145,17 @@ export default function ChatInterface() {
           >
             {chatLoading ? `排隊${queueLength > 0 ? `(${queueLength})` : ''}` : '發送'}
           </button>
-          {queueLength > 0 && (
+          {chatLoading && (
+            <button
+              onClick={handleAbort}
+              className="px-3 py-1.5 rounded text-xs cursor-pointer font-medium"
+              style={{ background: '#dc2626', color: '#fff' }}
+              title="終止分析"
+            >
+              ⛔ 終止
+            </button>
+          )}
+          {queueLength > 0 && !chatLoading && (
             <button
               onClick={() => { messageQueueRef.current = []; setQueueLength(0); }}
               className="px-2 py-1.5 rounded text-xs cursor-pointer"
