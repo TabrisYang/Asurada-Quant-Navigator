@@ -390,6 +390,14 @@ export default function ChatInterface() {
       if (messageQueueRef.current.length > 0) {
         const next = messageQueueRef.current.shift()!;
         setQueueLength(messageQueueRef.current.length);
+        // 通知用戶排隊任務開始執行
+        const startNotice: ChatMessage = {
+          id: `system-queue-start-${Date.now()}`,
+          role: 'system',
+          content: `▶️ 排隊任務開始執行：${next.text.slice(0, 50)}${next.text.length > 50 ? '...' : ''}`,
+          timestamp: new Date().toISOString(),
+        };
+        addMessage(startNotice);
         await _executeSend(next.text, next.mode, false);
       }
       processingQueueRef.current = false;
