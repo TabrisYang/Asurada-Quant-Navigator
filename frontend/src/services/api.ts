@@ -214,10 +214,22 @@ export async function streamChatMessage(
       const decoder = new TextDecoder();
       let buffer = '';
       let currentEvent = '';
+      const STREAM_TIMEOUT_MS = 120_000; // 120 秒沒收到任何事件視為超時
 
       while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+        // 帶超時的 read：防止 SSE stream 掛住永遠不結束
+        const readPromise = reader.read();
+        const timeoutPromise = new Promise<{ done: true; value: undefined }>((resolve) =>
+          setTimeout(() => resolve({ done: true, value: undefined }), STREAM_TIMEOUT_MS)
+        );
+        const { done, value } = await Promise.race([readPromise, timeoutPromise]);
+        if (done) {
+          if (!value) {
+            // 超時觸發
+            wrappedCallbacks.onError?.('分析回應超時（120 秒無回應），已自動斷開');
+          }
+          break;
+        }
 
         buffer += decoder.decode(value, { stream: true });
 
