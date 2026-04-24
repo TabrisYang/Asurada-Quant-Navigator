@@ -12,6 +12,9 @@ import type {
 } from '../types';
 import { fetchChartData, calculateIndicator } from '../services/api';
 
+// 防止快速切換標的時 race condition（舊請求覆蓋新資料）
+let _chartLoadSeq = 0;
+
 interface ChartStore {
   // ===== 圖表狀態 =====
   symbol: string;
@@ -38,6 +41,9 @@ interface ChartStore {
 
   // ===== 同步面板 =====
   showSyncPanel: boolean;
+
+  // ===== 台股掃描面板 =====
+  showTwScanPanel: boolean;
 
   // ===== 圖表操作 =====
   setSymbol: (symbol: string) => void;
@@ -78,6 +84,9 @@ interface ChartStore {
 
   // ===== 同步面板 =====
   setShowSyncPanel: (show: boolean) => void;
+
+  // ===== 台股掃描面板 =====
+  setShowTwScanPanel: (show: boolean) => void;
 
   // ===== 外部注入聊天訊息（因子掃描→回測）=====
   pendingChatMessage: string | null;
@@ -124,6 +133,7 @@ export const useChartStore = create<ChartStore>((set, get) => ({
   chatLoading: false,
   llmConfig: _loadInitialLLMConfig(),
   showSyncPanel: false,
+  showTwScanPanel: false,
   pendingChatMessage: null,
   setPendingChatMessage: (msg) => set({ pendingChatMessage: msg }),
   lastFactorScan: null,
@@ -168,6 +178,9 @@ export const useChartStore = create<ChartStore>((set, get) => ({
     const symbol = sym || state.symbol;
     const timeframe = tf || state.timeframe;
 
+    // 遞增序號，防止快速切換標的時舊請求覆蓋新資料
+    const seq = ++_chartLoadSeq;
+
     set({ loading: true, dataError: null });
 
     try {
@@ -177,6 +190,9 @@ export const useChartStore = create<ChartStore>((set, get) => ({
         state.startDate || undefined,
         state.endDate || undefined
       );
+
+      // 如果已有更新的請求發出，丟棄本次結果
+      if (seq !== _chartLoadSeq) return;
 
       const ohlcv: OHLCVData[] = res.ohlcv || [];
       set({ ohlcvData: ohlcv, loading: false });
@@ -188,6 +204,7 @@ export const useChartStore = create<ChartStore>((set, get) => ({
         setTimeout(() => get().reloadAllIndicators(), 100);
       }
     } catch (err: unknown) {
+      if (seq !== _chartLoadSeq) return;
       const e = err as { response?: { data?: { detail?: string } }; message?: string };
       const errorMsg = e?.response?.data?.detail || e?.message || '載入數據失敗';
       set({ loading: false, dataError: errorMsg, ohlcvData: [] });
@@ -347,6 +364,8 @@ export const useChartStore = create<ChartStore>((set, get) => ({
 
   // ===== 同步面板 =====
   setShowSyncPanel: (show) => set({ showSyncPanel: show }),
+
+  setShowTwScanPanel: (show) => set({ showTwScanPanel: show }),
 
   // ===== 圖表狀態摘要（含實際價格數據，給 LLM 分析用）=====
   getChartStateSummary: () => {

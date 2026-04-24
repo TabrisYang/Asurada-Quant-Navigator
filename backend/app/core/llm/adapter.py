@@ -744,6 +744,9 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
         import os
         import tempfile
 
+        proc = None
+        sys_prompt_file = None
+
         try:
             sys_prompt = self._build_system_message(
                 chart_state, system_prompt, include_tools=not force_text, r2_mode=r2_mode,
@@ -754,65 +757,61 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
                 f.write(sys_prompt)
                 sys_prompt_file = f.name
 
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    "claude", "-p",
-                    "--output-format", "stream-json",
-                    "--verbose",
-                    "--include-partial-messages",
-                    "--model", self.model,
-                    "--system-prompt-file", sys_prompt_file,
-                    # "--no-session-persistence",  # 啟用 prompt caching 加速連續對話
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    limit=1024 * 1024,  # 1MB buffer（預設 64KB，長回應會溢出）
-                )
+            proc = await asyncio.create_subprocess_exec(
+                "claude", "-p",
+                "--output-format", "stream-json",
+                "--verbose",
+                "--include-partial-messages",
+                "--model", self.model,
+                "--system-prompt-file", sys_prompt_file,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                limit=1024 * 1024,
+            )
 
-                proc.stdin.write(user_prompt.encode("utf-8"))
-                await proc.stdin.drain()
-                proc.stdin.close()
+            proc.stdin.write(user_prompt.encode("utf-8"))
+            await proc.stdin.drain()
+            proc.stdin.close()
 
-                full_text = ""
-                usage = None
-                result_data = None
-                _line_timeout = 60  # 每行最多等 60 秒
+            full_text = ""
+            usage = None
+            result_data = None
+            _line_timeout = 60
 
-                while True:
-                    try:
-                        line = await asyncio.wait_for(
-                            proc.stdout.readline(), timeout=_line_timeout,
-                        )
-                    except asyncio.TimeoutError:
-                        logger.warning("Claude CLI stream 逐行讀取超時（60s 無新輸出）")
-                        break
+            while True:
+                try:
+                    line = await asyncio.wait_for(
+                        proc.stdout.readline(), timeout=_line_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("Claude CLI stream 逐行讀取超時（60s 無新輸出）")
+                    break
 
-                    if not line:
-                        break
+                if not line:
+                    break
 
-                    try:
-                        data = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
 
-                    evt_type = data.get("type")
+                evt_type = data.get("type")
 
-                    if evt_type == "stream_event":
-                        event = data.get("event", {})
-                        if event.get("type") == "content_block_delta":
-                            delta = event.get("delta", {})
-                            if delta.get("type") == "text_delta":
-                                full_text += delta.get("text", "")
+                if evt_type == "stream_event":
+                    event = data.get("event", {})
+                    if event.get("type") == "content_block_delta":
+                        delta = event.get("delta", {})
+                        if delta.get("type") == "text_delta":
+                            full_text += delta.get("text", "")
 
-                    elif evt_type == "result":
-                        full_text = data.get("result", full_text)
-                        usage_data = data.get("usage", {})
-                        usage = self._build_usage(usage_data, self.model)
-                        result_data = data
+                elif evt_type == "result":
+                    full_text = data.get("result", full_text)
+                    usage_data = data.get("usage", {})
+                    usage = self._build_usage(usage_data, self.model)
+                    result_data = data
 
-                await proc.wait()
-            finally:
-                os.unlink(sys_prompt_file)
+            await proc.wait()
 
             if not full_text:
                 return LLMResponse(message="Claude CLI 回應為空")
@@ -832,9 +831,29 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
                 usage=usage,
             )
 
-        except Exception as e:
+        except (asyncio.CancelledError, Exception) as e:
+            # 被取消或出錯時，確保殺掉 CLI 子進程
+            if proc and proc.returncode is None:
+                try:
+                    proc.terminate()
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=5)
+                    except asyncio.TimeoutError:
+                        proc.kill()
+                        await proc.wait()
+                    logger.info("Claude CLI 子進程已終止")
+                except Exception:
+                    pass
+            if isinstance(e, asyncio.CancelledError):
+                raise
             logger.error(f"Claude CLI 請求失敗: {e}")
             return LLMResponse(message=f"Claude 訂閱制請求失敗: {str(e)}")
+        finally:
+            if sys_prompt_file:
+                try:
+                    os.unlink(sys_prompt_file)
+                except OSError:
+                    pass
 
     async def chat_stream(
         self, messages: list[dict], chart_state: Optional[dict] = None, system_prompt: Optional[str] = None,
@@ -844,6 +863,9 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
         import os
         import tempfile
 
+        proc = None
+        sys_prompt_file = None
+
         try:
             sys_prompt = self._build_system_message(chart_state, system_prompt, r2_mode=r2_mode)
             user_prompt = self._build_user_prompt(messages)
@@ -852,57 +874,76 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
                 f.write(sys_prompt)
                 sys_prompt_file = f.name
 
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    "claude", "-p",
-                    "--output-format", "stream-json",
-                    "--verbose",
-                    "--include-partial-messages",
-                    "--model", self.model,
-                    "--system-prompt-file", sys_prompt_file,
-                    # "--no-session-persistence",  # 啟用 prompt caching 加速連續對話
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    limit=1024 * 1024,  # 1MB buffer（預設 64KB，長回應會溢出）
-                )
+            proc = await asyncio.create_subprocess_exec(
+                "claude", "-p",
+                "--output-format", "stream-json",
+                "--verbose",
+                "--include-partial-messages",
+                "--model", self.model,
+                "--system-prompt-file", sys_prompt_file,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                limit=1024 * 1024,
+            )
 
-                proc.stdin.write(user_prompt.encode("utf-8"))
-                await proc.stdin.drain()
-                proc.stdin.close()
+            proc.stdin.write(user_prompt.encode("utf-8"))
+            await proc.stdin.drain()
+            proc.stdin.close()
 
-                _line_timeout = 60
+            _line_timeout = 60
 
-                while True:
-                    try:
-                        line = await asyncio.wait_for(
-                            proc.stdout.readline(), timeout=_line_timeout,
-                        )
-                    except asyncio.TimeoutError:
-                        break
-                    if not line:
-                        break
+            while True:
+                try:
+                    line = await asyncio.wait_for(
+                        proc.stdout.readline(), timeout=_line_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    break
+                if not line:
+                    break
 
-                    try:
-                        data = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
 
-                    if data.get("type") == "stream_event":
-                        event = data.get("event", {})
-                        if event.get("type") == "content_block_delta":
-                            delta = event.get("delta", {})
-                            text = delta.get("text", "")
-                            if text:
-                                yield text
+                if data.get("type") == "stream_event":
+                    event = data.get("event", {})
+                    if event.get("type") == "content_block_delta":
+                        delta = event.get("delta", {})
+                        text = delta.get("text", "")
+                        if text:
+                            yield text
 
-                await proc.wait()
-            finally:
-                os.unlink(sys_prompt_file)
+            await proc.wait()
 
+        except (asyncio.CancelledError, GeneratorExit):
+            pass  # 清理在 finally 中統一處理
         except Exception as e:
             logger.error(f"Claude CLI streaming 失敗: {e}")
             yield f"Claude 訂閱制請求失敗: {str(e)}"
+        finally:
+            # 確保子進程不會殘留
+            if proc and proc.returncode is None:
+                try:
+                    proc.terminate()
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=5)
+                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                        proc.kill()
+                        await proc.wait()
+                    logger.info("Claude CLI streaming 子進程已終止")
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+            if sys_prompt_file:
+                try:
+                    os.unlink(sys_prompt_file)
+                except OSError:
+                    pass
 
 
 class OllamaAdapter(BaseLLMAdapter):

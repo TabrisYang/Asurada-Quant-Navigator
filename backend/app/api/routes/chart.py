@@ -17,22 +17,45 @@ router = APIRouter()
 
 
 def _df_to_ohlcv_list(df) -> list[OHLCVData]:
-    """將 DataFrame 轉換為 OHLCVData 列表"""
+    """將 DataFrame 轉換為 OHLCVData 列表（向量化，避免 iterrows）"""
     if df.empty:
         return []
+    import numpy as np
+
+    timestamps = df["timestamp"].astype(str).tolist()
+    opens = df["open"].tolist()
+    highs = df["high"].tolist()
+    lows = df["low"].tolist()
+    closes = df["close"].tolist()
+    volumes = df["volume"].tolist()
+
+    has_fp = "final_price" in df.columns
+    has_ad = "anomaly_detected" in df.columns
+    fps = df["final_price"].tolist() if has_fp else None
+    ads = df["anomaly_detected"].tolist() if has_ad else None
+
     result = []
-    for _, row in df.iterrows():
-        item = OHLCVData(
-            timestamp=str(row["timestamp"]),
-            open=float(row["open"]),
-            high=float(row["high"]),
-            low=float(row["low"]),
-            close=float(row["close"]),
-            volume=float(row["volume"]),
-            final_price=float(row["final_price"]) if "final_price" in row and row.get("final_price") is not None else None,
-            anomaly_detected=bool(row["anomaly_detected"]) if "anomaly_detected" in row else None,
-        )
-        result.append(item)
+    for i in range(len(timestamps)):
+        fp = None
+        if fps is not None:
+            v = fps[i]
+            if v is not None and not (isinstance(v, float) and np.isnan(v)):
+                fp = float(v)
+        ad = None
+        if ads is not None:
+            v = ads[i]
+            if v is not None and not (isinstance(v, float) and np.isnan(v)):
+                ad = bool(v)
+        result.append(OHLCVData(
+            timestamp=timestamps[i],
+            open=float(opens[i]),
+            high=float(highs[i]),
+            low=float(lows[i]),
+            close=float(closes[i]),
+            volume=float(volumes[i]),
+            final_price=fp,
+            anomaly_detected=ad,
+        ))
     return result
 
 

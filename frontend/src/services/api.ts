@@ -139,7 +139,13 @@ export interface StreamCallbacks {
   onDone?: (conversationId?: string, hints?: Record<string, unknown>) => void;
 }
 
-export async function streamChatMessage(
+/** SSE 串流回傳值：promise 等待完成，abort 可主動斷開連線 */
+export interface StreamHandle {
+  promise: Promise<void>;
+  abort: () => void;
+}
+
+export function streamChatMessage(
   message: string,
   callbacks: StreamCallbacks,
   conversationId?: string,
@@ -149,7 +155,9 @@ export async function streamChatMessage(
   chatHistory?: Array<{ role: string; content: string }>,
   mode?: string,
   chartScreenshot?: string,
-): Promise<void> {
+): StreamHandle {
+  const controller = new AbortController();
+
   const body: Record<string, unknown> = {
     message,
     messages: chatHistory || [],
@@ -175,117 +183,145 @@ export async function streamChatMessage(
   };
 
   const MAX_RETRIES = 2;
-  const RETRY_DELAYS = [2000, 5000]; // 2s, 5s exponential backoff
+  const RETRY_DELAYS = [2000, 5000];
 
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      const response = await fetch('/api/chat/stream', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
+  const promise = (async () => {
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      // 已被外部 abort → 立即停止
+      if (controller.signal.aborted) break;
 
-      if (!response.ok) {
-        const errText = await response.text();
-        // 4xx 錯誤不重試（用戶端問題）
-        if (response.status >= 400 && response.status < 500) {
+      // ★ fetch() headers 30 秒保護：若 browser 連線池 / 後端佔線導致卡住，直接 abort
+      const HEADERS_TIMEOUT_MS = 30_000;
+      let headersTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+        controller.abort();
+      }, HEADERS_TIMEOUT_MS);
+      try {
+        const response = await fetch('/api/chat/stream', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
+        clearTimeout(headersTimer); headersTimer = null;
+
+        if (!response.ok) {
+          const errText = await response.text();
+          if (response.status >= 400 && response.status < 500) {
+            wrappedCallbacks.onError?.(`伺服器錯誤 (${response.status}): ${errText}`);
+            if (!doneEmitted) { doneEmitted = true; callbacks.onDone?.(); }
+            return;
+          }
+          if (attempt < MAX_RETRIES) {
+            wrappedCallbacks.onStatus?.(`連線異常，${RETRY_DELAYS[attempt] / 1000}s 後重試...`);
+            await new Promise(r => setTimeout(r, RETRY_DELAYS[attempt]));
+            continue;
+          }
           wrappedCallbacks.onError?.(`伺服器錯誤 (${response.status}): ${errText}`);
           if (!doneEmitted) { doneEmitted = true; callbacks.onDone?.(); }
           return;
         }
-        // 5xx 錯誤可重試
-        if (attempt < MAX_RETRIES) {
-          wrappedCallbacks.onStatus?.(`連線異常，${RETRY_DELAYS[attempt] / 1000}s 後重試...`);
+
+        const reader = response.body?.getReader();
+        if (!reader) {
+          wrappedCallbacks.onError?.('瀏覽器不支援 Streaming');
+          if (!doneEmitted) { doneEmitted = true; callbacks.onDone?.(); }
+          return;
+        }
+
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let currentEvent = '';
+        const STREAM_TIMEOUT_MS = 120_000;
+
+        try {
+          while (true) {
+            if (controller.signal.aborted) break;
+
+            const readPromise = reader.read();
+            let timeoutId: ReturnType<typeof setTimeout>;
+            const timeoutPromise = new Promise<{ done: true; value: undefined }>((resolve) => {
+              timeoutId = setTimeout(() => resolve({ done: true, value: undefined }), STREAM_TIMEOUT_MS);
+            });
+            const { done, value } = await Promise.race([readPromise, timeoutPromise]);
+            clearTimeout(timeoutId!);
+            if (done) {
+              if (!value) {
+                // 超時：強制斷開 HTTP 連線，通知後端停止處理
+                controller.abort();
+                wrappedCallbacks.onError?.('分析回應超時（120 秒無回應），已自動斷開');
+              }
+              break;
+            }
+
+            buffer += decoder.decode(value, { stream: true });
+
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+
+            for (const line of lines) {
+              if (line.startsWith('event: ')) {
+                currentEvent = line.slice(7).trim();
+              } else if (line.startsWith('data: ')) {
+                const dataStr = line.slice(6);
+                try {
+                  const data = JSON.parse(dataStr);
+                  _handleSSEEvent(currentEvent, data, wrappedCallbacks);
+                } catch {
+                  // ignore
+                }
+                currentEvent = '';
+              }
+            }
+          }
+
+          // 處理 buffer 中殘餘的事件
+          if (buffer.trim()) {
+            const remaining = buffer.split('\n');
+            for (const line of remaining) {
+              if (line.startsWith('event: ')) {
+                currentEvent = line.slice(7).trim();
+              } else if (line.startsWith('data: ')) {
+                try {
+                  const data = JSON.parse(line.slice(6));
+                  _handleSSEEvent(currentEvent, data, wrappedCallbacks);
+                } catch {
+                  // ignore
+                }
+                currentEvent = '';
+              }
+            }
+          }
+        } finally {
+          // 確保 reader 關閉，斷開 HTTP 連線，通知後端停止
+          reader.cancel().catch(() => {});
+        }
+
+        break; // 成功完成
+
+      } catch (err: unknown) {
+        // AbortError 代表主動終止，不重試
+        if ((err as Error)?.name === 'AbortError') break;
+
+        if (attempt < MAX_RETRIES && !doneEmitted) {
+          wrappedCallbacks.onStatus?.(`網路中斷，${RETRY_DELAYS[attempt] / 1000}s 後重試...`);
           await new Promise(r => setTimeout(r, RETRY_DELAYS[attempt]));
           continue;
         }
-        wrappedCallbacks.onError?.(`伺服器錯誤 (${response.status}): ${errText}`);
-        if (!doneEmitted) { doneEmitted = true; callbacks.onDone?.(); }
-        return;
+        callbacks.onError?.((err as Error)?.message || '網路連線失敗');
+      } finally {
+        if (headersTimer) { clearTimeout(headersTimer); headersTimer = null; }
       }
-
-      const reader = response.body?.getReader();
-      if (!reader) {
-        wrappedCallbacks.onError?.('瀏覽器不支援 Streaming');
-        if (!doneEmitted) { doneEmitted = true; callbacks.onDone?.(); }
-        return;
-      }
-
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let currentEvent = '';
-      const STREAM_TIMEOUT_MS = 120_000; // 120 秒沒收到任何事件視為超時
-
-      while (true) {
-        // 帶超時的 read：防止 SSE stream 掛住永遠不結束
-        const readPromise = reader.read();
-        const timeoutPromise = new Promise<{ done: true; value: undefined }>((resolve) =>
-          setTimeout(() => resolve({ done: true, value: undefined }), STREAM_TIMEOUT_MS)
-        );
-        const { done, value } = await Promise.race([readPromise, timeoutPromise]);
-        if (done) {
-          if (!value) {
-            // 超時觸發
-            wrappedCallbacks.onError?.('分析回應超時（120 秒無回應），已自動斷開');
-          }
-          break;
-        }
-
-        buffer += decoder.decode(value, { stream: true });
-
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (line.startsWith('event: ')) {
-            currentEvent = line.slice(7).trim();
-          } else if (line.startsWith('data: ')) {
-            const dataStr = line.slice(6);
-            try {
-              const data = JSON.parse(dataStr);
-              _handleSSEEvent(currentEvent, data, wrappedCallbacks);
-            } catch {
-              // ignore
-            }
-            currentEvent = '';
-          }
-        }
-      }
-
-      // 處理 buffer 中殘餘的事件
-      if (buffer.trim()) {
-        const remaining = buffer.split('\n');
-        for (const line of remaining) {
-          if (line.startsWith('event: ')) {
-            currentEvent = line.slice(7).trim();
-          } else if (line.startsWith('data: ')) {
-            try {
-              const data = JSON.parse(line.slice(6));
-              _handleSSEEvent(currentEvent, data, wrappedCallbacks);
-            } catch {
-              // ignore
-            }
-            currentEvent = '';
-          }
-        }
-      }
-
-      // 成功完成，跳出重試迴圈
-      break;
-
-    } catch (err: unknown) {
-      if (attempt < MAX_RETRIES && !doneEmitted) {
-        wrappedCallbacks.onStatus?.(`網路中斷，${RETRY_DELAYS[attempt] / 1000}s 後重試...`);
-        await new Promise(r => setTimeout(r, RETRY_DELAYS[attempt]));
-        continue;
-      }
-      callbacks.onError?.((err as Error)?.message || '網路連線失敗');
     }
-  }
 
-  if (!doneEmitted) {
-    callbacks.onDone?.();
-  }
+    if (!doneEmitted) {
+      callbacks.onDone?.();
+    }
+  })();
+
+  return {
+    promise,
+    abort: () => controller.abort(),
+  };
 }
 
 function _handleSSEEvent(
@@ -334,6 +370,212 @@ function _handleSSEEvent(
     default:
       break;
   }
+}
+
+// ===== 台股掃描 API =====
+
+export interface TwScanResult {
+  code: string;
+  name: string;
+  market: string;         // "listed" | "otc"
+  industry: string;
+  price: number;
+  price_date: string;     // YYYY-MM-DD
+  bb_width_pctile: number;
+  bb_width: number;
+  volume_5d_avg: number;  // 張
+  change_20d: number;     // %
+}
+
+export interface TwScanProgress {
+  current: number;
+  total: number;
+  found: number;
+  fail: number;
+  eta_sec: number;
+}
+
+export interface TwScanFailure {
+  code: string;
+  name: string;
+  market: string;      // "listed" | "otc"
+  industry: string;
+  reason: string;
+}
+
+export interface TwScanDone {
+  total_scanned: number;
+  total_found: number;
+  total_fail: number;
+  duration_sec: number;
+  failures?: TwScanFailure[];
+}
+
+export interface TwScanCallbacks {
+  onProgress?: (p: TwScanProgress) => void;
+  onResult?: (r: TwScanResult) => void;
+  onFailure?: (f: TwScanFailure) => void;
+  onWarning?: (message: string) => void;
+  onDone?: (summary: TwScanDone) => void;
+  onError?: (error: string) => void;
+}
+
+export interface TwScanRequest {
+  timeframe?: string;
+  pctile_threshold?: number;
+  markets?: string[];
+  // 進階過濾
+  min_volume?: number;
+  require_healthy_trend?: boolean;
+  max_adx?: number | null;
+  persistence_bars?: number;
+  min_abs_bb_width?: number;
+  history_days?: number;
+}
+
+export function streamTwScan(
+  request: TwScanRequest,
+  callbacks: TwScanCallbacks,
+): StreamHandle {
+  const controller = new AbortController();
+
+  const promise = (async () => {
+    try {
+      const response = await fetch('/api/scanner/tw-bb-width', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(request),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const errText = await response.text();
+        callbacks.onError?.(`伺服器錯誤 (${response.status}): ${errText}`);
+        return;
+      }
+      const reader = response.body?.getReader();
+      if (!reader) {
+        callbacks.onError?.('瀏覽器不支援 Streaming');
+        return;
+      }
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let currentEvent = '';
+      try {
+        while (true) {
+          if (controller.signal.aborted) break;
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+          for (const line of lines) {
+            if (line.startsWith('event: ')) {
+              currentEvent = line.slice(7).trim();
+            } else if (line.startsWith('data: ')) {
+              try {
+                const data = JSON.parse(line.slice(6));
+                _dispatchTwScanEvent(currentEvent, data, callbacks);
+              } catch { /* ignore */ }
+              currentEvent = '';
+            }
+          }
+        }
+      } finally {
+        reader.cancel().catch(() => {});
+      }
+    } catch (err: unknown) {
+      if ((err as Error)?.name === 'AbortError') return;
+      callbacks.onError?.((err as Error)?.message || '網路連線失敗');
+    }
+  })();
+
+  return { promise, abort: () => controller.abort() };
+}
+
+function _dispatchTwScanEvent(
+  event: string,
+  data: Record<string, unknown>,
+  callbacks: TwScanCallbacks,
+) {
+  switch (event) {
+    case 'progress':
+      callbacks.onProgress?.(data as unknown as TwScanProgress);
+      break;
+    case 'result':
+      callbacks.onResult?.(data as unknown as TwScanResult);
+      break;
+    case 'failure':
+      callbacks.onFailure?.(data as unknown as TwScanFailure);
+      break;
+    case 'warning':
+      callbacks.onWarning?.((data.message as string) || '');
+      break;
+    case 'done':
+      callbacks.onDone?.(data as unknown as TwScanDone);
+      break;
+    case 'error':
+      callbacks.onError?.((data.error as string) || '未知錯誤');
+      break;
+    default:
+      break;
+  }
+}
+
+// ===== 台股掃描歷史 API（Phase 4） =====
+
+export interface TwScanSummary {
+  scan_id: string;
+  scanned_at: string;
+  timeframe: string;
+  params: Record<string, unknown>;
+  total_scanned: number;
+  total_found: number;
+  total_fail: number;
+  duration_sec: number;
+}
+
+export async function listTwScanHistory(limit = 20): Promise<TwScanSummary[]> {
+  const res = await api.get(`/scanner/tw-bb-width/history?limit=${limit}`);
+  return res.data.scans;
+}
+
+export async function getTwScanResult(scanId: string) {
+  const res = await api.get(`/scanner/tw-bb-width/history/${scanId}`);
+  return res.data as {
+    scan_id: string;
+    scanned_at: string;
+    timeframe: string;
+    params: Record<string, unknown>;
+    results: TwScanResult[];
+    total_scanned: number;
+    total_found: number;
+    total_fail: number;
+    duration_sec: number;
+    failures: TwScanFailure[];
+  };
+}
+
+export async function deleteTwScan(scanId: string) {
+  await api.delete(`/scanner/tw-bb-width/history/${scanId}`);
+}
+
+export interface TwScanRevisitItem extends TwScanResult {
+  scan_price: number;
+  scan_date: string;
+  current_price: number;
+  current_date: string;
+  return_pct: number;
+}
+
+export async function revisitTwScan(scanId: string): Promise<{
+  scan_id: string;
+  scanned_at: string;
+  total_original: number;
+  total_revisited: number;
+  results: TwScanRevisitItem[];
+}> {
+  const res = await api.get(`/scanner/tw-bb-width/history/${scanId}/revisit`, { timeout: 300000 });
+  return res.data;
 }
 
 // ===== 設定 API =====

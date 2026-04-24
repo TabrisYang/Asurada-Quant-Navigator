@@ -111,14 +111,13 @@ _market_db_loaded = False
 
 
 def _load_market_classification():
-    """從 TWSE/TPEx API 載入所有上市/上櫃代碼（同步版，啟動時呼叫一次）"""
+    """從 TWSE/TPEx API 載入所有上市/上櫃代碼（同步 fallback）"""
     global _market_db_loaded
     if _market_db_loaded:
         return
 
     import requests
     try:
-        # 上市
         r = requests.get(
             "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY_ALL?response=json",
             timeout=10,
@@ -131,7 +130,6 @@ def _load_market_classification():
         pass
 
     try:
-        # 上櫃
         r2 = requests.get(
             "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes",
             timeout=10,

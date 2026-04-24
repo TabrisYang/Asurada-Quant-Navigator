@@ -15,6 +15,7 @@ const ChatInterface = lazy(() => import('./components/ChatInterface/ChatInterfac
 const IndicatorPanel = lazy(() => import('./components/IndicatorPanel/IndicatorPanel'));
 const SettingsPanel = lazy(() => import('./components/SettingsPanel/SettingsPanel'));
 const SyncPanel = lazy(() => import('./components/SyncPanel/SyncPanel'));
+const TwBBScanPanel = lazy(() => import('./components/TwBBScanPanel/TwBBScanPanel'));
 
 // 共用載入骨架
 function LoadingSkeleton({ name }: { name: string }) {
@@ -112,6 +113,7 @@ function App() {
   const startDate = useChartStore((s) => s.startDate);
   const endDate = useChartStore((s) => s.endDate);
   const showSyncPanel = useChartStore((s) => s.showSyncPanel);
+  const showTwScanPanel = useChartStore((s) => s.showTwScanPanel);
   const loadChartData = useChartStore((s) => s.loadChartData);
 
   const activeIndicators = useChartStore((s) => s.activeIndicators);
@@ -281,6 +283,15 @@ function App() {
         <ErrorBoundary name="數據同步">
           <Suspense fallback={<LoadingSkeleton name="數據同步" />}>
             <SyncPanel />
+          </Suspense>
+        </ErrorBoundary>
+      )}
+
+      {/* 台股 BB 壓縮掃描面板（Modal） */}
+      {showTwScanPanel && (
+        <ErrorBoundary name="台股掃描">
+          <Suspense fallback={<LoadingSkeleton name="台股掃描" />}>
+            <TwBBScanPanel />
           </Suspense>
         </ErrorBoundary>
       )}

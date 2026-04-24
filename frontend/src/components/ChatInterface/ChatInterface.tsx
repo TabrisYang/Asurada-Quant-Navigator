@@ -161,6 +161,7 @@ export default function ChatInterface() {
   const userScrolledUpRef = useRef(false);
   const isComposingRef = useRef(false);
   const streamingMsgIdRef = useRef<string | null>(null);
+  const abortStreamRef = useRef<(() => void) | null>(null);
   const messageQueueRef = useRef<{ text: string; mode?: string }[]>([]);
   const [queueLength, setQueueLength] = useState(0);
   const MAX_QUEUE = 3;
@@ -381,6 +382,17 @@ export default function ChatInterface() {
   const _processQueue = async () => {
     if (messageQueueRef.current.length === 0) return;
     await new Promise(resolve => setTimeout(resolve, 1500));
+
+    // ★ 兜底：主動清理前一任務可能殘留的狀態
+    if (abortStreamRef.current) {
+      try { abortStreamRef.current(); } catch {}
+      abortStreamRef.current = null;
+    }
+    if (useChartStore.getState().chatLoading) {
+      setChatLoading(false);
+      await new Promise(r => setTimeout(r, 50));  // 讓 React flush state
+    }
+
     if (messageQueueRef.current.length > 0 && !abortRef.current) {
       const next = messageQueueRef.current.shift()!;
       setQueueLength(messageQueueRef.current.length);
@@ -395,12 +407,17 @@ export default function ChatInterface() {
     }
   };
 
-  // 終止執行（停止當前分析 + 清空佇列）
+  // 終止執行（停止當前分析 + 清空佇列 + 真正斷開 HTTP 連線）
   const abortRef = useRef(false);
   const handleAbort = () => {
     abortRef.current = true;
     messageQueueRef.current = [];
     setQueueLength(0);
+
+    // 真正斷開 SSE 連線（通知後端停止處理）
+    abortStreamRef.current?.();
+    abortStreamRef.current = null;
+
     setChatLoading(false);
     if (streamingMsgIdRef.current) {
       const currentMsg = useChartStore.getState().messages.find(m => m.id === streamingMsgIdRef.current);
@@ -471,14 +488,24 @@ export default function ChatInterface() {
     // 截取圖表畫面（供 LLM 視覺分析）
     let screenshot: string | undefined;
     const captureFn = useChartStore.getState().captureScreenshot;
-    if (captureFn) {
+    if (captureFn && !abortRef.current) {
       try {
-        const img = await captureFn();
+        // ★ 5 秒超時：html2canvas 已知在某些圖表狀態下會 hang，避免整個任務卡住
+        const img = await Promise.race([
+          captureFn(),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)),
+        ]);
         if (img) screenshot = img;
       } catch { /* 截圖失敗不阻塞發送 */ }
     }
 
-    await streamChatMessage(
+    // 被終止 → 不再送出請求
+    if (abortRef.current) {
+      setChatLoading(false);
+      return;
+    }
+
+    const { promise: streamPromise, abort: streamAbort } = streamChatMessage(
       trimmed,
       {
         onThinking: () => {
@@ -623,7 +650,6 @@ export default function ChatInterface() {
 
         onError: (error: string) => {
           if (!accumulatedText) {
-            // 如果還沒有任何文字，直接顯示錯誤
             updateMessage(assistantMsgId, {
               content: `錯誤：${error}`,
               role: 'system',
@@ -631,7 +657,6 @@ export default function ChatInterface() {
               isStreaming: false,
             });
           } else {
-            // 已有文字，追加錯誤
             accumulatedText += `\n\n⚠️ ${error}`;
             updateMessage(assistantMsgId, {
               content: accumulatedText,
@@ -662,6 +687,11 @@ export default function ChatInterface() {
       sendMode,
       screenshot,
     );
+
+    // 保存 abort 函式，讓 handleAbort 可以真正斷開連線
+    abortStreamRef.current = streamAbort;
+    await streamPromise;
+    abortStreamRef.current = null;
 
     // ★ 安全兜底：如果串流結束但沒收到 done 事件（連線中斷等），也要結束載入狀態
     if (!doneReceived) {

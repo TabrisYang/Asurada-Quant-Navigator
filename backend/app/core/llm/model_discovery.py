@@ -163,16 +163,20 @@ async def _discover_openai(api_key: Optional[str]) -> list[dict]:
 def _discover_claude_static() -> list[dict]:
     """Anthropic API 已知可用模型"""
     return [
-        {"id": "claude-opus-4-20250514", "name": "Claude Opus 4.6", "description": "最強推理模型"},
-        {"id": "claude-sonnet-4-20250514", "name": "Claude Sonnet 4.6", "description": "推理能力強，旗艦模型"},
+        {"id": "claude-opus-4-20250514", "name": "Claude Opus 4", "description": "最強推理模型"},
+        {"id": "claude-sonnet-4-20250514", "name": "Claude Sonnet 4", "description": "推理能力強，旗艦模型"},
         {"id": "claude-3-5-sonnet-20241022", "name": "Claude 3.5 Sonnet", "description": "性價比高"},
-        {"id": "claude-3-5-haiku-20241022", "name": "Claude 3.5 Haiku", "description": "回應最快，成本最低"},
+        {"id": "claude-3-5-sonnet-20240620", "name": "Claude 3.5 Sonnet (v1)", "description": "3.5 Sonnet 初版"},
+        {"id": "claude-3-5-haiku-20241022", "name": "Claude 3.5 Haiku", "description": "回應最快"},
+        {"id": "claude-3-haiku-20240307", "name": "Claude 3 Haiku", "description": "最輕量，成本最低"},
     ]
 
 
 async def _discover_claude_subscription() -> list[dict]:
-    """動態偵測 Claude 訂閱制可用模型（透過 claude CLI）"""
+    """動態偵測 Claude 訂閱制可用模型（透過 claude CLI）+ 靜態清單合併"""
     import asyncio
+
+    discovered: list[dict] = []
 
     # 嘗試用 claude CLI 查詢可用模型
     try:
@@ -187,48 +191,60 @@ async def _discover_claude_subscription() -> list[dict]:
         text = stdout.decode().strip()
 
         # 解析模型 ID
-        models = []
         seen = set()
         for line in text.split("\n"):
             line = line.strip().strip("`").strip("- ")
             if line.startswith("claude-") and line not in seen:
                 seen.add(line)
-                # 生成顯示名稱
-                name = line
-                desc = ""
-                if "opus" in line:
-                    name = f"Claude Opus ({line})"
-                    desc = "最強推理模型（需 Max 訂閱）"
-                elif "sonnet" in line and "3-5" not in line and "3.5" not in line:
-                    name = f"Claude Sonnet ({line})"
-                    desc = "推理能力強，旗艦模型"
-                elif "3-5-sonnet" in line or "3.5-sonnet" in line:
-                    name = f"Claude 3.5 Sonnet ({line})"
-                    desc = "性價比高"
-                elif "haiku" in line:
-                    name = f"Claude Haiku ({line})"
-                    desc = "回應最快"
-                else:
-                    name = line
-                    desc = ""
-                models.append({"id": line, "name": name, "description": desc})
+                name, desc = _claude_model_display(line)
+                discovered.append({"id": line, "name": name, "description": desc})
 
-        if models:
-            return models
     except Exception as e:
         logger.debug(f"Claude CLI 模型偵測失敗: {e}")
 
-    # Fallback：靜態清單
-    return _discover_claude_subscription_static()
+    # 合併靜態清單：CLI 偵測到的優先，再補上靜態清單中未出現的
+    static = _discover_claude_subscription_static()
+    discovered_ids = {m["id"] for m in discovered}
+    for m in static:
+        if m["id"] not in discovered_ids:
+            discovered.append(m)
+
+    return discovered if discovered else static
+
+
+def _claude_model_display(model_id: str) -> tuple[str, str]:
+    """根據模型 ID 生成顯示名稱與描述"""
+    if "opus-4-7" in model_id:
+        return f"Claude Opus 4.7 ({model_id})", "最新推理模型（需 Max 訂閱）"
+    if "opus-4-6" in model_id:
+        return f"Claude Opus 4.6 ({model_id})", "推理模型（需 Max 訂閱）"
+    if "opus" in model_id:
+        return f"Claude Opus ({model_id})", "推理模型（需 Max 訂閱）"
+    if "sonnet" in model_id and "3-5" not in model_id and "3.5" not in model_id:
+        return f"Claude Sonnet ({model_id})", "推理能力強，旗艦模型"
+    if "3-5-sonnet" in model_id or "3.5-sonnet" in model_id:
+        return f"Claude 3.5 Sonnet ({model_id})", "性價比高"
+    if "haiku" in model_id:
+        return f"Claude Haiku ({model_id})", "回應最快"
+    return model_id, ""
 
 
 def _discover_claude_subscription_static() -> list[dict]:
-    """Fallback 靜態模型清單"""
+    """靜態模型清單：所有 Claude 模型都可選"""
     return [
-        {"id": "claude-opus-4-6", "name": "Claude Opus 4.6 (1M context)", "description": "最強推理模型（需 Max 訂閱）"},
+        # ── Opus 系列（需 Max 訂閱）──
+        {"id": "claude-opus-4-7", "name": "Claude Opus 4.7", "description": "最新最強推理模型（需 Max 訂閱）"},
+        {"id": "claude-opus-4-6", "name": "Claude Opus 4.6", "description": "推理模型（需 Max 訂閱）"},
+        {"id": "claude-opus-4-20250514", "name": "Claude Opus 4 (API 版)", "description": "Opus 4 固定版本"},
+        # ── Sonnet 系列 ──
         {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "description": "推理能力強，旗艦模型"},
-        {"id": "claude-3-5-sonnet-20241022", "name": "Claude 3.5 Sonnet", "description": "性價比高"},
-        {"id": "claude-3-5-haiku-20241022", "name": "Claude 3.5 Haiku", "description": "回應最快"},
+        {"id": "claude-sonnet-4-20250514", "name": "Claude Sonnet 4 (API 版)", "description": "Sonnet 4 固定版本"},
+        {"id": "claude-3-5-sonnet-20241022", "name": "Claude 3.5 Sonnet", "description": "性價比高，穩定可靠"},
+        {"id": "claude-3-5-sonnet-20240620", "name": "Claude 3.5 Sonnet (v1)", "description": "3.5 Sonnet 初版"},
+        # ── Haiku 系列 ──
+        {"id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5", "description": "回應最快"},
+        {"id": "claude-3-5-haiku-20241022", "name": "Claude 3.5 Haiku", "description": "快速、低成本"},
+        {"id": "claude-3-haiku-20240307", "name": "Claude 3 Haiku", "description": "最輕量，成本最低"},
     ]
 
 

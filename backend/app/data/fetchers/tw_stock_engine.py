@@ -336,14 +336,19 @@ class TwStockEngine:
             parts = f.stem.split("_")
             if len(parts) >= 3:
                 try:
-                    with open(f) as fp:
-                        total_rows = sum(1 for _ in fp) - 1
                     sym = f"{parts[0]}/{parts[1]}"
                     tf = parts[2]
                     key = f"{parts[0]}_{parts[1]}"
+
+                    # 優先從 metadata 取行數（避免讀取大檔案）
+                    total_rows = 0
                     last_sync = None
-                    if key in metadata and tf in metadata[key].get("last_sync", {}):
-                        last_sync = metadata[key]["last_sync"][tf]
+                    if key in metadata:
+                        total_rows = metadata[key].get("total_bars", {}).get(tf, 0)
+                        last_sync = metadata[key].get("last_sync", {}).get(tf)
+
+                    if total_rows == 0:
+                        total_rows = max(0, int(f.stat().st_size / 250) - 1)
 
                     result.append({
                         "symbol": sym,

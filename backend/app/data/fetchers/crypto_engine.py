@@ -269,38 +269,34 @@ class CryptoDataEngine:
 
     @staticmethod
     def _validate_csv(filepath: Path) -> pd.DataFrame:
-        """驗證 CSV 完整性，修復不完整的行"""
+        """驗證 CSV 完整性：C engine 高速讀取 + 必要欄位檢查 + 損壞行記錄"""
         try:
-            # 先讀取 header
-            with open(filepath, "r") as f:
-                header_line = f.readline().strip()
-                if not header_line:
-                    return pd.DataFrame()
-                expected_cols = len(header_line.split(","))
+            # pandas C engine 高速讀取，自動跳過格式損壞的行
+            df = pd.read_csv(filepath, on_bad_lines="skip")
 
-            # 讀取所有行，過濾不完整的行
-            valid_lines = [header_line]
-            with open(filepath, "r") as f:
-                next(f)  # 跳過 header
-                for line_num, line in enumerate(f, start=2):
-                    stripped = line.strip()
-                    if stripped and len(stripped.split(",")) == expected_cols:
-                        valid_lines.append(stripped)
-                    else:
-                        logger.warning(f"CSV 第 {line_num} 行欄位數不符，已移除")
-
-            if len(valid_lines) <= 1:
+            if df.empty:
+                logger.warning(f"CSV {filepath.name}: 檔案為空")
                 return pd.DataFrame()
 
-            # 從有效行重建 DataFrame
-            from io import StringIO
-            csv_content = "\n".join(valid_lines)
-            df = pd.read_csv(StringIO(csv_content))
+            # 驗證必要欄位存在
+            required = {"timestamp", "open", "high", "low", "close", "volume"}
+            missing = required - set(df.columns)
+            if missing:
+                logger.error(f"CSV {filepath.name} 缺少必要欄位: {missing}")
+                return pd.DataFrame()
+
+            # 移除 OHLCV 含 NaN 的行（資料不完整）
+            ohlcv_cols = ["open", "high", "low", "close", "volume"]
+            before = len(df)
+            df = df.dropna(subset=ohlcv_cols)
+            dropped = before - len(df)
+            if dropped > 0:
+                logger.warning(f"CSV {filepath.name}: 移除 {dropped} 行含 NaN 的 OHLCV 資料")
 
             return df
 
         except Exception as e:
-            logger.error(f"CSV 驗證失敗: {e}")
+            logger.error(f"CSV 驗證失敗 ({filepath.name}): {e}")
             return pd.DataFrame()
 
     # ─────────────────────────────────────────────
@@ -655,14 +651,20 @@ class CryptoDataEngine:
             parts = f.stem.split("_")
             if len(parts) >= 3:
                 try:
-                    with open(f) as fp:
-                        total_rows = sum(1 for _ in fp) - 1  # 扣掉 header
                     sym = f"{parts[0]}/{parts[1]}"
                     tf = parts[2]
                     key = f"{parts[0]}_{parts[1]}"
+
+                    # 優先從 metadata 取行數（避免讀取大檔案）
+                    total_rows = 0
                     last_sync = None
-                    if key in metadata and tf in metadata[key].get("last_sync", {}):
-                        last_sync = metadata[key]["last_sync"][tf]
+                    if key in metadata:
+                        total_rows = metadata[key].get("total_bars", {}).get(tf, 0)
+                        last_sync = metadata[key].get("last_sync", {}).get(tf)
+
+                    # metadata 無紀錄時用檔案大小估算（每行約 250 bytes）
+                    if total_rows == 0:
+                        total_rows = max(0, int(f.stat().st_size / 250) - 1)
 
                     result.append({
                         "symbol": sym,

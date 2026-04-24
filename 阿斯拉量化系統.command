@@ -166,6 +166,9 @@ if [ -n "$OLD_PID" ]; then
   sleep 1
 fi
 
+# 同步 .port 檔與實際使用的 port（前端 vite proxy 會讀取此檔）
+echo "8000" > "$ROOT_DIR/backend/.port"
+
 # 啟動後端（背景執行）
 echo -e "  ${YELLOW}啟動後端 (port 8000)...${NC}"
 cd "$ROOT_DIR/backend"

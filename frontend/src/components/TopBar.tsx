@@ -140,6 +140,7 @@ export default function TopBar({ onSettingsClick }: TopBarProps) {
   const endDate = useChartStore((s) => s.endDate);
   const setDateRange = useChartStore((s) => s.setDateRange);
   const setShowSyncPanel = useChartStore((s) => s.setShowSyncPanel);
+  const setShowTwScanPanel = useChartStore((s) => s.setShowTwScanPanel);
 
   const [symbolList, setSymbolList] = useState<SymbolList>(loadSymbolList);
   // downloadedSymbols 已移除 — 下拉選單只從 symbolList 生成
@@ -565,6 +566,19 @@ export default function TopBar({ onSettingsClick }: TopBarProps) {
       <div className="ml-auto flex items-center gap-3">
         {/* 因子掃描 */}
         <FactorScanPanel />
+
+        {/* 台股 BB 壓縮掃描 */}
+        <button
+          onClick={() => setShowTwScanPanel(true)}
+          className="px-3 py-1 rounded text-sm cursor-pointer transition-opacity hover:opacity-80 font-medium"
+          style={{
+            background: 'var(--accent-orange, #f59e0b)',
+            color: '#fff',
+          }}
+          title="掃描全台股 BB Width 壓縮個股"
+        >
+          🔍 台股掃描
+        </button>
 
         {/* 同步數據按鈕 */}
         <button
