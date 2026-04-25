@@ -1,0 +1,7 @@
+# 研究專案額外依賴（不打包進 production requirements.txt）
+# 安裝：pip install -r requirements_research.txt
+
+statsmodels>=0.14.0   # ARIMA + STL 分解（與主系統共用，這裡列出做為文件）
+arch>=6.3.0           # GARCH 波動率建模
+torch>=2.0.0          # LSTM 神經網路
+matplotlib>=3.8.0     # 結果視覺化

@@ -16,12 +16,31 @@ from __future__ import annotations
 
 import traceback
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from loguru import logger
 from pydantic import BaseModel
 from typing import Optional
 
-router = APIRouter()
+from app.core.ml._settings import ML_ENABLED
+
+
+# ─── ML 模組總開關保護 ────────────────────────
+def _ml_enabled_guard():
+    """全域 dependency：ML 模組停用時所有 endpoint 都回 503。"""
+    if not ML_ENABLED:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "ML 模組已停用",
+                "enabled": False,
+                "reason": "ML 模組目前處於實驗性停用狀態（後端 ML_ENABLED=False）",
+                "how_to_enable": "修改 backend/app/core/ml/_settings.py 的 ML_ENABLED 為 True 後重啟後端",
+            },
+        )
+
+
+# router 一律過 _ml_enabled_guard，停用時所有 ML endpoint 回 503
+router = APIRouter(dependencies=[Depends(_ml_enabled_guard)])
 
 
 def _ensure_models_registered():

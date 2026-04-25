@@ -101,6 +101,31 @@ export default function MLPanel() {
 
   return (
     <div>
+      {/* ⚠️ ML 模組停用橫幅（顯著提示，始終顯示） */}
+      <div style={{
+        padding: '14px 16px',
+        borderRadius: 8,
+        marginBottom: 14,
+        background: 'rgba(245,158,11,0.10)',
+        border: '1px solid rgba(245,158,11,0.45)',
+        fontSize: 13,
+        lineHeight: 1.7,
+        color: 'var(--text-primary)',
+      }}>
+        <div style={{ fontWeight: 700, color: 'var(--accent-orange, #f59e0b)', marginBottom: 6, fontSize: 14 }}>
+          ⚠️ ML 模組目前處於實驗性停用狀態
+        </div>
+        <div style={{ color: 'var(--text-secondary)' }}>
+          所有訓練 / 預測 / 模型管理功能皆已暫停，AI 對話也不會再注入 ML 預測。
+          下方界面仍可瀏覽，但操作會回傳「模組已停用」錯誤。
+        </div>
+        <div style={{ marginTop: 8, color: 'var(--text-secondary)', fontSize: 12 }}>
+          原因：ML pipeline 過去從未真正接通到 chat 介面（236 筆預測中 0 筆 ML 增強），
+          系統的「文字預測」64% 命中率已是高 baseline。<br />
+          重新啟用方式：開發者修改 <code style={{ background: 'rgba(0,0,0,0.2)', padding: '1px 4px', borderRadius: 3 }}>backend/app/core/ml/_settings.py</code> 的 <code style={{ background: 'rgba(0,0,0,0.2)', padding: '1px 4px', borderRadius: 3 }}>ML_ENABLED = True</code> 後重啟後端。
+        </div>
+      </div>
+
       {/* 新手引導卡片（可收合，始終可見） */}
       {showGuide && (
         <div style={{

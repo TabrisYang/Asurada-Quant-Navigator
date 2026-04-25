@@ -76,10 +76,10 @@
 │  └────────────────────────────────────────────────┘      │
 │                           ↕                                │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
-│  │ 指標計算引擎  │  │ 回測引擎      │  │ ML/量化引擎   │   │
-│  │ (30項指標)    │  │ NumPy 向量化  │  │ LightGBM     │   │
-│  │ + Registry   │  │ WF + CPCV    │  │ XGBoost + RF │   │
-│  │              │  │ Monte Carlo  │  │ GMM/HMM/GARCH│   │
+│  │ 指標計算引擎  │  │ 回測引擎      │  │ ML 引擎       │   │
+│  │ (30項指標)    │  │ NumPy 向量化  │  │ ⚠️ 已停用    │   │
+│  │ + Registry   │  │ WF + CPCV    │  │ (實驗性)      │   │
+│  │              │  │ Monte Carlo  │  │              │   │
 │  └──────────────┘  └──────────────┘  └──────────────┘   │
 │                           ↕                                │
 │  ┌──────────────────────────────────────────────────┐    │
@@ -923,6 +923,10 @@ GET    /api/health                   # 系統健康狀態
     - **OpenAIAdapter**：用 `chat.completions.create(stream=True)` + `stream_options={"include_usage": True}`；tool_calls 按 index 累積 delta JSON 拼接
     - **GeminiAdapter**：用 `generate_content_stream` + `asyncio.to_thread` 包同步 iterator
 88. ✅ chat.py 路由消費 streaming（Round 2/3/續寫 三處改即時 yield）：邊收 token 邊發 SSE token event，使用者看到字一個個冒出來而非「等完整段落湧出」。內建 `_MARKER_RE` 偵測 `KEY_INSIGHTS`/`PREDICTIONS`/`SYSTEM_DISTILL` 標記、看到就停止 yield 避免內部標記洩漏給使用者；保留原本的「假串流」fallback（如果 adapter 未 override）。實際效果：第一個 token 出現後 5-15 秒就開始看到內容、整體耗時類似但體感大幅改善
+89. ✅ ML 模組降級（_settings.py + 全鏈路條件）：`backend/app/core/ml/_settings.py` 加 `ML_ENABLED = False` 總開關；`_inject_ml_prediction()` 早返不注入；data_sync.py 跳過 ML 訓練；`/api/ml` 路由統一回 503；前端 MLPanel 顯示停用橫幅。保留所有程式碼（未來改 ML_ENABLED=True 即可恢復），但 chat 流程徹底跟 ML 解耦
+90. ✅ STL 時序分解（`backend/app/core/timeseries_decomposition.py`）：用 `statsmodels.tsa.seasonal.STL` 把 close 序列拆「趨勢/季節/殘差」三層；自動注入 `chart_state.decomposition`，給 LLM 看到 trend_direction、seasonal_strength、residual_volatility_pct 等立體結構；系統 prompt 加解讀指引（典型場景對應建議）
+91. ✅ 跨股票群體訊號（`backend/app/core/cross_stock_signals.py`）：給台股自動算所屬族群 + 龍頭股表現 + breadth + 個股 RS；自動注入 `chart_state.crossStockSignals`，避免 LLM 給「逆勢進場」這類錯誤建議；解讀指引包含「個股強但族群弱 → 警示拉高出貨」「龍頭強 + 個股 RS>1.5 → 跟趨勢」等典型場景
+92. ✅ LSTM-SCA-ARIMA-GARCH 混合模型 PoC（`backend/research/lstm_sca_arima_garch/`）：完整研究框架，獨立於主系統。8 個模組：data_loader / decomposer / arima_trend / garch_volatility / lstm_residual / sca_optimizer / hybrid_pipeline / evaluate；用 BTC/USDT 1d 跑通首次實驗（ARIMA walk-forward baseline + 混合 5 步預測）；額外依賴在 `requirements_research.txt`（statsmodels / arch / torch / matplotlib），不污染 production requirements
 
 ### 待開發功能
 

@@ -16,6 +16,9 @@ pandas-ta>=0.3.14b1
 # 統計計算（因子分析）
 scipy>=1.11.0
 
+# 時序分解（STL）
+statsmodels>=0.14.0
+
 # 加密貨幣交易所 API
 ccxt>=4.4.0
 

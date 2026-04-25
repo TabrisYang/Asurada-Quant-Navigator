@@ -362,6 +362,29 @@ def _auto_calc_indicator_values(
                 "end_date": str(ts.iloc[-1]),
             }
 
+        # 注入 STL 時序分解：給 LLM 看到趨勢/季節/殘差立體結構
+        try:
+            from app.core.timeseries_decomposition import decompose_price, is_available
+            if is_available() and len(df) >= 60:
+                # 日線用 period=20（約一個月），其他用 14
+                _stl_period = 20 if timeframe == "1d" else 14
+                decomp = decompose_price(df, period=_stl_period)
+                if "error" not in decomp:
+                    chart_state["decomposition"] = decomp
+        except Exception as _stl_err:
+            logger.debug(f"STL 分解失敗（不影響主流程）: {_stl_err}")
+
+        # 注入跨股票群體訊號（僅台股）：給 LLM 看到所屬族群 + 龍頭 + breadth
+        try:
+            from app.utils.symbol import is_tw_stock
+            if is_tw_stock(symbol):
+                from app.core.cross_stock_signals import compute_signals
+                cs_signals = compute_signals(symbol, timeframe)
+                if cs_signals.get("sector") or cs_signals.get("note"):
+                    chart_state["crossStockSignals"] = cs_signals
+        except Exception as _cs_err:
+            logger.debug(f"跨股票訊號計算失敗（不影響主流程）: {_cs_err}")
+
         # 強制重算模式：清除前端傳來的舊值，完全以後端計算為準
         if force_recalc:
             auto_values = {}
@@ -469,6 +492,11 @@ def _inject_ml_prediction(
     intents: set[str] | None = None,
 ) -> dict:
     """在 chart_state 中注入 ML 預測信號（若可用且啟用）"""
+    # ML 模組總開關：未啟用則直接返回，跳過所有 ML 邏輯
+    from app.core.ml._settings import ML_ENABLED
+    if not ML_ENABLED:
+        return chart_state or {}
+
     if not chart_state:
         return chart_state or {}
 

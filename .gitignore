@@ -39,6 +39,9 @@ backend/data/fundamental/
 backend/data/*.csv
 backend/data/sync_metadata.json
 
+# ===== 研究專案實驗結果（每次跑都產生新 timestamp 目錄）=====
+backend/research/lstm_sca_arima_garch/results/
+
 # ===== 快取 =====
 .pytest_cache/
 .mypy_cache/
