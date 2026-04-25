@@ -927,6 +927,8 @@ GET    /api/health                   # 系統健康狀態
 90. ✅ STL 時序分解（`backend/app/core/timeseries_decomposition.py`）：用 `statsmodels.tsa.seasonal.STL` 把 close 序列拆「趨勢/季節/殘差」三層；自動注入 `chart_state.decomposition`，給 LLM 看到 trend_direction、seasonal_strength、residual_volatility_pct 等立體結構；系統 prompt 加解讀指引（典型場景對應建議）
 91. ✅ 跨股票群體訊號（`backend/app/core/cross_stock_signals.py`）：給台股自動算所屬族群 + 龍頭股表現 + breadth + 個股 RS；自動注入 `chart_state.crossStockSignals`，避免 LLM 給「逆勢進場」這類錯誤建議；解讀指引包含「個股強但族群弱 → 警示拉高出貨」「龍頭強 + 個股 RS>1.5 → 跟趨勢」等典型場景
 92. ✅ LSTM-SCA-ARIMA-GARCH 混合模型 PoC（`backend/research/lstm_sca_arima_garch/`）：完整研究框架，獨立於主系統。8 個模組：data_loader / decomposer / arima_trend / garch_volatility / lstm_residual / sca_optimizer / hybrid_pipeline / evaluate；用 BTC/USDT 1d 跑通首次實驗（ARIMA walk-forward baseline + 混合 5 步預測）；額外依賴在 `requirements_research.txt`（statsmodels / arch / torch / matplotlib），不污染 production requirements
+93. ✅ 跨股票群體訊號擴展到加密貨幣（`compute_signals_crypto`）：完全動態 basket（從本地有資料的 USDT 對掃描，排除穩定幣 USDT/USDC/BUSD/DAI 等 + 衍生品），門檻 ≥ 3 個成員。提供：basket size、breadth_pct_advancing（最近一根 K 線收漲的 %）、BTC 龍頭信號、basket 平均 5K 線漲跌、自身 RS（vs basket）、**BTC dominance proxy**（用 USD 成交額 = volume × price 計算，避開 base coin 量級不可比的問題）、**alt outperform count**（跑贏 BTC 的 alt 數）、**market_regime 推斷**（btc_led / alt_season / bearish / mixed）。系統 prompt 加 4 種 regime 對應的決策建議（例：market_regime='alt_season' + 你分析 BTC → 提示「考慮挑強勢 alt 而非 BTC」）
+94. ✅ STL 時序分解視覺化（兩個新指標 `stl_trend` + `stl_oscillator`）：用既有指標註冊系統，零前端改動 — 自動繼承指標面板開關、副圖渲染、十字線數值。`stl_trend` 為 overlay（主圖疊加平滑趨勢線、無滯後）；`stl_oscillator` 為 sub_chart（顯示 Seasonal 規律週期 + Residual 隨機雜訊兩條序列）。預設關閉避免擠畫面，使用者主動到指標面板開啟。`decompose_full_series()` 函式回傳完整序列，1250 根日線約 50-100ms（接受成本，不加 cache）
 
 ### 待開發功能
 

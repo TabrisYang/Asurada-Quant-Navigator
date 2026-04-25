@@ -111,6 +111,42 @@ def decompose_price(
     }
 
 
+def decompose_full_series(
+    df: pd.DataFrame,
+    period: int = 20,
+    seasonal: int = 7,
+) -> Optional[dict[str, list]]:
+    """STL 分解，回傳完整三條序列（給指標計算用，繪圖在副圖）。
+
+    跟 decompose_price 不同：這個回傳完整序列，不只摘要。
+
+    Returns:
+        {"trend": [...], "seasonal": [...], "residual": [...]} 各長度 = len(close)
+        若資料不足或 STL 不可用 → None
+    """
+    if not _STL_AVAILABLE:
+        return None
+    if df is None or "close" not in df.columns:
+        return None
+
+    close = df["close"].dropna()
+    min_required = period * 3
+    if len(close) < min_required:
+        return None
+
+    try:
+        stl = STL(close.values, period=period, seasonal=seasonal, robust=True).fit()
+    except Exception as e:
+        logger.debug(f"decompose_full_series 失敗: {e}")
+        return None
+
+    return {
+        "trend": stl.trend.tolist(),
+        "seasonal": stl.seasonal.tolist(),
+        "residual": stl.resid.tolist(),
+    }
+
+
 def is_available() -> bool:
     """STL 模組是否可用（statsmodels 是否已安裝）。"""
     return _STL_AVAILABLE

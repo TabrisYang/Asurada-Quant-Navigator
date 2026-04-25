@@ -374,14 +374,17 @@ def _auto_calc_indicator_values(
         except Exception as _stl_err:
             logger.debug(f"STL 分解失敗（不影響主流程）: {_stl_err}")
 
-        # 注入跨股票群體訊號（僅台股）：給 LLM 看到所屬族群 + 龍頭 + breadth
+        # 注入跨股票群體訊號（台股 + 加密）：給 LLM 看到所屬集合 + 龍頭 + breadth
         try:
             from app.utils.symbol import is_tw_stock
             if is_tw_stock(symbol):
                 from app.core.cross_stock_signals import compute_signals
                 cs_signals = compute_signals(symbol, timeframe)
-                if cs_signals.get("sector") or cs_signals.get("note"):
-                    chart_state["crossStockSignals"] = cs_signals
+            else:
+                from app.core.cross_stock_signals import compute_signals_crypto
+                cs_signals = compute_signals_crypto(symbol, timeframe)
+            if cs_signals and (cs_signals.get("sector") or cs_signals.get("basket_size") or cs_signals.get("note")):
+                chart_state["crossStockSignals"] = cs_signals
         except Exception as _cs_err:
             logger.debug(f"跨股票訊號計算失敗（不影響主流程）: {_cs_err}")
 

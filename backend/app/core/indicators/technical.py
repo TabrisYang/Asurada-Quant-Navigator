@@ -1789,3 +1789,73 @@ def calc_mtf_mss(df: pd.DataFrame, params: dict) -> dict[str, list]:
             "MTF_Alignment": _safe_list(pd.Series(0.0, index=df.index)),
             "MSS_Signal": _safe_list(pd.Series(0.0, index=df.index)),
         }
+
+
+# =============================================
+# STL 時序分解（Seasonal-Trend decomposition by Loess）
+# 兩個指標：trend（overlay 主圖） + oscillator（副圖：seasonal + residual）
+# =============================================
+
+@registry.register(
+    id="stl_trend",
+    name="STL 分解 - 趨勢",
+    category="動能與趨勢",
+    description="STL 時序分解的趨勢成分：去除季節性與雜訊後的純粹趨勢線。比 SMA 更平滑、無滯後（同時點對應）。",
+    parameters={
+        "period": {"default": 20, "min": 5, "max": 100, "type": "int"},
+        "seasonal": {"default": 7, "min": 3, "max": 21, "type": "int"},
+    },
+    display_mode="overlay",
+    warmup_func=lambda p: int(p.get("period", 20)) * 3,
+    pro_tip="趨勢線斜率 = 主方向；K 線在趨勢線上方持續 = 多頭結構；下方持續 = 空頭結構。比看 MA 更準確判斷主趨勢，因為它已扣除週期性與雜訊。",
+)
+def calc_stl_trend(df: pd.DataFrame, params: dict) -> dict[str, list]:
+    from app.core.timeseries_decomposition import decompose_full_series
+    period = int(params.get("period", 20))
+    seasonal = int(params.get("seasonal", 7))
+    result = decompose_full_series(df, period=period, seasonal=seasonal)
+    if result is None:
+        # 資料不足或 statsmodels 未安裝 → 回傳空序列
+        empty = [None] * len(df)
+        return {f"STL_Trend({period})": empty}
+    trend = result["trend"]
+    # 對齊長度（STL 應該回傳跟 close 一樣長度，但保險起見截長補短）
+    if len(trend) < len(df):
+        trend = [None] * (len(df) - len(trend)) + list(trend)
+    elif len(trend) > len(df):
+        trend = trend[-len(df):]
+    return {f"STL_Trend({period})": trend}
+
+
+@registry.register(
+    id="stl_oscillator",
+    name="STL 分解 - 振盪（季節+殘差）",
+    category="波動率",
+    description="STL 時序分解的兩個振盪成分：Seasonal（規律週期）+ Residual（隨機雜訊）。看出有沒有可利用的週期性，以及哪天有事件衝擊。",
+    parameters={
+        "period": {"default": 20, "min": 5, "max": 100, "type": "int"},
+        "seasonal": {"default": 7, "min": 3, "max": 21, "type": "int"},
+    },
+    display_mode="sub_chart",
+    warmup_func=lambda p: int(p.get("period", 20)) * 3,
+    pro_tip="Seasonal 規律振盪 = 該標的有可預測週期性；Residual 突然出現大值 = 事件衝擊（值得回查當天新聞 / 公告）。兩者都接近 0 = 純趨勢驅動，無短期套利空間。",
+)
+def calc_stl_oscillator(df: pd.DataFrame, params: dict) -> dict[str, list]:
+    from app.core.timeseries_decomposition import decompose_full_series
+    period = int(params.get("period", 20))
+    seasonal = int(params.get("seasonal", 7))
+    result = decompose_full_series(df, period=period, seasonal=seasonal)
+    if result is None:
+        empty = [None] * len(df)
+        return {"Seasonal": empty, "Residual": empty}
+    seasonal_arr = result["seasonal"]
+    residual_arr = result["residual"]
+    # 對齊長度
+    def _align(arr):
+        if len(arr) < len(df):
+            return [None] * (len(df) - len(arr)) + list(arr)
+        return arr[-len(df):]
+    return {
+        "Seasonal": _align(seasonal_arr),
+        "Residual": _align(residual_arr),
+    }
