@@ -913,6 +913,8 @@ GET    /api/health                   # 系統健康狀態
 80. ✅ 台股掃描器加速：並發 10 → 25 + Token Bucket 限速（10 RPS / burst 20）防止 yfinance 被打爆，預期 28 分 → 12-15 分
 81. ✅ yfinance Circuit Breaker：模組層單例追蹤連續失敗，連續 5 次失敗 → 暫停 30 秒（half-open 試一次再決定）+ 指數退避重試（1s → 2s → 4s）；保護所有 `fetch_ohlcv` 呼叫端不會在 yfinance 故障時打到被封 IP
 82. ✅ Anthropic Prompt Caching：system prompt 拆成「靜態（CORE + 模組，~11000 字 / ~2700 tokens）+ 動態（時間戳、chart_state）」兩 block，靜態段加 `cache_control: ephemeral` 5 分鐘 TTL；tools 區塊也快取（21 個 function 定義）；`TokenUsage` 加 `cache_creation_tokens` / `cache_read_tokens` 欄位追蹤 cache hit；OpenAI 自動快取、Gemini implicit cache、Ollama 不適用
+83. ✅ 掃描資料區間顯示：掃描器面板新增「📅 資料區間：YYYY-MM-DD ~ YYYY-MM-DD（N 天，判斷最新一根 K 線的壓縮程度）」即時提示，隨「抓取歷史天數」設定變動而即時更新；掃描開始時鎖定區間（避免掃描中改參數導致顯示混亂），掃描完成摘要也帶出實際使用的區間
+84. ✅ 手動備份快捷腳本（`阿斯拉量化系統-手動備份.command`）：雙擊立即執行 `backup_databases.py`，補強 launchd 自動排程「Mac 關機時不會跑」的盲點，適用「重大操作前」「累積重要對話後」「Mac 連續幾天沒開」等情境
 
 ### 待開發功能
 
