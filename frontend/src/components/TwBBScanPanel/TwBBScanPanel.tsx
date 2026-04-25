@@ -7,7 +7,7 @@
  *   - CSV 匯出
  */
 
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import { useChartStore } from '../../stores/chartStore';
 import { addSymbolsToList } from '../TopBar';
 import {
@@ -66,6 +66,15 @@ export default function TwBBScanPanel() {
   const [persistenceBars, setPersistenceBars] = useState(3);  // 最近 N 根都壓縮
   const [minAbsBbWidth, setMinAbsBbWidth] = useState(3.0);    // 絕對 BB Width 下限 %
   const [historyDays, setHistoryDays] = useState(400);        // 抓取歷史天數（日曆日）
+
+  // 掃描資料區間：live preview（依當前 historyDays） + 鎖定值（掃描開始時捕獲）
+  const livePreviewRange = useMemo(() => {
+    const end = new Date();
+    const start = new Date(end.getTime() - historyDays * 86400000);
+    const fmt = (d: Date) => d.toISOString().slice(0, 10);
+    return { start: fmt(start), end: fmt(end), days: historyDays };
+  }, [historyDays]);
+  const [scanRange, setScanRange] = useState<{ start: string; end: string; days: number } | null>(null);
 
   // 掃描狀態
   const [scanning, setScanning] = useState(false);
@@ -142,6 +151,7 @@ export default function TwBBScanPanel() {
     setShowFailures(false);
     setWarnings([]);
     setSummary(null);
+    setScanRange(livePreviewRange);  // 鎖定本次掃描的資料區間，避免之後改參數時被覆蓋
 
     // 盤中警示
     const now = new Date();
@@ -181,7 +191,7 @@ export default function TwBBScanPanel() {
       },
     );
     abortRef.current = handle.abort;
-  }, [pctile, markets, minVolume, requireHealthyTrend, maxAdxEnabled, persistenceBars, minAbsBbWidth, historyDays]);
+  }, [pctile, markets, minVolume, requireHealthyTrend, maxAdxEnabled, persistenceBars, minAbsBbWidth, historyDays, livePreviewRange]);
 
   const handleCancel = useCallback(() => {
     abortRef.current?.();
@@ -446,6 +456,16 @@ export default function TwBBScanPanel() {
             )}
           </div>
 
+          {/* 資料區間提示（live preview，掃描中改成顯示鎖定值） */}
+          {!summary && (
+            <div className="text-xs" style={{ color: 'var(--text-secondary)' }}>
+              📅 資料區間：<b style={{ color: 'var(--text-primary)' }}>
+                {(scanning && scanRange ? scanRange : livePreviewRange).start} ~ {(scanning && scanRange ? scanRange : livePreviewRange).end}
+              </b>
+              （{(scanning && scanRange ? scanRange : livePreviewRange).days} 天，判斷最新一根 K 線的壓縮程度）
+            </div>
+          )}
+
           {/* 進度條 */}
           {progress && (
             <div>
@@ -481,8 +501,15 @@ export default function TwBBScanPanel() {
 
           {/* 摘要 */}
           {summary && (
-            <div className="text-sm" style={{ color: 'var(--text-secondary)' }}>
-              ✅ 掃描完成：掃 {summary.total_scanned} 檔，找到 <b style={{ color: 'var(--accent-blue)' }}>{summary.total_found}</b> 檔，失敗 {summary.total_fail}，耗時 {summary.duration_sec}s
+            <div className="text-sm space-y-0.5" style={{ color: 'var(--text-secondary)' }}>
+              <div>
+                ✅ 掃描完成：掃 {summary.total_scanned} 檔，找到 <b style={{ color: 'var(--accent-blue)' }}>{summary.total_found}</b> 檔，失敗 {summary.total_fail}，耗時 {summary.duration_sec}s
+              </div>
+              {scanRange && (
+                <div className="text-xs">
+                  📅 資料區間：{scanRange.start} ~ {scanRange.end}（{scanRange.days} 天）
+                </div>
+              )}
             </div>
           )}
 

@@ -1,6 +1,6 @@
 # 阿斯拉量化系統 — 完整系統 Prompt 與架構規格書
 
-> **最後更新：2026-04-24** — 與實際程式碼同步
+> **最後更新：2026-04-25** — 與實際程式碼同步
 
 ## 系統定位
 
@@ -909,6 +909,10 @@ GET    /api/health                   # 系統健康狀態
 76. ✅ Scanner 觸發 `fetch_ohlcv` backfill 修復：明確傳入 `start_date = now - history_days` 讓 engine 自動補齊本地歷史不足的 CSV（原 bug：本地檔案存在但歷史不足時 `need_backfill=False` 永遠不補）
 77. ✅ 掃描失敗訊息語意化：`bars insufficient (N)` → 「歷史資料僅 N 筆（需至少 150；新上市或資料源斷檔）」或「無歷史資料（ticker 不存在、下市股或資料源異常）」
 78. ✅ 掃描歷史天數可自訂（進階過濾 UI 新增「抓取歷史天數」欄位，預設 400 日曆日，下限 220 ≈ 150 根交易日）
+79. ✅ SQLite 資料庫自動備份：hot backup（`.backup` API）+ GFS 分層保留（每天 7 + 每週 4 + 每月 12 + 每年永久）+ launchd 排程每天 0:00 自動執行 + 跳過純快取 DB（`analysis_cache` / `semantic_cache`）；提供 `阿斯拉量化系統-手動備份.command` 雙擊立即備份
+80. ✅ 台股掃描器加速：並發 10 → 25 + Token Bucket 限速（10 RPS / burst 20）防止 yfinance 被打爆，預期 28 分 → 12-15 分
+81. ✅ yfinance Circuit Breaker：模組層單例追蹤連續失敗，連續 5 次失敗 → 暫停 30 秒（half-open 試一次再決定）+ 指數退避重試（1s → 2s → 4s）；保護所有 `fetch_ohlcv` 呼叫端不會在 yfinance 故障時打到被封 IP
+82. ✅ Anthropic Prompt Caching：system prompt 拆成「靜態（CORE + 模組，~11000 字 / ~2700 tokens）+ 動態（時間戳、chart_state）」兩 block，靜態段加 `cache_control: ephemeral` 5 分鐘 TTL；tools 區塊也快取（21 個 function 定義）；`TokenUsage` 加 `cache_creation_tokens` / `cache_read_tokens` 欄位追蹤 cache hit；OpenAI 自動快取、Gemini implicit cache、Ollama 不適用
 
 ### 待開發功能
 

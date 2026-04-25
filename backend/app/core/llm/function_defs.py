@@ -1188,36 +1188,56 @@ def assemble_system_prompt(intents: set[str], teaching_mode: bool = False) -> st
     if teaching_mode:
         modules_needed.add("teaching")
 
-    # 固定順序確保 prompt 結構一致
-    _MODULE_ORDER = (
-        "teaching",
-        "regime_v2", "analysis_v2", "factor_validation",
-        "auto_backtest", "risk_checklist", "alpha_monitor",
-        "output_lite", "output_full",
-        "output_deep_phase1", "output_deep_phase2", "output_deep_phase3",
-        "drawing", "event_analysis", "conditional_prob", "scenario", "smc",
-        "quant_research", "calibrate", "backtest",
-        "sector_analysis",
-        "factor_validation_mode", "strategy_backtest_mode", "regime_analysis_mode",
-        "momentum_analysis_mode", "fundamental_analysis_mode",
-        "data_sync_mode",  # 所有模式都載入，讓 LLM 隨時能建議下載
-    )
+    static, dynamic = assemble_system_prompt_split(modules_needed)
+    return static + dynamic
+
+
+# 固定順序確保 prompt 結構一致（模組層常數，給 split 函式用）
+_MODULE_ORDER = (
+    "teaching",
+    "regime_v2", "analysis_v2", "factor_validation",
+    "auto_backtest", "risk_checklist", "alpha_monitor",
+    "output_lite", "output_full",
+    "output_deep_phase1", "output_deep_phase2", "output_deep_phase3",
+    "drawing", "event_analysis", "conditional_prob", "scenario", "smc",
+    "quant_research", "calibrate", "backtest",
+    "sector_analysis",
+    "factor_validation_mode", "strategy_backtest_mode", "regime_analysis_mode",
+    "momentum_analysis_mode", "fundamental_analysis_mode",
+    "data_sync_mode",  # 所有模式都載入，讓 LLM 隨時能建議下載
+)
+
+
+def assemble_system_prompt_split(modules_needed: set[str]) -> tuple[str, str]:
+    """拆成 (static, dynamic) 兩段，供 prompt caching 用。
+
+    static：CORE + 模組（永不變）→ 適合放進 cache_control 區塊
+    dynamic：時間戳記（每分鐘變）→ 不能 cache，必須放後面
+
+    Cache 可命中的關鍵：static 段內容 100% 穩定，跟掛時鐘無關。
+    """
+    from datetime import datetime
 
     parts = [_PROMPT_CORE]
     for mod_key in _MODULE_ORDER:
         if mod_key in modules_needed:
             parts.append(_PROMPT_MODULES[mod_key])
-
-    from datetime import datetime
+    static_part = "\n".join(parts)
 
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-    parts.append(f"\n【目前時間】{now_str}（台北時區 UTC+8）")
+    dynamic_part = f"\n【目前時間】{now_str}（台北時區 UTC+8）"
 
-    return "\n".join(parts)
+    return static_part, dynamic_part
 
 
 # 保留完整版供向下相容（例如 non-streaming endpoint）
 SYSTEM_PROMPT = assemble_system_prompt({
+    "analysis", "drawing", "backtest", "quant_research",
+    "calibrate", "event_analysis", "conditional_prob",
+})
+
+# 純靜態版（僅 CORE + 模組，無時間戳）— 給 prompt caching 用
+SYSTEM_PROMPT_STATIC, _ = assemble_system_prompt_split({
     "analysis", "drawing", "backtest", "quant_research",
     "calibrate", "event_analysis", "conditional_prob",
 })

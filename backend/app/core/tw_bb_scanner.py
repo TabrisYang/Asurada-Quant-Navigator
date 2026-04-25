@@ -26,11 +26,46 @@ from app.data.fetchers.tw_stock_engine import TwStockEngine
 from app.data.fetchers.tw_universe import TwStock, tw_universe
 
 
-_DEFAULT_CONCURRENCY = 10
+_DEFAULT_CONCURRENCY = 25
 _MIN_BARS_REQUIRED = 150  # 120 根 lookback + 20~30 根容忍
 _HISTORY_DAYS = 400       # 掃描需要的歷史天數（日曆日 ~= 270 交易日，遠超 _MIN_BARS_REQUIRED）
 _MAX_FAIL_RATE = 0.10     # 失敗率 > 10% 中止
 _MIN_SAMPLES_FOR_FAIL_CHECK = 50
+
+# Token bucket：保護 yfinance 不被高並發打爆
+_RATE_LIMIT_RPS = 10      # 平均每秒最多 10 個 yfinance 請求
+_RATE_BURST = 20          # 短時間爆發容量
+
+
+class _TokenBucket:
+    """Async-safe token bucket，平均每秒 rate 個請求，bucket 容量 capacity。
+
+    用途：搭配高並發 worker 時，避免 yfinance 在某秒突然被 25 個請求打爆。
+    並發 25 仍然有效（同時 25 個 worker 跑 pandas 計算等耗 CPU 的事），
+    只是「打 yfinance」的時機會被均勻分散。
+    """
+
+    def __init__(self, rate: float, capacity: int):
+        self.rate = rate
+        self.capacity = capacity
+        self.tokens = float(capacity)
+        self.last_refill = time.monotonic()
+        self._lock = asyncio.Lock()
+
+    async def acquire(self):
+        async with self._lock:
+            self._refill()
+            while self.tokens < 1:
+                wait = (1 - self.tokens) / self.rate
+                await asyncio.sleep(wait)
+                self._refill()
+            self.tokens -= 1
+
+    def _refill(self):
+        now = time.monotonic()
+        elapsed = now - self.last_refill
+        self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+        self.last_refill = now
 
 
 @dataclass
@@ -112,11 +147,14 @@ class TwBBWidthScanner:
         logger.info(f"TwBBWidthScanner: 開始掃描 {total} 檔（threshold={pctile_threshold}）")
         start = time.monotonic()
         sem = asyncio.Semaphore(concurrency)
+        bucket = _TokenBucket(rate=_RATE_LIMIT_RPS, capacity=_RATE_BURST)
         queue: asyncio.Queue[dict] = asyncio.Queue()
         state: dict = {"current": 0, "found": 0, "fail": 0, "failures": []}
 
         async def worker(stock: TwStock):
             async with sem:
+                # 限速：保護 yfinance 不被高並發瞬間打爆
+                await bucket.acquire()
                 try:
                     res = await self._evaluate_one(
                         stock, timeframe, pctile_threshold,

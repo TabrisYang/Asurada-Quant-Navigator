@@ -6,6 +6,7 @@
 
 import asyncio
 import json
+import time
 from datetime import datetime, timedelta
 from typing import Optional, Callable
 
@@ -23,6 +24,59 @@ YF_TIMEFRAME_MAP = {
     "1d": "1d",
     "1w": "1wk",
 }
+
+
+# ─────────────────────────────────────────────
+# yfinance Circuit Breaker
+# ─────────────────────────────────────────────
+
+class _CircuitBreaker:
+    """yfinance 失敗自動斷路：連續 N 次失敗 → 暫停 X 秒再試。
+
+    狀態機：
+      closed   ─失敗 N 次─▶ open
+      open     ─等 X 秒─▶ half-open
+      half-open ─成功一次─▶ closed
+      half-open ─失敗一次─▶ open（重置計時）
+
+    避免：yfinance 短暫故障時，程式繼續打它打到 IP 被封。
+    """
+
+    def __init__(self, threshold: int = 5, recovery_sec: int = 30):
+        self.failures = 0
+        self.opened_at = 0.0
+        self.threshold = threshold
+        self.recovery_sec = recovery_sec
+        self.state = "closed"  # closed / open / half-open
+
+    def can_call(self) -> bool:
+        if self.state == "open":
+            if time.time() - self.opened_at > self.recovery_sec:
+                self.state = "half-open"
+                logger.warning("yfinance circuit breaker → half-open，嘗試恢復")
+                return True
+            return False
+        return True
+
+    def on_success(self):
+        if self.state in ("half-open", "open"):
+            logger.info("yfinance circuit breaker → closed，已恢復")
+        self.failures = 0
+        self.state = "closed"
+
+    def on_failure(self):
+        self.failures += 1
+        if self.failures >= self.threshold and self.state != "open":
+            self.state = "open"
+            self.opened_at = time.time()
+            logger.error(
+                f"yfinance circuit breaker → open，連續 {self.failures} 失敗，"
+                f"暫停 {self.recovery_sec}s"
+            )
+
+
+# 模組層單例（cross-caller 共享）
+_yf_breaker = _CircuitBreaker()
 
 # 台股支援的時間框架
 SUPPORTED_TW_TIMEFRAMES = {"1d", "1w"}
@@ -214,30 +268,63 @@ class TwStockEngine:
         interval: str,
         start_date: datetime,
         end_date: datetime,
+        max_retries: int = 3,
     ) -> Optional[pd.DataFrame]:
-        """從 yfinance 下載數據（同步方法，由 asyncio.to_thread 包裝）"""
-        try:
-            df = yf.download(
-                ticker,
-                start=start_date.strftime("%Y-%m-%d"),
-                end=(end_date + timedelta(days=1)).strftime("%Y-%m-%d"),
-                interval=interval,
-                auto_adjust=True,
-                progress=False,
-            )
-            if df is None or df.empty:
-                return None
+        """從 yfinance 下載數據（同步方法，由 asyncio.to_thread 包裝）。
 
-            # yfinance 新版回傳 MultiIndex columns，如 ('Close', '^TWII')
-            # 壓平為單層：'Close', 'High', ...
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-
-            df = df.reset_index()
-            return df
-        except Exception as e:
-            logger.error(f"yfinance 下載 {ticker} 失敗: {e}")
+        - 受 _yf_breaker 保護：連續失敗會自動暫停（避免被封 IP）
+        - 指數退避重試：失敗後等 1s → 2s → 4s 再試
+        - 「無資料」（df.empty）也算失敗，會觸發 breaker（但回傳 None）
+        """
+        # Circuit breaker 檢查：open 狀態直接跳過
+        if not _yf_breaker.can_call():
+            logger.debug(f"yfinance circuit open，跳過 {ticker}")
             return None
+
+        backoff = 1.0
+        last_exception: Optional[Exception] = None
+
+        for attempt in range(max_retries):
+            try:
+                df = yf.download(
+                    ticker,
+                    start=start_date.strftime("%Y-%m-%d"),
+                    end=(end_date + timedelta(days=1)).strftime("%Y-%m-%d"),
+                    interval=interval,
+                    auto_adjust=True,
+                    progress=False,
+                )
+                if df is None or df.empty:
+                    # 「無資料」也算失敗（多半是 ticker 不存在 / 下市）
+                    _yf_breaker.on_failure()
+                    return None
+
+                # 成功
+                _yf_breaker.on_success()
+
+                # yfinance 新版回傳 MultiIndex columns，如 ('Close', '^TWII')
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+
+                df = df.reset_index()
+                return df
+
+            except Exception as e:
+                last_exception = e
+                logger.warning(f"yfinance {ticker} 第 {attempt + 1}/{max_retries} 次失敗: {e}")
+                _yf_breaker.on_failure()
+
+                # 還有重試機會 → 等待後重試（指數退避）
+                if attempt < max_retries - 1:
+                    # 但若 breaker 已 open，沒必要再試
+                    if not _yf_breaker.can_call():
+                        logger.debug(f"yfinance circuit open，停止重試 {ticker}")
+                        break
+                    time.sleep(backoff)
+                    backoff *= 2
+
+        logger.error(f"yfinance {ticker} 重試 {max_retries} 次仍失敗: {last_exception}")
+        return None
 
     # ─────────────────────────────────────────────
     # 格式轉換

@@ -13,7 +13,7 @@ from typing import Any, AsyncGenerator, Optional
 from loguru import logger
 
 from app.core.config.settings import settings
-from app.core.llm.function_defs import FUNCTION_DEFINITIONS, SYSTEM_PROMPT
+from app.core.llm.function_defs import FUNCTION_DEFINITIONS, SYSTEM_PROMPT, SYSTEM_PROMPT_STATIC
 
 # 各 LLM 供應商統一超時（秒）— 從 settings 讀取，可透過 .env 覆蓋
 _LLM_TIMEOUT = settings.llm_timeout
@@ -21,7 +21,7 @@ _LLM_STREAM_TIMEOUT = settings.llm_stream_timeout
 
 
 class TokenUsage:
-    """Token 用量統計"""
+    """Token 用量統計（含 Anthropic prompt caching 細項）"""
 
     def __init__(
         self,
@@ -30,12 +30,16 @@ class TokenUsage:
         total_tokens: int = 0,
         model: str = "",
         provider: str = "",
+        cache_creation_tokens: int = 0,  # 寫入 cache 的 token 數（首次 + TTL 失效後重寫）
+        cache_read_tokens: int = 0,      # 從 cache 讀的 token 數（命中）
     ):
         self.prompt_tokens = prompt_tokens
         self.completion_tokens = completion_tokens
         self.total_tokens = total_tokens
         self.model = model
         self.provider = provider
+        self.cache_creation_tokens = cache_creation_tokens
+        self.cache_read_tokens = cache_read_tokens
 
     def to_dict(self) -> dict:
         cost = estimate_cost(self.provider, self.model, self.prompt_tokens, self.completion_tokens)
@@ -46,6 +50,8 @@ class TokenUsage:
             "model": self.model,
             "provider": self.provider,
             "estimated_cost_usd": cost,
+            "cache_creation_tokens": self.cache_creation_tokens,
+            "cache_read_tokens": self.cache_read_tokens,
         }
 
 
@@ -159,6 +165,37 @@ class BaseLLMAdapter(ABC):
         if chart_state:
             prompt += f"\n\n目前圖表狀態：\n{json.dumps(chart_state, ensure_ascii=False, indent=2)}"
         return prompt
+
+    def _build_system_blocks(
+        self,
+        chart_state: Optional[dict] = None,
+        system_prompt: Optional[str] = None,
+    ) -> tuple[str, str]:
+        """建立 (cacheable_static, dynamic_suffix) 兩段，供 prompt caching 用。
+
+        cacheable_static：純靜態系統 prompt（CORE + 模組），跨請求穩定 → 適合放 cache
+        dynamic_suffix：時間戳 + chart_state，每次都不同 → 必須在 cached 段之後
+
+        若呼叫端傳入動態組裝的 system_prompt（含時間戳），則整體當靜態處理
+        （由呼叫端負責確保穩定性）。否則用全域 SYSTEM_PROMPT_STATIC。
+        """
+        if system_prompt:
+            cacheable = system_prompt
+        else:
+            cacheable = SYSTEM_PROMPT_STATIC
+
+        dynamic_parts = []
+        # 時間戳：放動態段（每分鐘變）
+        from datetime import datetime
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+        dynamic_parts.append(f"\n【目前時間】{now_str}（台北時區 UTC+8）")
+
+        if chart_state:
+            dynamic_parts.append(
+                f"\n\n目前圖表狀態：\n{json.dumps(chart_state, ensure_ascii=False, indent=2)}"
+            )
+
+        return cacheable, "".join(dynamic_parts)
 
     @staticmethod
     def _extract_base64(data_url: str) -> tuple[str, str]:
@@ -567,15 +604,31 @@ class ClaudeAdapter(BaseLLMAdapter):
                         }
                         break
 
+            # Prompt caching：把 system 拆成「靜態（cached）+ 動態」兩 block
+            static_sys, dynamic_sys = self._build_system_blocks(chart_state, system_prompt)
+            system_blocks: list[dict] = [
+                {
+                    "type": "text",
+                    "text": static_sys,
+                    "cache_control": {"type": "ephemeral"},  # 5 分鐘 TTL
+                }
+            ]
+            if dynamic_sys:
+                system_blocks.append({"type": "text", "text": dynamic_sys})
+
             create_kwargs: dict = {
                 "model": self.model,
                 "max_tokens": settings.llm_max_tokens,
-                "system": self._build_system_message(chart_state, system_prompt),
+                "system": system_blocks,
                 "messages": claude_messages,
                 "temperature": settings.llm_temperature,
             }
             if not force_text:
-                create_kwargs["tools"] = self._convert_functions_to_claude()
+                tools = self._convert_functions_to_claude()
+                if tools:
+                    # 在最後一個 tool 加 cache_control，cache 整個 tools 區塊
+                    tools[-1] = {**tools[-1], "cache_control": {"type": "ephemeral"}}
+                create_kwargs["tools"] = tools
 
             response = await asyncio.wait_for(
                 client.messages.create(**create_kwargs),
@@ -594,17 +647,27 @@ class ClaudeAdapter(BaseLLMAdapter):
                         "arguments": block.input,
                     })
 
-            # 提取 token 用量
+            # 提取 token 用量（含 cache 命中細項）
             usage = None
             if hasattr(response, "usage") and response.usage:
+                input_tok = getattr(response.usage, "input_tokens", 0) or 0
+                output_tok = getattr(response.usage, "output_tokens", 0) or 0
+                cache_create = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
+                cache_read = getattr(response.usage, "cache_read_input_tokens", 0) or 0
                 usage = TokenUsage(
-                    prompt_tokens=getattr(response.usage, "input_tokens", 0) or 0,
-                    completion_tokens=getattr(response.usage, "output_tokens", 0) or 0,
-                    total_tokens=(getattr(response.usage, "input_tokens", 0) or 0)
-                        + (getattr(response.usage, "output_tokens", 0) or 0),
+                    prompt_tokens=input_tok,
+                    completion_tokens=output_tok,
+                    total_tokens=input_tok + output_tok,
                     model=self.model,
                     provider="claude",
+                    cache_creation_tokens=cache_create,
+                    cache_read_tokens=cache_read,
                 )
+                if cache_read > 0:
+                    logger.info(
+                        f"Claude cache HIT: cache_read={cache_read}, "
+                        f"cache_create={cache_create}, input={input_tok} tokens"
+                    )
 
             return LLMResponse(message=text, function_calls=function_calls, raw_response=response, usage=usage)
         except Exception as e:
