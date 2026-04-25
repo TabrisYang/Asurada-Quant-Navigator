@@ -1158,6 +1158,139 @@ def _sse_event(event_type: str, data: dict) -> str:
     return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+async def _post_process_chat_message(
+    *,
+    final_text: str,
+    request_message: str,
+    chart_state: Optional[dict],
+    chart_symbol_for_save: Optional[str],
+    conversation_id: str,
+    total_usage,  # TokenUsage | None — 不嚴格型別避免循環 import
+) -> None:
+    """串流結束後的所有 DB 寫入和知識提取，跑在背景不阻塞 SSE。
+
+    ★ 設計理由：原本這段同步跑在 stream_gen 內，會造成 30-300 秒沉默
+       （embedding 計算、predictions 驗證、OHLCV 重抓），導致前端誤判
+       「分析回應超時」。改成 background task 後 SSE 可以立刻 yield done，
+       使用者體驗即時、後處理悄悄完成。
+
+    所有錯誤只 log 不 raise（不影響使用者已收到的回應）。
+    """
+    try:
+        if not final_text.strip():
+            return
+
+        insights = parse_key_insights(final_text)
+        distill_fragments = parse_system_distill(final_text)
+        clean_text = strip_system_distill(strip_predictions(strip_key_insights(final_text)))
+
+        usage_dict_for_save = total_usage.to_dict() if total_usage else None
+        chat_history.save_message(
+            conversation_id=conversation_id,
+            role="assistant",
+            content=clean_text,
+            token_usage=usage_dict_for_save,
+        )
+
+        analysis_cache.store(
+            question=request_message,
+            answer=clean_text,
+            chart_state=chart_state,
+        )
+
+        semantic_cache.store(
+            question=request_message,
+            answer=clean_text,
+            chart_state=chart_state,
+        )
+
+        frag_symbol = extract_symbol_from_text(request_message) or chart_symbol_for_save or ""
+        if insights:
+            stored = fragment_store.store_batch(
+                fragments=insights,
+                symbol=frag_symbol,
+                source_question=request_message,
+            )
+            if stored:
+                logger.info(f"[bg] 自動提取 {stored} 筆知識碎片（{frag_symbol}）")
+
+        if distill_fragments:
+            stored_d = fragment_store.store_batch(
+                fragments=distill_fragments,
+                symbol=frag_symbol,
+                source_question=request_message,
+            )
+            if stored_d:
+                logger.info(f"[bg] 自動提取 {stored_d} 筆蒸餾碎片（{frag_symbol}）")
+
+        # 提取並存儲預測
+        predictions = parse_predictions(final_text)
+        if predictions:
+            pred_symbol = extract_symbol_from_text(request_message) or chart_symbol_for_save or ""
+            pred_tf = (chart_state or {}).get("timeframe", "4h")
+            for pred in predictions:
+                try:
+                    prediction_tracker.store(
+                        symbol=pred_symbol,
+                        timeframe=pred_tf,
+                        prediction=pred,
+                        source_question=request_message,
+                    )
+                except Exception as pe:
+                    logger.warning(f"[bg] 儲存預測失敗: {pe}")
+            logger.info(f"[bg] 自動提取 {len(predictions)} 筆預測（{pred_symbol}）")
+
+        # 追蹤 ML 預測（若存在）
+        ml_pred = (chart_state or {}).get("mlPrediction")
+        if ml_pred and isinstance(ml_pred, dict) and ml_pred.get("probability"):
+            try:
+                _ml_symbol = chart_symbol_for_save or ""
+                _ml_tf = (chart_state or {}).get("timeframe", "4h")
+                _ml_direction = ml_pred.get("direction", "long")
+                _ml_prob = ml_pred.get("probability", 0.5)
+                _ml_entry = (chart_state or {}).get("current_price", 0)
+                if _ml_direction == "long":
+                    _ml_target = _ml_entry * 1.03
+                    _ml_stop = _ml_entry * 0.97
+                else:
+                    _ml_target = _ml_entry * 0.97
+                    _ml_stop = _ml_entry * 1.03
+                _ml_conf = "high" if _ml_prob >= 0.7 else ("medium" if _ml_prob >= 0.5 else "low")
+                ml_pred_data = {
+                    "direction": _ml_direction,
+                    "entry_price": _ml_entry,
+                    "target_price": round(_ml_target, 2),
+                    "stop_price": round(_ml_stop, 2),
+                    "timeframe_hours": 24,
+                    "confidence": _ml_conf,
+                    "regime": ml_pred.get("regime", "unknown"),
+                    "indicators": "ml_model",
+                }
+                _ml_pid = prediction_tracker.store(
+                    symbol=_ml_symbol, timeframe=_ml_tf,
+                    prediction=ml_pred_data, source_question="ml_auto",
+                )
+                prediction_tracker._ensure_db()
+                prediction_tracker._conn.execute(
+                    "UPDATE predictions SET ml_enhanced=1 WHERE id=?", (_ml_pid,)
+                )
+                prediction_tracker._conn.commit()
+                logger.info(f"[bg] ML 預測已追蹤 #{_ml_pid}: {_ml_symbol} {_ml_direction}")
+            except Exception as me:
+                logger.warning(f"[bg] 儲存 ML 預測失敗: {me}")
+
+        # 順便驗證已到期的預測
+        try:
+            val_result = validate_all_active()
+            if val_result.get("validated", 0) > 0:
+                logger.info(f"[bg] 自動驗證 {val_result['validated']} 筆預測")
+        except Exception as ve:
+            logger.warning(f"[bg] 自動驗證預測失敗: {ve}")
+
+    except Exception as save_err:
+        logger.error(f"[bg] post-processing 整體失敗（不影響使用者）: {save_err}")
+
+
 # ─── 同步端點（保留向下相容）────────────────────
 
 @router.post("/", response_model=ChatResponse)
@@ -1592,21 +1725,62 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                         ),
                     })
 
-                    # 第二輪 LLM 呼叫（無超時限制，心跳保持連線）
-                    yield _sse_event("status", {"message": "正在整理分析結果..."})
-                    _r2_task = asyncio.create_task(adapter.chat(
+                    # 第二輪 LLM 呼叫（真串流：邊收 token 邊 yield 給前端）
+                    yield _sse_event("status", {"message": "AI 正在撰寫分析報告..."})
+
+                    _r2_text_buf = ""
+                    _r2_function_calls: list[dict] = []
+                    _r2_usage = None
+                    _r2_stop_reason = "end_turn"
+                    _r2_yielded_until = 0
+                    _r2_marker_seen = False
+                    _r2_streamed = True  # 旗標：表示文字已經邊串流邊 yield 過，後續顯示段不要重複
+
+                    # KEY_INSIGHTS / PREDICTIONS / SYSTEM_DISTILL 標記偵測（不 yield 給使用者）
+                    _MARKER_RE = re.compile(r'\n---(?:KEY_INSIGHTS|PREDICTIONS|SYSTEM_DISTILL)---')
+
+                    async for _evt in adapter.chat_stream_events(
                         round2_messages, chart_state=request.chart_state,
                         system_prompt=_dynamic_prompt,
                         r2_mode=True,
-                    ))
-                    _active_tasks.append(_r2_task)
-                    _hb_sec = 0
-                    while not _r2_task.done():
-                        await asyncio.sleep(3)
-                        _hb_sec += 3
-                        yield _sse_event("status", {"message": f"AI 正在撰寫分析報告... ({_hb_sec}秒)"})
-                    response2 = _r2_task.result()
-                    logger.info(f"第二輪 LLM 完成 ({_hb_sec}s)，文字長度={len(response2.message or '')}")
+                    ):
+                        if _evt.type == "text_delta":
+                            _r2_text_buf += _evt.text
+                            if not _r2_marker_seen:
+                                _m = _MARKER_RE.search(_r2_text_buf, _r2_yielded_until)
+                                if _m:
+                                    # yield 標記之前的文字，然後停止 yield
+                                    if _m.start() > _r2_yielded_until:
+                                        yield _sse_event("token", {"content": _r2_text_buf[_r2_yielded_until:_m.start()]})
+                                    _r2_yielded_until = len(_r2_text_buf)
+                                    _r2_marker_seen = True
+                                else:
+                                    # 保留尾端 30 字（可能正在形成標記）
+                                    _safe = max(_r2_yielded_until, len(_r2_text_buf) - 30)
+                                    if _safe > _r2_yielded_until:
+                                        yield _sse_event("token", {"content": _r2_text_buf[_r2_yielded_until:_safe]})
+                                        _r2_yielded_until = _safe
+                        elif _evt.type == "function_call":
+                            _r2_function_calls.append(_evt.function_call)
+                        elif _evt.type == "usage":
+                            _r2_usage = _evt.usage
+                        elif _evt.type == "stop":
+                            _r2_stop_reason = _evt.stop_reason
+
+                    # Flush 剩餘文字（若沒看過標記）
+                    if not _r2_marker_seen and _r2_yielded_until < len(_r2_text_buf):
+                        yield _sse_event("token", {"content": _r2_text_buf[_r2_yielded_until:]})
+
+                    # 建構 response2 物件相容後續既有邏輯
+                    class _StreamedResponse:
+                        pass
+                    response2 = _StreamedResponse()
+                    response2.message = _r2_text_buf
+                    response2.function_calls = _r2_function_calls
+                    response2.usage = _r2_usage
+                    response2.stop_reason = _r2_stop_reason
+
+                    logger.info(f"第二輪 LLM 完成 (streaming)，文字長度={len(_r2_text_buf)}")
 
                     if response2.usage and total_usage:
                         total_usage.prompt_tokens += response2.usage.prompt_tokens
@@ -1696,21 +1870,50 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                             ),
                         })
 
-                        _r3_task = asyncio.create_task(
-                            adapter.chat(
-                                round3_messages, chart_state=request.chart_state,
-                                force_text=True, system_prompt=_dynamic_prompt,
-                            )
-                        )
-                        _active_tasks.append(_r3_task)
-                        _hb_sec = 0
-                        while not _r3_task.done():
-                            await asyncio.sleep(3)
-                            _hb_sec += 3
-                            yield _sse_event("status", {
-                                "message": f"AI 正在生成分析報告... ({_hb_sec}秒)"
-                            })
-                        response3 = _r3_task.result()
+                        # 第三輪 LLM 呼叫（真串流）
+                        _r3_text_buf = ""
+                        _r3_usage = None
+                        _r3_stop_reason = "end_turn"
+                        _r3_yielded_until = 0
+                        _r3_marker_seen = False
+                        _r2_streamed = True  # 標記第二/三輪文字已即時 yield，避免後段重複
+
+                        async for _evt in adapter.chat_stream_events(
+                            round3_messages, chart_state=request.chart_state,
+                            force_text=True, system_prompt=_dynamic_prompt,
+                        ):
+                            if _evt.type == "text_delta":
+                                _r3_text_buf += _evt.text
+                                if not _r3_marker_seen:
+                                    _m = _MARKER_RE.search(_r3_text_buf, _r3_yielded_until)
+                                    if _m:
+                                        if _m.start() > _r3_yielded_until:
+                                            yield _sse_event("token", {"content": _r3_text_buf[_r3_yielded_until:_m.start()]})
+                                        _r3_yielded_until = len(_r3_text_buf)
+                                        _r3_marker_seen = True
+                                    else:
+                                        _safe = max(_r3_yielded_until, len(_r3_text_buf) - 30)
+                                        if _safe > _r3_yielded_until:
+                                            yield _sse_event("token", {"content": _r3_text_buf[_r3_yielded_until:_safe]})
+                                            _r3_yielded_until = _safe
+                            elif _evt.type == "usage":
+                                _r3_usage = _evt.usage
+                            elif _evt.type == "stop":
+                                _r3_stop_reason = _evt.stop_reason
+                            # function_call 在 force_text=True 下不應該出現，忽略
+
+                        # Flush 剩餘
+                        if not _r3_marker_seen and _r3_yielded_until < len(_r3_text_buf):
+                            yield _sse_event("token", {"content": _r3_text_buf[_r3_yielded_until:]})
+
+                        # 建構 response3 物件兼容後續邏輯
+                        class _StreamedR3:
+                            pass
+                        response3 = _StreamedR3()
+                        response3.message = _r3_text_buf
+                        response3.function_calls = []
+                        response3.usage = _r3_usage
+                        response3.stop_reason = _r3_stop_reason
 
                         if response3.usage and total_usage:
                             total_usage.prompt_tokens += response3.usage.prompt_tokens
@@ -1720,7 +1923,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                             total_usage = response3.usage
 
                         _r2_text = response3.message or ""
-                        logger.info(f"第三輪結果: 文字長度={len(_r2_text)}")
+                        logger.info(f"第三輪結果 (streaming): 文字長度={len(_r2_text)}")
 
                     # ★★ 截斷偵測 + 自動續寫 ★★
                     # 判斷最終回應是否被 token 上限截斷
@@ -1744,33 +1947,45 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                             "role": "user",
                             "content": "你的回覆被截斷了，請從截斷處繼續完成分析。不要重複已說過的內容，直接接續。",
                         })
-                        _cont_task = asyncio.create_task(
-                            adapter.chat(
-                                _cont_messages, chart_state=request.chart_state,
-                                force_text=True, system_prompt=_dynamic_prompt,
-                            )
-                        )
-                        _active_tasks.append(_cont_task)
-                        _hb_sec = 0
-                        while not _cont_task.done():
-                            await asyncio.sleep(3)
-                            _hb_sec += 3
-                            yield _sse_event("status", {"message": f"AI 正在續寫分析... ({_hb_sec}秒)"})
-                        _cont_response = _cont_task.result()
+                        # 續寫呼叫（真串流）
+                        _cont_text_buf = ""
+                        _cont_usage = None
+                        _cont_yielded_until = 0
+                        _cont_marker_seen = False
 
-                        if _cont_response.usage and total_usage:
-                            total_usage.prompt_tokens += _cont_response.usage.prompt_tokens
-                            total_usage.completion_tokens += _cont_response.usage.completion_tokens
-                            total_usage.total_tokens += _cont_response.usage.total_tokens
+                        async for _evt in adapter.chat_stream_events(
+                            _cont_messages, chart_state=request.chart_state,
+                            force_text=True, system_prompt=_dynamic_prompt,
+                        ):
+                            if _evt.type == "text_delta":
+                                _cont_text_buf += _evt.text
+                                if not _cont_marker_seen:
+                                    _m = _MARKER_RE.search(_cont_text_buf, _cont_yielded_until)
+                                    if _m:
+                                        if _m.start() > _cont_yielded_until:
+                                            yield _sse_event("token", {"content": _cont_text_buf[_cont_yielded_until:_m.start()]})
+                                        _cont_yielded_until = len(_cont_text_buf)
+                                        _cont_marker_seen = True
+                                    else:
+                                        _safe = max(_cont_yielded_until, len(_cont_text_buf) - 30)
+                                        if _safe > _cont_yielded_until:
+                                            yield _sse_event("token", {"content": _cont_text_buf[_cont_yielded_until:_safe]})
+                                            _cont_yielded_until = _safe
+                            elif _evt.type == "usage":
+                                _cont_usage = _evt.usage
 
-                        _cont_text = _cont_response.message or ""
+                        if not _cont_marker_seen and _cont_yielded_until < len(_cont_text_buf):
+                            yield _sse_event("token", {"content": _cont_text_buf[_cont_yielded_until:]})
+
+                        if _cont_usage and total_usage:
+                            total_usage.prompt_tokens += _cont_usage.prompt_tokens
+                            total_usage.completion_tokens += _cont_usage.completion_tokens
+                            total_usage.total_tokens += _cont_usage.total_tokens
+
+                        _cont_text = _cont_text_buf
                         if _cont_text.strip():
-                            logger.info(f"續寫完成: 文字長度={len(_cont_text)}")
+                            logger.info(f"續寫完成 (streaming): 文字長度={len(_cont_text)}")
                             _r2_text += "\n" + _cont_text  # 合併完整文字
-                            _cont_display = strip_system_distill(strip_predictions(strip_key_insights(_cont_text)))
-                            for chunk in _split_text_for_streaming(_cont_display):
-                                yield _sse_event("token", {"content": chunk})
-                                await asyncio.sleep(0.02)
 
                         if len(final_text) < _MAX_FINAL_TEXT:
                             final_text += _r2_text[:_MAX_FINAL_TEXT - len(final_text)]
@@ -1802,13 +2017,15 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                             "標示出", "繪畫", "畫上", "標出了",
                         )
                         _text_claims_draw = any(kw in display_msg2 for kw in _draw_keywords)
+                        _draw_warning_suffix = ""
                         if _text_claims_draw and not _has_draw_calls:
                             logger.warning("LLM 文字聲稱繪圖但未產生 annotate_chart/draw_pattern function call")
-                            display_msg2 += (
+                            _draw_warning_suffix = (
                                 "\n\n⚠️ **注意**：AI 描述了繪圖操作，但未成功產生繪圖指令。"
                                 "如果圖表上沒有看到標記，請重新描述您希望畫的內容，"
                                 "例如：「請在圖表上畫出趨勢線」。"
                             )
+                            display_msg2 += _draw_warning_suffix
 
                         _all_text = (response.message or "") + _r2_text
                         _r1_indicator_ids = {
@@ -1824,9 +2041,15 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                             yield _sse_event("chart", {"chart_updates": {"indicator_actions": _auto_indicators}})
                             yield _sse_event("status", {"message": f"已自動添加 {len(_auto_indicators)} 個分析指標"})
 
-                        for chunk in _split_text_for_streaming(display_msg2):
-                            yield _sse_event("token", {"content": chunk})
-                            await asyncio.sleep(0.02)
+                        # 真串流模式：主文字已經邊收邊 yield，這裡只 yield 後續 append 的警告
+                        if locals().get("_r2_streamed"):
+                            if _draw_warning_suffix:
+                                yield _sse_event("token", {"content": _draw_warning_suffix})
+                        else:
+                            # 假串流 fallback：把整段 display_msg2 切碎慢慢 yield（舊行為）
+                            for chunk in _split_text_for_streaming(display_msg2):
+                                yield _sse_event("token", {"content": chunk})
+                                await asyncio.sleep(0.02)
                     else:
                         logger.error("所有輪次都未產生文字回應")
                         yield _sse_event("token", {
@@ -1948,122 +2171,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                     except (asyncio.CancelledError, Exception):
                         pass
 
-        # 5. 保存助手回應到歷史 + 快取 + 知識碎片（全部包在 try 內防止阻斷 done）
-        try:
-            if final_text.strip():
-                insights = parse_key_insights(final_text)
-                distill_fragments = parse_system_distill(final_text)
-                clean_text = strip_system_distill(strip_predictions(strip_key_insights(final_text)))
-
-                usage_dict_for_save = total_usage.to_dict() if total_usage else None
-                chat_history.save_message(
-                    conversation_id=conversation_id,
-                    role="assistant",
-                    content=clean_text,
-                    token_usage=usage_dict_for_save,
-                )
-
-                analysis_cache.store(
-                    question=request.message,
-                    answer=clean_text,
-                    chart_state=request.chart_state,
-                )
-
-                semantic_cache.store(
-                    question=request.message,
-                    answer=clean_text,
-                    chart_state=request.chart_state,
-                )
-
-                frag_symbol = extract_symbol_from_text(request.message) or chart_symbol_for_save or ""
-                if insights:
-                    stored = fragment_store.store_batch(
-                        fragments=insights,
-                        symbol=frag_symbol,
-                        source_question=request.message,
-                    )
-                    if stored:
-                        logger.info(f"自動提取 {stored} 筆知識碎片（{frag_symbol}）")
-
-                # ★ SYSTEM_DISTILL 碎片也存入知識庫
-                if distill_fragments:
-                    stored_d = fragment_store.store_batch(
-                        fragments=distill_fragments,
-                        symbol=frag_symbol,
-                        source_question=request.message,
-                    )
-                    if stored_d:
-                        logger.info(f"自動提取 {stored_d} 筆蒸餾碎片（{frag_symbol}）")
-
-                # ★ 提取並存儲預測
-                predictions = parse_predictions(final_text)
-                if predictions:
-                    pred_symbol = extract_symbol_from_text(request.message) or chart_symbol_for_save or ""
-                    pred_tf = (request.chart_state or {}).get("timeframe", "4h")
-                    for pred in predictions:
-                        try:
-                            prediction_tracker.store(
-                                symbol=pred_symbol,
-                                timeframe=pred_tf,
-                                prediction=pred,
-                                source_question=request.message,
-                            )
-                        except Exception as pe:
-                            logger.warning(f"儲存預測失敗: {pe}")
-                    logger.info(f"自動提取 {len(predictions)} 筆預測（{pred_symbol}）")
-
-                # ★ 追蹤 ML 預測（若存在）
-                ml_pred = (request.chart_state or {}).get("mlPrediction")
-                if ml_pred and isinstance(ml_pred, dict) and ml_pred.get("probability"):
-                    try:
-                        _ml_symbol = chart_symbol_for_save or ""
-                        _ml_tf = (request.chart_state or {}).get("timeframe", "4h")
-                        _ml_direction = ml_pred.get("direction", "long")
-                        _ml_prob = ml_pred.get("probability", 0.5)
-                        _ml_entry = (request.chart_state or {}).get("current_price", 0)
-                        # 根據方向估算目標/止損（±3%）
-                        if _ml_direction == "long":
-                            _ml_target = _ml_entry * 1.03
-                            _ml_stop = _ml_entry * 0.97
-                        else:
-                            _ml_target = _ml_entry * 0.97
-                            _ml_stop = _ml_entry * 1.03
-                        _ml_conf = "high" if _ml_prob >= 0.7 else ("medium" if _ml_prob >= 0.5 else "low")
-                        ml_pred_data = {
-                            "direction": _ml_direction,
-                            "entry_price": _ml_entry,
-                            "target_price": round(_ml_target, 2),
-                            "stop_price": round(_ml_stop, 2),
-                            "timeframe_hours": 24,
-                            "confidence": _ml_conf,
-                            "regime": ml_pred.get("regime", "unknown"),
-                            "indicators": "ml_model",
-                        }
-                        _ml_pid = prediction_tracker.store(
-                            symbol=_ml_symbol, timeframe=_ml_tf,
-                            prediction=ml_pred_data, source_question="ml_auto",
-                        )
-                        prediction_tracker._ensure_db()
-                        prediction_tracker._conn.execute(
-                            "UPDATE predictions SET ml_enhanced=1 WHERE id=?", (_ml_pid,)
-                        )
-                        prediction_tracker._conn.commit()
-                        logger.info(f"ML 預測已追蹤 #{_ml_pid}: {_ml_symbol} {_ml_direction}")
-                    except Exception as me:
-                        logger.warning(f"儲存 ML 預測失敗: {me}")
-
-                # ★ 順便驗證已到期的預測
-                try:
-                    val_result = validate_all_active()
-                    if val_result.get("validated", 0) > 0:
-                        logger.info(f"自動驗證 {val_result['validated']} 筆預測")
-                except Exception as ve:
-                    logger.warning(f"自動驗證預測失敗: {ve}")
-
-        except Exception as save_err:
-            logger.error(f"保存歷史/快取時發生錯誤（不影響回應）: {save_err}")
-
-        # 6. 完成（★ 保證 done 事件一定發送，即使前面全部出錯）
+        # 5. 立刻發 done event，post-processing 改在背景跑（避免 SSE 沉默觸發前端 timeout）
         done_data: dict = {"conversation_id": conversation_id}
         try:
             if chat_history._conn:
@@ -2074,6 +2182,16 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
         except Exception:
             pass
         yield _sse_event("done", done_data)
+
+        # 6. Post-processing 在背景任務跑（detach from generator，SSE 連線關閉不會被取消）
+        asyncio.create_task(_post_process_chat_message(
+            final_text=final_text,
+            request_message=request.message,
+            chart_state=request.chart_state,
+            chart_symbol_for_save=chart_symbol_for_save,
+            conversation_id=conversation_id,
+            total_usage=total_usage,
+        ))
 
     return StreamingResponse(
         stream_gen(),

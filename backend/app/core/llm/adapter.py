@@ -120,6 +120,31 @@ class LLMResponse:
         self.stop_reason = stop_reason  # "end_turn" / "length" / "tool_use"
 
 
+class StreamEvent:
+    """LLM 真串流事件統一格式（chat_stream_events yield 的物件）。
+
+    type 可能值：
+      - "text_delta"    : 文字增量（即時逐字 yield）
+      - "function_call" : 完整的 function call（args 已 parse 完整）
+      - "usage"         : token 用量（通常在串流結尾出現）
+      - "stop"          : 結束信號 + stop_reason
+    """
+
+    def __init__(
+        self,
+        type: str,
+        text: str = "",
+        function_call: Optional[dict] = None,
+        usage: Optional[TokenUsage] = None,
+        stop_reason: str = "",
+    ):
+        self.type = type
+        self.text = text
+        self.function_call = function_call
+        self.usage = usage
+        self.stop_reason = stop_reason
+
+
 class BaseLLMAdapter(ABC):
     """LLM 適配器基礎類"""
 
@@ -131,6 +156,7 @@ class BaseLLMAdapter(ABC):
         force_text: bool = False,
         system_prompt: Optional[str] = None,
         chart_screenshot: Optional[str] = None,
+        r2_mode: bool = False,
     ) -> LLMResponse:
         """發送對話請求
 
@@ -138,6 +164,7 @@ class BaseLLMAdapter(ABC):
             force_text: 若為 True，不傳送 tools 給 LLM，強制只產生文字回應。
             system_prompt: 動態組裝的 SYSTEM_PROMPT，傳入後取代預設完整版。
             chart_screenshot: base64 JPEG 圖表截圖（data:image/jpeg;base64,...）。
+            r2_mode: 第二輪模式（給 ClaudeSubscriptionAdapter 用，限制工具集）。
         """
         pass
 
@@ -148,12 +175,42 @@ class BaseLLMAdapter(ABC):
         chart_state: Optional[dict] = None,
         system_prompt: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
-        """串流對話
+        """串流對話（舊介面，僅 yield 文字 chunk）
 
         Args:
             system_prompt: 動態組裝的 SYSTEM_PROMPT，傳入後取代預設完整版。
         """
         pass
+
+    async def chat_stream_events(
+        self,
+        messages: list[dict],
+        chart_state: Optional[dict] = None,
+        force_text: bool = False,
+        system_prompt: Optional[str] = None,
+        chart_screenshot: Optional[str] = None,
+        r2_mode: bool = False,
+    ) -> AsyncGenerator["StreamEvent", None]:
+        """真串流（新介面）— yield 結構化 StreamEvent。
+
+        預設實作：呼叫 chat() 等完整回應後一次性 yield 所有事件（仍是「假串流」）。
+        各 adapter 應 override 為真串流，邊收到 token 邊 yield 給呼叫端。
+        """
+        response = await self.chat(
+            messages,
+            chart_state=chart_state,
+            force_text=force_text,
+            system_prompt=system_prompt,
+            chart_screenshot=chart_screenshot,
+            r2_mode=r2_mode,
+        )
+        if response.message:
+            yield StreamEvent(type="text_delta", text=response.message)
+        for fc in response.function_calls:
+            yield StreamEvent(type="function_call", function_call=fc)
+        if response.usage:
+            yield StreamEvent(type="usage", usage=response.usage)
+        yield StreamEvent(type="stop", stop_reason=response.stop_reason)
 
     def _build_system_message(
         self,
@@ -327,6 +384,114 @@ class OpenAIAdapter(BaseLLMAdapter):
                     yield chunk.choices[0].delta.content
         except Exception as e:
             yield f"[錯誤] {str(e)}"
+
+    async def chat_stream_events(
+        self,
+        messages: list[dict],
+        chart_state: Optional[dict] = None,
+        force_text: bool = False,
+        system_prompt: Optional[str] = None,
+        chart_screenshot: Optional[str] = None,
+        r2_mode: bool = False,
+    ):
+        """OpenAI 真串流：用 chat.completions.create(stream=True)，邊收 chunk 邊 yield。
+
+        Tool calls 在 streaming 中是 delta 形式（name 在第一個 chunk，
+        arguments JSON 慢慢拼），需要按 index 累積。
+        """
+        try:
+            from openai import AsyncOpenAI
+            client = AsyncOpenAI(api_key=self.api_key, timeout=_LLM_TIMEOUT)
+
+            sys_msg = {"role": "system", "content": self._build_system_message(chart_state, system_prompt)}
+            all_messages = [sys_msg] + messages
+
+            # 注入圖表截圖到最後一個 user 訊息
+            if chart_screenshot:
+                for i in range(len(all_messages) - 1, -1, -1):
+                    if all_messages[i]["role"] == "user":
+                        text_content = all_messages[i]["content"]
+                        all_messages[i] = {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": f"[目前圖表截圖如下]\n{text_content}"},
+                                {"type": "image_url", "image_url": {"url": chart_screenshot, "detail": "high"}},
+                            ],
+                        }
+                        break
+
+            create_kwargs: dict = {
+                "model": self.model,
+                "messages": all_messages,
+                "temperature": settings.llm_temperature,
+                "max_tokens": settings.llm_max_tokens,
+                "stream": True,
+                "stream_options": {"include_usage": True},
+            }
+            if not force_text:
+                create_kwargs["tools"] = FUNCTION_DEFINITIONS
+                create_kwargs["tool_choice"] = "auto"
+
+            stream = await client.chat.completions.create(**create_kwargs)
+
+            # 累積 tool_calls（按 index）
+            accumulated: dict[int, dict] = {}
+            stop_reason = "end_turn"
+
+            async for chunk in stream:
+                # usage 在最後一個 chunk（無 choices）
+                if hasattr(chunk, "usage") and chunk.usage:
+                    yield StreamEvent(type="usage", usage=TokenUsage(
+                        prompt_tokens=chunk.usage.prompt_tokens or 0,
+                        completion_tokens=chunk.usage.completion_tokens or 0,
+                        total_tokens=chunk.usage.total_tokens or 0,
+                        model=self.model,
+                        provider="openai",
+                    ))
+                    continue
+
+                if not chunk.choices:
+                    continue
+
+                choice = chunk.choices[0]
+                delta = choice.delta
+
+                if getattr(delta, "content", None):
+                    yield StreamEvent(type="text_delta", text=delta.content)
+
+                if getattr(delta, "tool_calls", None):
+                    for tc in delta.tool_calls:
+                        idx = tc.index
+                        if idx not in accumulated:
+                            accumulated[idx] = {"name": "", "arguments": ""}
+                        if tc.function:
+                            if tc.function.name:
+                                accumulated[idx]["name"] = tc.function.name
+                            if tc.function.arguments:
+                                accumulated[idx]["arguments"] += tc.function.arguments
+
+                if choice.finish_reason:
+                    stop_reason = choice.finish_reason
+
+            # Yield 累積完成的 function calls
+            for tc in accumulated.values():
+                if not tc["name"]:
+                    continue
+                try:
+                    args = json.loads(tc["arguments"]) if tc["arguments"] else {}
+                except json.JSONDecodeError:
+                    args = {}
+                yield StreamEvent(type="function_call", function_call={
+                    "name": tc["name"],
+                    "arguments": args,
+                })
+
+            yield StreamEvent(type="stop", stop_reason=stop_reason)
+
+        except Exception as e:
+            logger.error(f"OpenAI 串流失敗: {e}")
+            yield StreamEvent(type="text_delta", text=f"\n\n[OpenAI 串流錯誤] {str(e)}")
+            yield StreamEvent(type="stop", stop_reason="error")
 
 
 class GeminiAdapter(BaseLLMAdapter):
@@ -552,6 +717,117 @@ class GeminiAdapter(BaseLLMAdapter):
             else:
                 yield f"[錯誤] {str(e)}"
 
+    async def chat_stream_events(
+        self,
+        messages: list[dict],
+        chart_state: Optional[dict] = None,
+        force_text: bool = False,
+        system_prompt: Optional[str] = None,
+        chart_screenshot: Optional[str] = None,
+        r2_mode: bool = False,
+    ):
+        """Gemini 真串流：用 generate_content_stream 邊收 chunk 邊 yield。
+
+        Note: Gemini Python SDK 的 stream 是 sync iterator，用 asyncio.to_thread 包裝。
+        function_calls 通常出現在最後一個 chunk 或某幾個 chunk。
+        """
+        import base64
+        from google import genai
+        from google.genai import types
+
+        config_kwargs: dict = {
+            "system_instruction": self._build_system_message(chart_state, system_prompt),
+            "temperature": settings.llm_temperature,
+            "max_output_tokens": settings.llm_max_tokens,
+        }
+        if not force_text:
+            tools = types.Tool(function_declarations=self._get_function_declarations())
+            config_kwargs["tools"] = [tools]
+        config = types.GenerateContentConfig(**config_kwargs)
+
+        gemini_contents = []
+        for msg in messages:
+            role = "user" if msg["role"] == "user" else "model"
+            gemini_contents.append(
+                types.Content(role=role, parts=[types.Part.from_text(text=msg["content"])])
+            )
+
+        # 注入圖表截圖
+        if chart_screenshot:
+            b64_data, media_type = self._extract_base64(chart_screenshot)
+            image_part = types.Part.from_bytes(data=base64.b64decode(b64_data), mime_type=media_type)
+            for i in range(len(gemini_contents) - 1, -1, -1):
+                if gemini_contents[i].role == "user":
+                    gemini_contents[i].parts.insert(0, types.Part.from_text(text="[目前圖表截圖如下]"))
+                    gemini_contents[i].parts.append(image_part)
+                    break
+
+        try:
+            client = genai.Client(api_key=self.api_key)
+            stream = await asyncio.to_thread(
+                client.models.generate_content_stream,
+                model=self.model,
+                contents=gemini_contents,
+                config=config,
+            )
+
+            collected_function_calls: list[dict] = []
+            last_usage_meta = None
+            stop_reason = "end_turn"
+
+            while True:
+                chunk = await asyncio.to_thread(next, stream, None)
+                if chunk is None:
+                    break
+
+                # 文字內容（可能在 candidates[0].content.parts[*].text）
+                if chunk.candidates:
+                    cand = chunk.candidates[0]
+                    content = getattr(cand, "content", None)
+                    parts = getattr(content, "parts", None) if content else None
+                    if parts:
+                        for part in parts:
+                            if hasattr(part, "function_call") and part.function_call:
+                                fc = part.function_call
+                                collected_function_calls.append({
+                                    "name": fc.name,
+                                    "arguments": dict(fc.args) if fc.args else {},
+                                })
+                            elif hasattr(part, "text") and part.text:
+                                yield StreamEvent(type="text_delta", text=part.text)
+                    fr = getattr(cand, "finish_reason", None)
+                    if fr:
+                        stop_reason = str(fr).lower()
+
+                # 累積最新 usage_metadata
+                if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
+                    last_usage_meta = chunk.usage_metadata
+
+            # Yield function calls
+            for fc in collected_function_calls:
+                yield StreamEvent(type="function_call", function_call=fc)
+
+            # Yield usage
+            if last_usage_meta:
+                yield StreamEvent(type="usage", usage=TokenUsage(
+                    prompt_tokens=getattr(last_usage_meta, "prompt_token_count", 0) or 0,
+                    completion_tokens=getattr(last_usage_meta, "candidates_token_count", 0) or 0,
+                    total_tokens=getattr(last_usage_meta, "total_token_count", 0) or 0,
+                    model=self.model,
+                    provider="gemini",
+                ))
+
+            yield StreamEvent(type="stop", stop_reason=stop_reason)
+
+        except Exception as e:
+            if self._is_quota_exhausted(e):
+                retry_delay = self._parse_retry_delay(e)
+                yield StreamEvent(type="text_delta", text=self._friendly_quota_message(self.model, retry_delay))
+            else:
+                logger.error(f"Gemini 串流失敗: {e}")
+                yield StreamEvent(type="text_delta", text=f"\n\n[Gemini 串流錯誤] {str(e)}")
+            yield StreamEvent(type="stop", stop_reason="error")
+
 
 class ClaudeAdapter(BaseLLMAdapter):
     """Anthropic Claude 適配器"""
@@ -677,6 +953,127 @@ class ClaudeAdapter(BaseLLMAdapter):
     async def chat_stream(self, messages: list[dict], chart_state: Optional[dict] = None, system_prompt: Optional[str] = None):
         response = await self.chat(messages, chart_state, system_prompt=system_prompt)
         yield response.message
+
+    async def chat_stream_events(
+        self,
+        messages: list[dict],
+        chart_state: Optional[dict] = None,
+        force_text: bool = False,
+        system_prompt: Optional[str] = None,
+        chart_screenshot: Optional[str] = None,
+        r2_mode: bool = False,
+    ):
+        """Anthropic API 真串流：使用 messages.stream 邊收 token 邊 yield。"""
+        try:
+            from anthropic import AsyncAnthropic
+            client = AsyncAnthropic(api_key=self.api_key, timeout=_LLM_TIMEOUT)
+
+            claude_messages = []
+            for msg in messages:
+                if msg["role"] in ("user", "assistant"):
+                    claude_messages.append(msg)
+
+            # 注入圖表截圖到最後一個 user 訊息（Vision API）
+            if chart_screenshot:
+                b64_data, media_type = self._extract_base64(chart_screenshot)
+                for i in range(len(claude_messages) - 1, -1, -1):
+                    if claude_messages[i]["role"] == "user":
+                        text_content = claude_messages[i]["content"]
+                        claude_messages[i] = {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": f"[目前圖表截圖如下]\n{text_content}"},
+                                {"type": "image", "source": {
+                                    "type": "base64", "media_type": media_type, "data": b64_data,
+                                }},
+                            ],
+                        }
+                        break
+
+            # Prompt caching：靜態 + 動態 兩 block
+            static_sys, dynamic_sys = self._build_system_blocks(chart_state, system_prompt)
+            system_blocks: list[dict] = [
+                {"type": "text", "text": static_sys, "cache_control": {"type": "ephemeral"}}
+            ]
+            if dynamic_sys:
+                system_blocks.append({"type": "text", "text": dynamic_sys})
+
+            create_kwargs: dict = {
+                "model": self.model,
+                "max_tokens": settings.llm_max_tokens,
+                "system": system_blocks,
+                "messages": claude_messages,
+                "temperature": settings.llm_temperature,
+            }
+            if not force_text:
+                tools = self._convert_functions_to_claude()
+                if tools:
+                    tools[-1] = {**tools[-1], "cache_control": {"type": "ephemeral"}}
+                create_kwargs["tools"] = tools
+
+            # 真串流：邊收事件邊 yield
+            current_tool: Optional[dict] = None
+            current_tool_args = ""
+            async with client.messages.stream(**create_kwargs) as stream:
+                async for event in stream:
+                    etype = getattr(event, "type", "")
+                    if etype == "content_block_start":
+                        block = getattr(event, "content_block", None)
+                        if block and getattr(block, "type", "") == "tool_use":
+                            current_tool = {"name": block.name, "id": getattr(block, "id", "")}
+                            current_tool_args = ""
+                    elif etype == "content_block_delta":
+                        delta = getattr(event, "delta", None)
+                        dtype = getattr(delta, "type", "")
+                        if dtype == "text_delta":
+                            yield StreamEvent(type="text_delta", text=getattr(delta, "text", ""))
+                        elif dtype == "input_json_delta" and current_tool is not None:
+                            current_tool_args += getattr(delta, "partial_json", "")
+                    elif etype == "content_block_stop":
+                        if current_tool is not None:
+                            try:
+                                args = json.loads(current_tool_args) if current_tool_args else {}
+                            except json.JSONDecodeError:
+                                args = {}
+                            yield StreamEvent(type="function_call", function_call={
+                                "name": current_tool["name"],
+                                "arguments": args,
+                            })
+                            current_tool = None
+                            current_tool_args = ""
+
+                # 結束後拿 final message 取 usage + stop_reason
+                final_message = await stream.get_final_message()
+
+            # 提取 usage
+            if hasattr(final_message, "usage") and final_message.usage:
+                input_tok = getattr(final_message.usage, "input_tokens", 0) or 0
+                output_tok = getattr(final_message.usage, "output_tokens", 0) or 0
+                cache_create = getattr(final_message.usage, "cache_creation_input_tokens", 0) or 0
+                cache_read = getattr(final_message.usage, "cache_read_input_tokens", 0) or 0
+                usage = TokenUsage(
+                    prompt_tokens=input_tok,
+                    completion_tokens=output_tok,
+                    total_tokens=input_tok + output_tok,
+                    model=self.model,
+                    provider="claude",
+                    cache_creation_tokens=cache_create,
+                    cache_read_tokens=cache_read,
+                )
+                if cache_read > 0:
+                    logger.info(
+                        f"Claude cache HIT (stream): cache_read={cache_read}, "
+                        f"cache_create={cache_create}, input={input_tok}"
+                    )
+                yield StreamEvent(type="usage", usage=usage)
+
+            stop_reason = getattr(final_message, "stop_reason", "end_turn") or "end_turn"
+            yield StreamEvent(type="stop", stop_reason=stop_reason)
+
+        except Exception as e:
+            logger.error(f"Claude 串流失敗: {e}")
+            yield StreamEvent(type="text_delta", text=f"\n\n[Claude 串流錯誤] {str(e)}")
+            yield StreamEvent(type="stop", stop_reason="error")
 
 
 class ClaudeSubscriptionAdapter(BaseLLMAdapter):
@@ -997,6 +1394,198 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
                         proc.kill()
                         await proc.wait()
                     logger.info("Claude CLI streaming 子進程已終止")
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+            if sys_prompt_file:
+                try:
+                    os.unlink(sys_prompt_file)
+                except OSError:
+                    pass
+
+    async def chat_stream_events(
+        self,
+        messages: list[dict],
+        chart_state: Optional[dict] = None,
+        force_text: bool = False,
+        system_prompt: Optional[str] = None,
+        chart_screenshot: Optional[str] = None,
+        r2_mode: bool = False,
+    ):
+        """訂閱版 Claude CLI 真串流：邊讀 stdout 邊 yield，並處理 <tool_call> XML。
+
+        策略：
+        - 累積完整 text buffer
+        - 每次新 delta 進來時，先掃描已累積的 buffer 找完整 <tool_call>
+        - 只 yield「不含 tool_call XML」的安全文字（保留尾端可能正在形成 tag 的部分）
+        - 串流結束後 flush 剩餘 + yield usage event
+        """
+        import os
+        import tempfile
+
+        TOOL_OPEN = "<tool_call>"
+        TOOL_CLOSE_RE = re.compile(r"<tool_call>\s*(\{[\s\S]*?\})\s*</tool_call>")
+
+        proc = None
+        sys_prompt_file = None
+        text_buffer = ""
+        yielded_until = 0  # text_buffer[:yielded_until] 已 yield 過或屬於 tool_call
+        usage: Optional[TokenUsage] = None
+
+        try:
+            sys_prompt = self._build_system_message(
+                chart_state, system_prompt, include_tools=not force_text, r2_mode=r2_mode,
+            )
+            user_prompt = self._build_user_prompt(messages)
+
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+                f.write(sys_prompt)
+                sys_prompt_file = f.name
+
+            proc = await asyncio.create_subprocess_exec(
+                "claude", "-p",
+                "--output-format", "stream-json",
+                "--verbose",
+                "--include-partial-messages",
+                "--model", self.model,
+                "--system-prompt-file", sys_prompt_file,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                limit=1024 * 1024,
+            )
+
+            proc.stdin.write(user_prompt.encode("utf-8"))
+            await proc.stdin.drain()
+            proc.stdin.close()
+
+            _line_timeout = 60
+
+            while True:
+                try:
+                    line = await asyncio.wait_for(
+                        proc.stdout.readline(), timeout=_line_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("Claude CLI stream 逐行讀取超時（60s 無新輸出）")
+                    break
+                if not line:
+                    break
+
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                evt_type = data.get("type")
+
+                if evt_type == "stream_event":
+                    event = data.get("event", {})
+                    if event.get("type") == "content_block_delta":
+                        delta = event.get("delta", {})
+                        if delta.get("type") == "text_delta":
+                            text_buffer += delta.get("text", "")
+
+                            # 嘗試提取完整 tool_call
+                            while True:
+                                match = TOOL_CLOSE_RE.search(text_buffer, yielded_until)
+                                if not match:
+                                    break
+                                # yield tool_call 之前的安全文字
+                                if match.start() > yielded_until:
+                                    yield StreamEvent(
+                                        type="text_delta",
+                                        text=text_buffer[yielded_until:match.start()],
+                                    )
+                                # 解析並 yield function_call
+                                try:
+                                    obj = json.loads(match.group(1))
+                                    fc = {
+                                        "name": obj.get("name", ""),
+                                        "arguments": obj.get("arguments", {}),
+                                    }
+                                    if fc["name"]:
+                                        yield StreamEvent(type="function_call", function_call=fc)
+                                except json.JSONDecodeError:
+                                    pass
+                                yielded_until = match.end()
+
+                            # yield 安全文字（保留可能正在形成 <tool_call> 的尾端）
+                            partial_open = text_buffer.rfind(TOOL_OPEN, yielded_until)
+                            safe_until = (
+                                partial_open if partial_open >= 0 else len(text_buffer)
+                            )
+                            # 若沒看到 <tool_call> 開頭，但結尾可能是 "<tool" 之類的部分匹配 → 也要保留
+                            if partial_open < 0:
+                                tail = text_buffer[max(yielded_until, len(text_buffer) - 11):]
+                                # 結尾若可能是 <tool_call> 的部分前綴，hold 那段
+                                for i in range(len(tail), 0, -1):
+                                    if TOOL_OPEN.startswith(tail[-i:]):
+                                        safe_until = len(text_buffer) - i
+                                        break
+
+                            if safe_until > yielded_until:
+                                yield StreamEvent(
+                                    type="text_delta",
+                                    text=text_buffer[yielded_until:safe_until],
+                                )
+                                yielded_until = safe_until
+
+                elif evt_type == "result":
+                    usage_data = data.get("usage", {})
+                    usage = self._build_usage(usage_data, self.model)
+
+            await proc.wait()
+
+            # Flush 剩餘 buffer（嘗試最後一次 tool_call 提取）
+            while True:
+                match = TOOL_CLOSE_RE.search(text_buffer, yielded_until)
+                if not match:
+                    break
+                if match.start() > yielded_until:
+                    yield StreamEvent(
+                        type="text_delta",
+                        text=text_buffer[yielded_until:match.start()],
+                    )
+                try:
+                    obj = json.loads(match.group(1))
+                    fc = {"name": obj.get("name", ""), "arguments": obj.get("arguments", {})}
+                    if fc["name"]:
+                        yield StreamEvent(type="function_call", function_call=fc)
+                except json.JSONDecodeError:
+                    pass
+                yielded_until = match.end()
+
+            # 剩餘文字：若是 unclosed tool_call 就丟掉，否則 yield
+            remaining = text_buffer[yielded_until:]
+            if remaining:
+                if TOOL_OPEN in remaining and "</tool_call>" not in remaining:
+                    pass  # 不完整的 tool_call，丟棄
+                else:
+                    yield StreamEvent(type="text_delta", text=remaining)
+
+            # yield usage + stop
+            if usage:
+                yield StreamEvent(type="usage", usage=usage)
+            yield StreamEvent(type="stop", stop_reason="end_turn")
+
+        except (asyncio.CancelledError, GeneratorExit):
+            pass
+        except Exception as e:
+            logger.error(f"Claude CLI streaming events 失敗: {e}")
+            yield StreamEvent(type="text_delta", text=f"\n\n[Claude 訂閱版串流錯誤] {str(e)}")
+            yield StreamEvent(type="stop", stop_reason="error")
+        finally:
+            if proc and proc.returncode is None:
+                try:
+                    proc.terminate()
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=5)
+                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                        proc.kill()
+                        await proc.wait()
                 except Exception:
                     try:
                         proc.kill()

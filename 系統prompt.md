@@ -915,6 +915,14 @@ GET    /api/health                   # 系統健康狀態
 82. ✅ Anthropic Prompt Caching：system prompt 拆成「靜態（CORE + 模組，~11000 字 / ~2700 tokens）+ 動態（時間戳、chart_state）」兩 block，靜態段加 `cache_control: ephemeral` 5 分鐘 TTL；tools 區塊也快取（21 個 function 定義）；`TokenUsage` 加 `cache_creation_tokens` / `cache_read_tokens` 欄位追蹤 cache hit；OpenAI 自動快取、Gemini implicit cache、Ollama 不適用
 83. ✅ 掃描資料區間顯示：掃描器面板新增「📅 資料區間：YYYY-MM-DD ~ YYYY-MM-DD（N 天，判斷最新一根 K 線的壓縮程度）」即時提示，隨「抓取歷史天數」設定變動而即時更新；掃描開始時鎖定區間（避免掃描中改參數導致顯示混亂），掃描完成摘要也帶出實際使用的區間
 84. ✅ 手動備份快捷腳本（`阿斯拉量化系統-手動備份.command`）：雙擊立即執行 `backup_databases.py`，補強 launchd 自動排程「Mac 關機時不會跑」的盲點，適用「重大操作前」「累積重要對話後」「Mac 連續幾天沒開」等情境
+85. ✅ ML 預測有效性診斷工具（`backend/scripts/audit_ml_predictions.py`）：查 `predictions.db` ML 標記分布 + 命中率對照 + ml.db 訓練狀態。實測發現 236 筆預測 `ml_enhanced=1` 為 0、64% 整體命中率（126 hit_target / 197 已驗證）— ML pipeline 從未真正接通到 chat 介面
+86. ✅ SSE 120s 超時誤報修復（chat.py 後處理改背景任務）：原本 stream 完後 line 1951-2065 同步跑 30-300 秒 post-processing（embedding × N、predictions validation）導致沉默期間前端誤判超時。抽出 `_post_process_chat_message()` 改 `asyncio.create_task` detach 在背景，先 yield done 給前端；前端 `STREAM_TIMEOUT_MS` 120s → 180s 雙重保險
+87. ✅ LLM 真串流統一介面（adapter.py）：新增 `StreamEvent` dataclass（type=text_delta/function_call/usage/stop）+ `BaseLLMAdapter.chat_stream_events()`（含預設 fallback 實作呼叫 chat() 後一次性 yield）。四個 adapter 全部 override 為真串流：
+    - **ClaudeAdapter（Anthropic API）**：用 `client.messages.stream()`，邊收 content_block_delta 邊 yield；tool_use 用 input_json_delta 累積；最終 message 拿 cache 用量
+    - **ClaudeSubscriptionAdapter（CLI 訂閱版）**：擴充原有 stream-json 解析，加 `<tool_call>` XML 緩衝邏輯（看到開頭就 hold、看到結尾才解析 yield function_call）+ usage/stop 事件
+    - **OpenAIAdapter**：用 `chat.completions.create(stream=True)` + `stream_options={"include_usage": True}`；tool_calls 按 index 累積 delta JSON 拼接
+    - **GeminiAdapter**：用 `generate_content_stream` + `asyncio.to_thread` 包同步 iterator
+88. ✅ chat.py 路由消費 streaming（Round 2/3/續寫 三處改即時 yield）：邊收 token 邊發 SSE token event，使用者看到字一個個冒出來而非「等完整段落湧出」。內建 `_MARKER_RE` 偵測 `KEY_INSIGHTS`/`PREDICTIONS`/`SYSTEM_DISTILL` 標記、看到就停止 yield 避免內部標記洩漏給使用者；保留原本的「假串流」fallback（如果 adapter 未 override）。實際效果：第一個 token 出現後 5-15 秒就開始看到內容、整體耗時類似但體感大幅改善
 
 ### 待開發功能
 
