@@ -296,17 +296,71 @@ def _compute_metrics(trades: list[Trade], equity: np.ndarray, n_bars: int) -> di
 
     avg_bars = int(np.mean([t.bars_held for t in trades]))
 
+    # ★ Phase 2.1：Wilson 信心區間（小樣本下勝率的真實信心）
+    n = len(trades)
+    n_wins = len(wins)
+    z = 1.96  # 95% confidence
+    p_hat = win_rate
+    if n > 0:
+        z2_n = z * z / n
+        denom_w = 1 + z2_n
+        center = (p_hat + z2_n / 2) / denom_w
+        margin = z * np.sqrt((p_hat * (1 - p_hat) + z2_n / 4) / n) / denom_w
+        win_rate_ci_low = max(0.0, center - margin) * 100
+        win_rate_ci_high = min(1.0, center + margin) * 100
+    else:
+        win_rate_ci_low = win_rate_ci_high = 0.0
+
+    # ★ Phase 2.1：連續虧損次數（最大連虧）
+    max_consecutive_losses = 0
+    current_streak = 0
+    for t in trades:
+        if t.pnl_pct <= 0:
+            current_streak += 1
+            max_consecutive_losses = max(max_consecutive_losses, current_streak)
+        else:
+            current_streak = 0
+
+    # ★ Phase 2.1：MDD 持續期間（從 peak 跌到 trough 共幾根 K 線）
+    mdd_duration_bars = 0
+    if len(equity) > 1:
+        trough_idx = int(np.nanargmin(dd))
+        # 找 trough 之前最後的 peak
+        peak_idx = int(np.nanargmax(equity[:trough_idx + 1])) if trough_idx > 0 else 0
+        mdd_duration_bars = trough_idx - peak_idx
+
+    # ★ Phase 2.1：CVAR 5%（最差 5% 交易的平均報酬）
+    cvar_5 = 0.0
+    if len(pnl_pcts) >= 20:
+        sorted_pnl = np.sort(pnl_pcts)
+        worst_5pct_count = max(1, len(sorted_pnl) // 20)
+        cvar_5 = float(np.mean(sorted_pnl[:worst_5pct_count])) * 100
+
+    # ★ Phase 2.1：Calmar Ratio（年化報酬 / |MDD|）
+    if equity[0] > 0 and n_bars > 0 and abs(max_dd) > 0.01:
+        years = n_bars / 252  # 假設日線
+        annualized_return = ((equity[-1] / equity[0]) ** (1 / years) - 1) * 100 if years > 0 else 0
+        calmar = annualized_return / abs(max_dd)
+    else:
+        calmar = 0.0
+
     return {
         "total_trades": len(trades),
         "win_rate": round(float(win_rate * 100), 2),
+        "win_rate_ci_95_low": round(float(win_rate_ci_low), 2),
+        "win_rate_ci_95_high": round(float(win_rate_ci_high), 2),
         "profit_factor": round(float(min(profit_factor, 999.99)), 2),
         "avg_pnl_pct": round(float(np.mean(pnl_pcts)) * 100, 2),
         "avg_win_pct": round(float(avg_win * 100), 2),
         "avg_loss_pct": round(float(avg_loss * 100), 2),
         "total_return_pct": round(float(total_return), 2),
         "max_drawdown_pct": round(float(max_dd), 2),
+        "max_drawdown_duration_bars": mdd_duration_bars,
+        "max_consecutive_losses": max_consecutive_losses,
         "sharpe_ratio": round(float(sharpe), 3),
         "sortino_ratio": round(float(sortino), 3),
+        "calmar_ratio": round(float(calmar), 3),
+        "cvar_5_pct": round(float(cvar_5), 2),
         "expectancy_pct": round(float(expectancy * 100), 3),
         "expectancy_ratio": round(float(expectancy_ratio), 3),
         "avg_bars_held": int(avg_bars),
@@ -638,6 +692,29 @@ def run_backtest(
     result.trade_annotations = annotations
     result.warnings = warnings
     result.oos_metrics = oos_metrics
+
+    # ★ Phase 2.2：per-regime 績效拆解（給 LLM 看「策略在哪個 regime 才有效」）
+    try:
+        from app.core.regime_filter import classify_regime_series
+        regime_series = classify_regime_series(df, step=10)  # 每 10 根分類一次節省時間
+        per_regime_trades: dict[str, list] = {}
+        for t in trades:
+            if 0 <= t.entry_idx < len(regime_series):
+                rg = regime_series[t.entry_idx].get("regime", "unknown")
+                per_regime_trades.setdefault(rg, []).append(t)
+        per_regime_metrics: dict[str, dict] = {}
+        for rg, ts in per_regime_trades.items():
+            wins_ = [t for t in ts if t.pnl_pct > 0]
+            wr = len(wins_) / len(ts) * 100 if ts else 0
+            avg_ret = float(np.mean([t.pnl_pct for t in ts])) * 100 if ts else 0
+            per_regime_metrics[rg] = {
+                "n_trades": len(ts),
+                "win_rate": round(wr, 1),
+                "avg_return_pct": round(avg_ret, 2),
+            }
+        metrics["per_regime_metrics"] = per_regime_metrics
+    except Exception as _rg_err:
+        logger.debug(f"per_regime_metrics 計算失敗（不影響主流程）: {_rg_err}")
 
     logger.info(
         f"回測完成: {len(trades)} 筆交易, 勝率 {metrics['win_rate']}%, "

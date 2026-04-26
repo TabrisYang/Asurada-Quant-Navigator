@@ -374,6 +374,26 @@ def _auto_calc_indicator_values(
         except Exception as _stl_err:
             logger.debug(f"STL 分解失敗（不影響主流程）: {_stl_err}")
 
+        # 注入當前 regime + 低信心警告（Phase 1A + Phase 2.3）+ Level 1 自動記錄
+        try:
+            from app.core.regime_filter import summarize_current_regime
+            regime_info = summarize_current_regime(df)
+            chart_state["currentRegime"] = regime_info
+            if regime_info.get("confidence", 0) < 0.5:
+                chart_state["regimeWarning"] = {
+                    "level": "high",
+                    "message": f"目前市場處於 {regime_info.get('regime', 'unknown')} regime（信心 {regime_info.get('confidence', 0)*100:.0f}%），所有策略建議僅供參考",
+                    "auto_position_multiplier": 0.5,
+                }
+                # Level 1：累積 unknown regime 樣本給未來 audit / classifier 升級用
+                try:
+                    from app.core.unknown_regime_logger import log_unknown_regime
+                    log_unknown_regime(symbol, timeframe, regime_info)
+                except Exception:
+                    pass  # 記錄失敗不影響主流程
+        except Exception as _rg_err:
+            logger.debug(f"regime 分類失敗（不影響主流程）: {_rg_err}")
+
         # 注入跨股票群體訊號（台股 + 加密）：給 LLM 看到所屬集合 + 龍頭 + breadth
         try:
             from app.utils.symbol import is_tw_stock
@@ -1605,12 +1625,13 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                     "symbol": chart_symbol,
                     "timeframe": chart_timeframe_ctx or "1d",
                     "strategies": [
-                        {"name": "趨勢跟蹤(多)", "entry_conditions": ["ema_20 > ema_60", "rsi_14 > 50"], "exit_conditions": ["ema_20 < ema_60"], "direction": "long", "stop_loss_pct": 5.0, "take_profit_pct": 15.0},
-                        {"name": "均值回歸(多)", "entry_conditions": ["rsi_14 < 30", "bb_position < 0.2"], "exit_conditions": ["rsi_14 > 70"], "direction": "long", "stop_loss_pct": 3.0, "take_profit_pct": 8.0},
-                        {"name": "動量突破(多)", "entry_conditions": ["close > bb_upper", "volume_ratio > 1.5"], "exit_conditions": ["rsi_14 > 80", "volume_ratio < 0.8"], "direction": "long", "stop_loss_pct": 4.0, "take_profit_pct": 12.0},
-                        {"name": "趨勢跟蹤(空)", "entry_conditions": ["ema_20 < ema_60", "rsi_14 < 50"], "exit_conditions": ["ema_20 > ema_60"], "direction": "short", "stop_loss_pct": 5.0, "take_profit_pct": 15.0},
-                        {"name": "均值回歸(空)", "entry_conditions": ["rsi_14 > 70", "bb_position > 0.8"], "exit_conditions": ["rsi_14 < 30"], "direction": "short", "stop_loss_pct": 3.0, "take_profit_pct": 8.0},
-                        {"name": "動量突破(空)", "entry_conditions": ["close < bb_lower", "volume_ratio > 1.5"], "exit_conditions": ["rsi_14 < 20", "volume_ratio < 0.8"], "direction": "short", "stop_loss_pct": 4.0, "take_profit_pct": 12.0},
+                        # Phase 1B：放寬 SL/TP（給策略呼吸空間）+ Phase 1A：標 compatible_regimes（給 LLM 判斷哪些結果可信）
+                        {"name": "趨勢跟蹤(多)", "entry_conditions": ["ema_20 > ema_60", "rsi_14 > 50"], "exit_conditions": ["ema_20 < ema_60"], "direction": "long", "stop_loss_pct": 8.0, "take_profit_pct": 12.0, "compatible_regimes": ["trending_up"]},
+                        {"name": "均值回歸(多)", "entry_conditions": ["rsi_14 < 30", "bb_position < 0.2"], "exit_conditions": ["rsi_14 > 70"], "direction": "long", "stop_loss_pct": 5.0, "take_profit_pct": 8.0, "compatible_regimes": ["ranging", "low_vol"]},
+                        {"name": "動量突破(多)", "entry_conditions": ["close > bb_upper", "volume_ratio > 1.5"], "exit_conditions": ["rsi_14 > 80", "volume_ratio < 0.8"], "direction": "long", "stop_loss_pct": 6.0, "take_profit_pct": 10.0, "compatible_regimes": ["trending_up", "high_vol"]},
+                        {"name": "趨勢跟蹤(空)", "entry_conditions": ["ema_20 < ema_60", "rsi_14 < 50"], "exit_conditions": ["ema_20 > ema_60"], "direction": "short", "stop_loss_pct": 8.0, "take_profit_pct": 12.0, "compatible_regimes": ["trending_down"]},
+                        {"name": "均值回歸(空)", "entry_conditions": ["rsi_14 > 70", "bb_position > 0.8"], "exit_conditions": ["rsi_14 < 30"], "direction": "short", "stop_loss_pct": 5.0, "take_profit_pct": 8.0, "compatible_regimes": ["ranging", "low_vol"]},
+                        {"name": "動量突破(空)", "entry_conditions": ["close < bb_lower", "volume_ratio > 1.5"], "exit_conditions": ["rsi_14 < 20", "volume_ratio < 0.8"], "direction": "short", "stop_loss_pct": 6.0, "take_profit_pct": 10.0, "compatible_regimes": ["trending_down", "high_vol"]},
                     ],
                 },
             }]

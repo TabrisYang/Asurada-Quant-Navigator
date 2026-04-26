@@ -678,6 +678,8 @@ async def _exec_compare_strategies(args: dict, default_symbol: str, default_tf: 
     timeframe = args.get("timeframe", default_tf)
     start = args.get("start_date")
     end = args.get("end_date")
+    # Phase 1C：滾動視窗 — 預設只看最近 N 個月（給 LLM 對照「全歷史」vs「近期」）
+    lookback_months = args.get("lookback_months", 12)
 
     _MIN_BARS = 60
     _PREFER_MIN_BARS = 500
@@ -690,6 +692,11 @@ async def _exec_compare_strategies(args: dict, default_symbol: str, default_tf: 
     if df.empty or len(df) < _MIN_BARS:
         return {"status": "error", "message": f"找不到 {symbol} {timeframe} 的本地數據，請先同步。"}
 
+    # Phase 1C：切出滾動視窗（最近 N 個月）— 約略換算每 timeframe 的 K 線數
+    _bars_per_month = {"15m": 30 * 96, "1h": 30 * 24, "4h": 30 * 6, "1d": 30, "1w": 4}
+    _window_bars = _bars_per_month.get(timeframe, 30) * lookback_months
+    df_recent = df.tail(_window_bars).reset_index(drop=True) if len(df) > _window_bars else df
+
     comparison: list[dict] = []
     for i, strat in enumerate(strategies):
         name = strat.get("name", f"策略 {i + 1}")
@@ -698,6 +705,8 @@ async def _exec_compare_strategies(args: dict, default_symbol: str, default_tf: 
         direction = strat.get("direction", "long")
         sl = strat.get("stop_loss_pct")
         tp = strat.get("take_profit_pct")
+        # Phase 1A：策略相容 regime 標籤（供 LLM 過濾結果用）
+        compatible_regimes = strat.get("compatible_regimes", [])
 
         # 如果 LLM 沒帶止損/止盈，根據時間框架自動補預設值
         _default_sl = {"15m": 0.05, "1h": 0.06, "4h": 0.10, "1d": 0.12, "1w": 0.18}
@@ -710,19 +719,26 @@ async def _exec_compare_strategies(args: dict, default_symbol: str, default_tf: 
             comparison.append({"name": name, "status": "error", "message": "缺少進場或出場條件"})
             continue
 
-        result = run_backtest(
+        # 跑兩次：全歷史 + 滾動視窗
+        result_full = run_backtest(
             df=df,
-            entry_conditions=entry_conds,
-            exit_conditions=exit_conds,
-            direction=direction,
-            stop_loss_pct=sl,
-            take_profit_pct=tp,
+            entry_conditions=entry_conds, exit_conditions=exit_conds,
+            direction=direction, stop_loss_pct=sl, take_profit_pct=tp,
         )
+        result_recent = run_backtest(
+            df=df_recent,
+            entry_conditions=entry_conds, exit_conditions=exit_conds,
+            direction=direction, stop_loss_pct=sl, take_profit_pct=tp,
+        ) if len(df_recent) >= _MIN_BARS else None
+
         comparison.append({
             "name": name,
             "status": "success",
-            "metrics": result.metrics,
-            "warnings_count": len(result.warnings),
+            "metrics": result_full.metrics,  # 主要 metrics 維持全歷史以相容既有邏輯
+            "metrics_recent": result_recent.metrics if result_recent else None,
+            "lookback_months_recent": lookback_months,
+            "warnings_count": len(result_full.warnings),
+            "compatible_regimes": compatible_regimes,  # 供 LLM 對照當前 regime
         })
 
     # 排名（按 Sharpe 或 total_return 排序）

@@ -937,6 +937,16 @@ GET    /api/health                   # 系統健康狀態
 96. ✅ 修復「完整分析」期間 SSE timeout 誤報（深層）：上一輪心跳修了「await 沒回應」，但實測仍 300s timeout。
     根因：function execution 內部呼叫 `run_quant_research` / `run_walk_forward` / `run_monte_carlo` 等都是 sync NumPy/pandas/sklearn 計算，**直接阻塞 asyncio event loop**（無 `await` 切換點）。即使 chat.py heartbeat loop 有 `await asyncio.sleep(2)`，event loop 被卡住期間 sleep 也排不上時程，心跳事件實際間隔變成 60-300+ 秒，前端誤判超時斷線。
     解法：新增 `_execute_function_calls_in_thread()` helper，把 `execute_function_calls` 透過 `asyncio.to_thread` 丟到 worker thread 執行（thread 內開新 event loop 跑 async 內容）。主 event loop 完全不被 ML 計算佔用 → 心跳每 2-5 秒準時觸發 → 前端持續收到進度 → 不再誤判超時。三個 call site（預回測 / 主函式執行 / 補齊缺失函式）統一改用 thread 模式
+97. ✅ Regime-aware 回測 + 退化偵測 + 自我記錄（建立可信賴的投資分析系統 — Phase 1+2.1+2.2+2.3+3.1+3.2+L1）：
+    **Phase 1 A**（regime filter）：新增 `backend/app/core/regime_filter.py`，6 種 regime 分類（trending_up/down, ranging, high/low_vol, unknown），用規則式 + 自算 ADX（修了 _detect_market_regime 取 ADX 永遠拿 None 的 bug）；策略相容 regime 對應表（趨勢類→trending、均值回歸→ranging/low_vol、動量突破→trending+high_vol）
+    **Phase 1 B**（放寬 SL/TP）：[chat.py](backend/app/api/routes/chat.py) 預設 6 策略 SL 5%→8%、TP 15%→12% 等（給加密波動空間）+ 加 compatible_regimes 標籤
+    **Phase 1 C**（滾動視窗）：[executor.py](backend/app/core/llm/executor.py) `_exec_compare_strategies` 加 `lookback_months=12` 預設，跑「全歷史 + 近 1 年」兩組對照
+    **Phase 2.1**（風險揭露強化）：[engine.py](backend/app/core/backtest/engine.py) `_compute_metrics` 新增 Wilson 95% 信心區間（小樣本下勝率真實信心）+ 連續虧損次數 + MDD 持續期間 + CVAR 5% + Calmar Ratio
+    **Phase 2.2**（per-regime 績效拆解）：每筆 trade 按 entry_idx 對應 regime，輸出 `per_regime_metrics: {trending_up: {n_trades, win_rate, avg_return}, ...}` 給 LLM 看「策略在哪個 regime 才有效」
+    **Phase 2.3**（unknown regime 警告）：[chat.py](backend/app/api/routes/chat.py) 自動注入 `chart_state.currentRegime` + confidence < 0.5 時注入 `regimeWarning`（auto_position_multiplier=0.5），系統 prompt 強制 LLM 在低信心時警示 + 縮小建議倉位 + 不用「強烈建議」措辭
+    **Phase 3.1+3.2**（auto audit + launchd）：新增 `backend/scripts/audit_system_health.py` 跑 30天 vs 90天命中率對比 + 退化判定 (drop > 15pp) + 行動建議；輸出 `system_health.json` + append `health_history.log`；`install_audit_launchd.sh` 排程每天 0:30 自動跑（不依賴系統運行）。新增 `/api/system/health` endpoint 給前端啟動時讀取
+    **Level 1**（unknown regime 自動記錄）：新增 `backend/app/core/unknown_regime_logger.py`，confidence < 0.5 時自動寫進 `unknown_regime_log.db`，累積樣本給未來 Level 2 auto-classify 用
+    LLM 解讀指引（function_defs.py）加 currentRegime / regimeWarning / per_regime_metrics 的解讀範例，教 LLM「依當前 regime 過濾哪些策略結果可信」「低信心時主動警示」「跨 regime 比較策略 robustness」
 
 ### 待開發功能
 
