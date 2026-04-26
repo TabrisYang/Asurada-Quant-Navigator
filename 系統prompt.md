@@ -1009,6 +1009,15 @@ GET    /api/health                   # 系統健康狀態
     **B5**（[chat.py:1639](backend/app/api/routes/chat.py#L1639) 預回測策略）：6 策略加 2 個 ROC 動量策略（多/空）變 8 策略，避免動能分析另外跑回測；status 文案同步更新（"6 個策略" → "8 個策略"，預估時間 60-180s → 80-240s）
     預期改善：函式呼叫 6-8 → 5；時間 15-30 分 → 8-15 分；token 輸入 40K → 25-30K；報告 10K+ 字 → 6-8K 字；Anthropic 成本省 50%
 
+99. ✅ 分批進場（Laddered Entries）— 後端計算 + Regime 動態配比 + 完整回測驗證（Phase 1-5）：
+    **Phase 1**（[backend/app/core/laddered_entries.py](backend/app/core/laddered_entries.py)，新建）：`compute_laddered_entries()` 後端算分批價，所有 price 直接從 BB / EMA / Donchian / ATR 取，禁止任何算術推估。Regime 動態配比表：trending → 50/30/20 金字塔加碼（current → ema_20 → bb_middle）；ranging/low_vol → 25/35/40 倒金字塔接刀（bb_middle → bb_lower → donchian_low）；high_vol → 33/33/34 對稱平均（current → −1×ATR → −2×ATR）；regime confidence < 0.5 → enabled = false 並重用既有 regimeWarning。SL = min(entries) − 1.5×ATR；TP = weighted_avg + max(2×ATR, risk × 2)，保證 RR ≥ 2
+    **Phase 2**（[engine.py](backend/app/core/backtest/engine.py)）：加 `ladder_config` 參數 + 新建 `_run_ladder_loop()` 助手（不動既有單進場主迴圈，避免回歸風險）。每筆信號排掛 N 個 limit orders（首檔市價成交、其餘為限價單）；`max_wait_bars` 內未填者過期取消；SL/TP 基於加權均價；單筆 Trade 含 `entry_legs` metadata + `fill_count`。新增 `metrics["ladder"]`：`avg_fills_per_trade` + `full_fill_rate_pct` + `ratios` + `price_offsets_pct`。新增 [tests/test_backtest_ladder.py](backend/tests/test_backtest_ladder.py) 6 個測試（Phase 1 + Phase 2 + 向下相容）
+    **Phase 3**（[walk_forward.py](backend/app/core/backtest/walk_forward.py)）：`run_walk_forward()` 加 `ladder_config` 參數透傳到內部 `run_backtest` 呼叫；MC 不需改動（pnl 列表已包含 ladder 結果）
+    **Phase 4**（function 註冊 + LLM prompt 整合）：[function_defs.py](backend/app/core/llm/function_defs.py) 註冊 `compute_laddered_entries` schema + 加入 `ALLOWED_FUNCTIONS` + `_PARALLEL_FUNCS` + CORE prompt 加「分批進場價位引用規則」（強制引用 price/size_pct/source，禁止推算 SL/TP）；[chat.py](backend/app/api/routes/chat.py) `_REQUIRED_ANALYSIS_FUNCS["comprehensive_analysis"]` 加 `compute_laddered_entries`（自動補齊缺失函式）；`_PROMPT_MODULES["comprehensive_analysis"]` #6 結論段加「必須含分批進場建議表格」+ 函式呼叫順序加第 6 步；[executor.py](backend/app/core/llm/executor.py) 加 `_exec_compute_laddered_entries()` handler（自動從 df 算 regime + confidence，不依賴 chart_state）
+    **Phase 5**（圖表視覺化）：executor.py 處理 `compute_laddered_entries` 結果時，自動把 ladder 多空各檔 + SL + TP 轉成 horizontal_line annotations 推到 `chart_updates.annotations`（綠線多、紅線空、SL/TP 各一條）
+    端到端驗證（BTC/USDT 1d，2026-04-27）：regime 自動分類 trending_up（conf 0.726）→ 3 檔 long entries（current + EMA20 + BB middle）→ weighted_avg $76,074 / SL $72,299 / TP $83,623 / RR 2.0
+    預期效益：投資建議從「30% 倉位」抽象變「$X 進 50% / $Y 進 30% / $Z 進 20%」具體；ladder vs 單進場有完整回測對照（含 WF + MC）；LLM 幻覺風險 = 0（強制引用後端計算）
+
 ### 待開發功能
 
 - ⬜ CI/CD 流程建立

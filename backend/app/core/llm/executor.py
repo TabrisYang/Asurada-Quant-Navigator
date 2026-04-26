@@ -105,6 +105,7 @@ ALLOWED_FUNCTIONS = {
     "scan_conditional_probability",
     "generate_scenarios",
     "detect_smc_structure",
+    "compute_laddered_entries",
 }
 
 
@@ -158,7 +159,7 @@ async def execute_function_calls(
         "run_backtest", "compare_strategies", "analyze_event_patterns",
         "run_quant_research", "optimize_indicator_params",
         "scan_conditional_probability", "generate_scenarios",
-        "detect_smc_structure",
+        "detect_smc_structure", "compute_laddered_entries",
     }
 
     # 分離：輕量同步/依序 vs 重量級可並行
@@ -267,6 +268,9 @@ async def execute_function_calls(
                 elif name == "detect_smc_structure":
                     result = await _exec_detect_smc(args, default_symbol, default_timeframe)
                     return {"function": name, "result": result}
+                elif name == "compute_laddered_entries":
+                    result = await _exec_compute_laddered_entries(args, default_symbol, default_timeframe)
+                    return {"function": name, "result": result}
                 elif name == "analyze_sector":
                     result = await _exec_analyze_sector(args)
                     return {"function": name, "result": result}
@@ -316,6 +320,27 @@ async def execute_function_calls(
                 chart_updates.setdefault("annotations", []).extend(r["trade_annotations"])
             elif fname == "analyze_event_patterns" and r.get("annotations"):
                 chart_updates.setdefault("annotations", []).extend(r.pop("annotations"))
+            elif fname == "compute_laddered_entries" and r.get("enabled"):
+                # ★ Phase 5：把 ladder 分批價畫成水平線標註
+                _ann = []
+                for e in r.get("long_entries") or []:
+                    _ann.append({
+                        "type": "horizontal_line", "price": e.get("price"),
+                        "text": f"L {e.get('size_pct')}% — {e.get('source', '')[:18]}",
+                        "color": "#3fb950",
+                    })
+                for e in r.get("short_entries") or []:
+                    _ann.append({
+                        "type": "horizontal_line", "price": e.get("price"),
+                        "text": f"S {e.get('size_pct')}% — {e.get('source', '')[:18]}",
+                        "color": "#f85149",
+                    })
+                if r.get("stop_loss_long") is not None:
+                    _ann.append({"type": "horizontal_line", "price": r["stop_loss_long"], "text": "SL (long)", "color": "#f85149"})
+                if r.get("take_profit_long") is not None:
+                    _ann.append({"type": "horizontal_line", "price": r["take_profit_long"], "text": "TP (long)", "color": "#3fb950"})
+                if _ann:
+                    chart_updates.setdefault("annotations", []).extend(_ann)
 
     if progress is not None:
         progress.phase = "done"
@@ -1998,6 +2023,37 @@ async def _exec_generate_scenarios(args: dict, default_symbol: str, default_tf: 
         return output
     except Exception as e:
         return {"status": "error", "message": f"情境預測失敗: {str(e)}"}
+
+
+async def _exec_compute_laddered_entries(args: dict, default_symbol: str, default_tf: str) -> dict:
+    """分批進場價位計算（v99）— 後端從 indicator values 取，禁止 LLM 推算。"""
+    from app.core.laddered_entries import compute_laddered_entries
+    from app.core.regime_filter import classify_regime_at_bar
+
+    symbol = args.get("symbol", default_symbol)
+    timeframe = args.get("timeframe", default_tf)
+    direction = args.get("direction", "both")
+    n_tranches = int(args.get("n_tranches", 3))
+
+    df = _load_local_data(symbol, timeframe)
+    if df is None or df.empty:
+        return {"status": "error", "message": f"找不到 {symbol} {timeframe} 的本地數據，請先同步"}
+    if len(df) < 60:
+        return {"status": "error", "message": f"數據不足（{len(df)} 根，需 60+）"}
+
+    # 從 df 算 regime（不依賴 chart_state，避免雙重來源不一致）
+    rg = classify_regime_at_bar(df, len(df) - 1)
+    regime = rg.get("regime", "unknown")
+    confidence = float(rg.get("confidence", 0.0))
+
+    result = compute_laddered_entries(
+        df=df, direction=direction, regime=regime,
+        regime_confidence=confidence, n_tranches=n_tranches,
+    )
+    result["status"] = "success"
+    result["symbol"] = symbol
+    result["timeframe"] = timeframe
+    return result
 
 
 async def _exec_detect_smc(args: dict, default_symbol: str, default_tf: str) -> dict:

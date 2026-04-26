@@ -39,6 +39,7 @@ def run_walk_forward(
     leverage: float = 1.0,
     optimize_sl_tp: bool = True,
     embargo: int = 5,
+    ladder_config: Optional[dict] = None,
 ) -> dict:
     """執行 Walk Forward Analysis（優化版）。
 
@@ -109,7 +110,7 @@ def run_walk_forward(
             train_df, entry_conditions, exit_conditions,
             direction=direction, stop_loss_pct=best_sl,
             take_profit_pct=best_tp, initial_capital=initial_capital,
-            leverage=leverage,
+            leverage=leverage, ladder_config=ladder_config,
         )
 
         # ── 測試集回測（用訓練集優化的參數）──
@@ -117,7 +118,7 @@ def run_walk_forward(
             test_df, entry_conditions, exit_conditions,
             direction=direction, stop_loss_pct=best_sl,
             take_profit_pct=best_tp, initial_capital=initial_capital,
-            leverage=leverage,
+            leverage=leverage, ladder_config=ladder_config,
         )
 
         train_m = train_result.metrics

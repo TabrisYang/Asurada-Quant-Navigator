@@ -123,6 +123,9 @@ class Trade:
     pnl_amount: float       # 金額
     bars_held: int
     exit_reason: str        # "signal" | "stop_loss" | "take_profit" | "end_of_data"
+    # ★ Ladder 模式專屬（單進場為 None / 1）
+    entry_legs: Optional[list[dict]] = None  # [{"idx", "price", "size_pct", "filled"}]
+    fill_count: int = 1                       # 實際成交檔數（ladder 用，預設 1）
 
 
 @dataclass
@@ -427,6 +430,7 @@ def run_backtest(
     exchange: str = "default",
     timeframe: str = "4h",
     funding_rate: float = DEFAULT_FUNDING_RATE,
+    ladder_config: Optional[dict] = None,
 ) -> BacktestResult:
     """
     執行向量化回測
@@ -500,6 +504,21 @@ def run_backtest(
         if use_dynamic:
             return _compute_dynamic_cost(atr_arr, close, volume, bar_idx, exchange, liquidity_tier=liq_tier)
         return static_cost_rate
+
+    open_prices = df["open"].values.astype(float) if "open" in df.columns else close
+
+    # ★ Ladder 模式：當 ladder_config 指定時，跳過單進場主迴圈，改走 _run_ladder_loop
+    if ladder_config and ladder_config.get("enabled") is True:
+        return _run_ladder_loop(
+            df=df, entry_mask=entry_mask, exit_mask=exit_mask, direction=direction,
+            stop_loss_pct=stop_loss_pct, take_profit_pct=take_profit_pct,
+            initial_capital=initial_capital, leverage=leverage,
+            funding_per_bar=funding_per_bar, cost_fn=_cost_at,
+            timestamps=timestamps, ladder_config=ladder_config,
+            close=close, high=high, low=low, open_prices=open_prices,
+            atr_arr=atr_arr, result=result,
+        )
+
     equity_arr = [capital]
     trades: list[Trade] = []
     in_position = False
@@ -509,8 +528,6 @@ def run_backtest(
 
     # 強制平倉價（槓桿 > 1 時生效）：虧損達 ~95% 保證金即爆倉
     liq_margin = 0.98 / leverage if leverage > 1 else None
-
-    open_prices = df["open"].values.astype(float) if "open" in df.columns else close
 
     for i in range(1, len(close)):
         cost_rate = _cost_at(i)
@@ -736,6 +753,8 @@ def _make_trade(
     exit_reason: str,
     leverage: float = 1.0,
     funding_cost_pct: float = 0.0,
+    entry_legs: Optional[list[dict]] = None,
+    fill_count: int = 1,
 ) -> Trade:
     if direction == "long":
         raw_pnl_pct = (exit_price / entry_price) - 1
@@ -758,4 +777,307 @@ def _make_trade(
         pnl_amount=pnl_amount,
         bars_held=exit_idx - entry_idx,
         exit_reason=exit_reason,
+        entry_legs=entry_legs,
+        fill_count=fill_count,
     )
+
+
+# ═══════════════════════════════════════════════════════════
+#  ★ Ladder 進場模式（v99）
+# ═══════════════════════════════════════════════════════════
+def _run_ladder_loop(
+    *,
+    df: pd.DataFrame,
+    entry_mask: np.ndarray,
+    exit_mask: np.ndarray,
+    direction: str,
+    stop_loss_pct: Optional[float],
+    take_profit_pct: Optional[float],
+    initial_capital: float,
+    leverage: float,
+    funding_per_bar: float,
+    cost_fn,
+    timestamps: np.ndarray,
+    ladder_config: dict,
+    close: np.ndarray,
+    high: np.ndarray,
+    low: np.ndarray,
+    open_prices: np.ndarray,
+    atr_arr: np.ndarray,
+    result: BacktestResult,
+) -> BacktestResult:
+    """Ladder 進場回測：信號觸發後排掛 N 個 limit orders，依 ratios 分批成交。
+
+    Design：
+    - 每筆信號 → N 個 pending orders（首檔市價立即成交，其他為限價單）
+    - 後續 K 線檢查未成交掛單；max_wait_bars 內未填者過期取消
+    - SL/TP/exit_signal 觸發 → 所有已成交 legs 統一平倉，產生「一筆」Trade（含 entry_legs 詳情）
+    - 加權平均進場價當 entry_price 用，方便既有 metrics / per_regime / oos 邏輯重用
+    """
+    ratios: list[float] = ladder_config.get("ratios") or [50.0, 30.0, 20.0]
+    price_offsets_pct: list[float] = ladder_config.get("price_offsets_pct") or [0.0, -1.5, -3.0]
+    max_wait_bars: int = int(ladder_config.get("max_wait_bars", 20))
+
+    # 正規化 ratios → 100，offsets 補齊到同長度
+    n_legs = min(len(ratios), len(price_offsets_pct))
+    ratios = ratios[:n_legs]
+    price_offsets_pct = price_offsets_pct[:n_legs]
+    total_ratio = sum(ratios)
+    if total_ratio <= 0:
+        result.warnings.append("ladder_config.ratios 總和 ≤ 0")
+        result.metrics = {"total_trades": 0, "note": "ladder_config 無效"}
+        return result
+    ratios = [r * 100 / total_ratio for r in ratios]
+
+    # 對照單進場（同信號）— 之後計算 vs_single_entry_return 用
+    capital = initial_capital
+    equity_arr = [capital]
+    trades: list[Trade] = []
+    fill_counts: list[int] = []  # 每筆 trade 實際成交檔數
+
+    in_position = False
+    signal_idx = 0
+    pending_orders: list[dict] = []   # {target_price, ratio_pct}（未成交限價單）
+    filled_legs: list[dict] = []      # {idx, price, ratio_pct, capital_used}
+    signal_capital = 0.0
+
+    liq_margin = 0.98 / leverage if leverage > 1 else None
+
+    def _flush_trade(exit_idx: int, exit_price_raw: float, reason: str, cost_rate: float) -> None:
+        """關掉所有已成交 legs，產生一筆 Trade（加權均價）。"""
+        nonlocal capital, in_position, pending_orders, filled_legs, signal_capital, signal_idx
+        if not filled_legs:
+            in_position = False
+            pending_orders = []
+            filled_legs = []
+            return
+        total_capital_used = sum(leg["capital_used"] for leg in filled_legs)
+        if total_capital_used <= 0:
+            in_position = False
+            pending_orders = []
+            filled_legs = []
+            return
+        weighted_entry = sum(leg["price"] * leg["capital_used"] for leg in filled_legs) / total_capital_used
+        # 出場價含成本（同既有單進場處理）
+        if direction == "long":
+            exit_price = exit_price_raw * (1 - cost_rate)
+        else:
+            exit_price = exit_price_raw * (1 + cost_rate)
+        bars_held = max(1, exit_idx - signal_idx)
+        funding_cost = funding_per_bar * bars_held
+        legs_meta = [
+            {
+                "idx": int(leg["idx"]), "price": round(float(leg["price"]), 4),
+                "ratio_pct": round(leg["ratio_pct"], 1),
+                "filled": True,
+            }
+            for leg in filled_legs
+        ]
+        trade = _make_trade(
+            entry_idx=signal_idx, exit_idx=exit_idx, timestamps=timestamps,
+            entry_price=weighted_entry, exit_price=exit_price,
+            direction=direction, capital=total_capital_used, cost_rate=cost_rate,
+            exit_reason=reason, leverage=leverage, funding_cost_pct=funding_cost,
+            entry_legs=legs_meta, fill_count=len(filled_legs),
+        )
+        trades.append(trade)
+        fill_counts.append(len(filled_legs))
+        capital += trade.pnl_amount
+        capital = max(capital, 0)
+        in_position = False
+        pending_orders = []
+        filled_legs = []
+
+    for i in range(1, len(close)):
+        cost_rate = cost_fn(i)
+
+        # ─── 未持倉 → 偵測信號 + 排掛 ladder orders ───
+        if not in_position:
+            if not entry_mask[i]:
+                equity_arr.append(capital)
+                continue
+
+            signal_idx = i
+            signal_capital = capital
+            # 首檔市價成交（含成本）
+            raw_first = open_prices[i] if i < len(open_prices) else close[i]
+            first_fill = raw_first * (1 + cost_rate if direction == "long" else 1 - cost_rate)
+            filled_legs.append({
+                "idx": i, "price": first_fill,
+                "ratio_pct": ratios[0],
+                "capital_used": signal_capital * ratios[0] / 100,
+            })
+            # 第 2~N 檔：排掛限價單
+            for k in range(1, n_legs):
+                offset_pct = price_offsets_pct[k] / 100  # 注意：負值代表 long 較低位
+                if direction == "long":
+                    target = raw_first * (1 + offset_pct)
+                else:
+                    # short：offset 應該要往「相反方向」放（價格上去才接刀）
+                    target = raw_first * (1 - offset_pct)
+                pending_orders.append({
+                    "target_price": target, "ratio_pct": ratios[k],
+                })
+            in_position = True
+            equity_arr.append(capital)
+            continue
+
+        # ─── 已持倉 ───
+        # 1. 檢查 pending limit orders 是否填單
+        if pending_orders:
+            for order in pending_orders[:]:
+                hit = (
+                    (direction == "long" and low[i] <= order["target_price"]) or
+                    (direction == "short" and high[i] >= order["target_price"])
+                )
+                if hit:
+                    fill_p = order["target_price"]
+                    fill_p = fill_p * (1 + cost_rate if direction == "long" else 1 - cost_rate)
+                    filled_legs.append({
+                        "idx": i, "price": fill_p,
+                        "ratio_pct": order["ratio_pct"],
+                        "capital_used": signal_capital * order["ratio_pct"] / 100,
+                    })
+                    pending_orders.remove(order)
+            # max_wait 過期 → 取消未成交
+            if i - signal_idx >= max_wait_bars:
+                pending_orders = []
+
+        # 2. 檢查強制平倉（爆倉，槓桿 > 1）
+        if liq_margin is not None and filled_legs:
+            avg_entry = sum(leg["price"] * leg["capital_used"] for leg in filled_legs) / sum(leg["capital_used"] for leg in filled_legs)
+            if direction == "long" and low[i] <= avg_entry * (1 - liq_margin):
+                _flush_trade(i, avg_entry * (1 - liq_margin), "liquidation", cost_rate)
+                equity_arr.append(capital)
+                continue
+            if direction == "short" and high[i] >= avg_entry * (1 + liq_margin):
+                _flush_trade(i, avg_entry * (1 + liq_margin), "liquidation", cost_rate)
+                equity_arr.append(capital)
+                continue
+
+        # 3. SL（基於加權均價）
+        if stop_loss_pct is not None and filled_legs:
+            avg_entry = sum(leg["price"] * leg["capital_used"] for leg in filled_legs) / sum(leg["capital_used"] for leg in filled_legs)
+            if direction == "long":
+                sl_target = avg_entry * (1 - stop_loss_pct)
+                if low[i] <= sl_target:
+                    _flush_trade(i, min(sl_target, open_prices[i]), "stop_loss", cost_rate)
+                    equity_arr.append(capital)
+                    continue
+            else:
+                sl_target = avg_entry * (1 + stop_loss_pct)
+                if high[i] >= sl_target:
+                    _flush_trade(i, max(sl_target, open_prices[i]), "stop_loss", cost_rate)
+                    equity_arr.append(capital)
+                    continue
+
+        # 4. TP（基於加權均價）
+        if take_profit_pct is not None and filled_legs:
+            avg_entry = sum(leg["price"] * leg["capital_used"] for leg in filled_legs) / sum(leg["capital_used"] for leg in filled_legs)
+            if direction == "long":
+                tp_target = avg_entry * (1 + take_profit_pct)
+                if high[i] >= tp_target:
+                    _flush_trade(i, max(tp_target, open_prices[i]), "take_profit", cost_rate)
+                    equity_arr.append(capital)
+                    continue
+            else:
+                tp_target = avg_entry * (1 - take_profit_pct)
+                if low[i] <= tp_target:
+                    _flush_trade(i, min(tp_target, open_prices[i]), "take_profit", cost_rate)
+                    equity_arr.append(capital)
+                    continue
+
+        # 5. 出場信號
+        if exit_mask[i] and filled_legs:
+            _flush_trade(i, close[i], "signal", cost_rate)
+
+        equity_arr.append(capital)
+
+    # 末尾強制平倉
+    if in_position and filled_legs:
+        _flush_trade(len(close) - 1, close[-1], "end_of_data", cost_fn(len(close) - 1))
+        equity_arr.append(capital)
+
+    equity = np.array(equity_arr)
+
+    # ─── 計算績效 ─────────────────────────
+    metrics = _compute_metrics(trades, equity, len(close))
+
+    # Ladder 專屬 metrics
+    if fill_counts:
+        avg_fill = sum(fill_counts) / len(fill_counts)
+        full_fill_rate = sum(1 for c in fill_counts if c == n_legs) / len(fill_counts) * 100
+        metrics["ladder"] = {
+            "n_legs_planned": n_legs,
+            "avg_fills_per_trade": round(avg_fill, 2),
+            "full_fill_rate_pct": round(full_fill_rate, 1),
+            "ratios": ratios,
+            "price_offsets_pct": price_offsets_pct,
+        }
+
+    if leverage > 1:
+        metrics["leverage"] = leverage
+
+    # OOS split 與 per_regime（沿用既有邏輯）
+    oos_metrics = None
+    split_idx = int(len(close) * (1 - OOS_RATIO))
+    if split_idx > MIN_DATA_POINTS and (len(close) - split_idx) > 30:
+        is_trades = [t for t in trades if t.entry_idx < split_idx]
+        oos_trades = [t for t in trades if t.entry_idx >= split_idx]
+        if is_trades and oos_trades:
+            oos_metrics = _compute_metrics(oos_trades, equity[split_idx:], len(close) - split_idx)
+            oos_metrics["label"] = "out_of_sample"
+            oos_metrics["period"] = f"{timestamps[split_idx]} ~ {timestamps[-1]}"
+
+    try:
+        from app.core.regime_filter import classify_regime_series
+        regime_series = classify_regime_series(df, step=10)
+        per_regime_trades: dict[str, list] = {}
+        for t in trades:
+            if 0 <= t.entry_idx < len(regime_series):
+                rg = regime_series[t.entry_idx].get("regime", "unknown")
+                per_regime_trades.setdefault(rg, []).append(t)
+        per_regime_metrics: dict[str, dict] = {}
+        for rg, ts in per_regime_trades.items():
+            wins_ = [t for t in ts if t.pnl_pct > 0]
+            wr = len(wins_) / len(ts) * 100 if ts else 0
+            avg_ret = float(np.mean([t.pnl_pct for t in ts])) * 100 if ts else 0
+            per_regime_metrics[rg] = {
+                "n_trades": len(ts),
+                "win_rate": round(wr, 1),
+                "avg_return_pct": round(avg_ret, 2),
+            }
+        metrics["per_regime_metrics"] = per_regime_metrics
+    except Exception as _rg_err:
+        logger.debug(f"per_regime_metrics 計算失敗: {_rg_err}")
+
+    warnings = _generate_warnings(metrics, oos_metrics, trades)
+    annotations: list[dict] = []
+    for t in trades[:50]:
+        color = "#3fb950" if t.pnl_pct > 0 else "#f85149"
+        annotations.append({
+            "type": "text_label", "time": t.entry_time, "startTime": t.entry_time,
+            "price": t.entry_price,
+            "text": f"{'▲' if t.direction == 'long' else '▼'} ladder×{t.fill_count}",
+            "color": "#58a6ff",
+        })
+        annotations.append({
+            "type": "text_label", "time": t.exit_time, "startTime": t.exit_time,
+            "price": t.exit_price,
+            "text": f"{'✕' if t.pnl_pct <= 0 else '✓'} {t.pnl_pct * 100:+.1f}%",
+            "color": color,
+        })
+
+    result.trades = trades
+    result.metrics = metrics
+    result.equity_curve = [{"bar": i, "equity": round(float(v), 2)} for i, v in enumerate(equity)]
+    result.trade_annotations = annotations
+    result.warnings = warnings
+    result.oos_metrics = oos_metrics
+
+    logger.info(
+        f"Ladder 回測完成: {len(trades)} 筆交易, 平均填單 {metrics.get('ladder', {}).get('avg_fills_per_trade', 0)}/{n_legs}, "
+        f"勝率 {metrics['win_rate']}%, 總報酬 {metrics['total_return_pct']}%"
+    )
+
+    return result

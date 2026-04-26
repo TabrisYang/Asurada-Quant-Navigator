@@ -1766,6 +1766,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                             "detect_smc_structure", "generate_scenarios",
                             "analyze_momentum", "compare_strategies",
                             "scan_conditional_probability", "run_quant_research",
+                            "compute_laddered_entries",  # ★ v99：分批進場價位
                         ],
                         "analysis": ["generate_scenarios", "detect_smc_structure"],
                         "deep_phase1": ["generate_scenarios", "detect_smc_structure"],

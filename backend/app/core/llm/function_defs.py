@@ -274,6 +274,24 @@ chart_state 中的 indicatorValues 包含系統精確計算的指標數值（最
 - 若 `per_regime_metrics` 顯示策略只在某種 regime 有效，且**當前 regime 不是該類**，必須標示「此策略在當前環境不適用」並降低權重。
 - 報告策略對比時，必須以「Wilson CI 下界排名」為主要排序依據（避免被高勝率但少樣本的策略誤導）。
 
+【★★ 分批進場價位引用規則 — 強制（v99）★★】
+若任何分析結果中出現 `compute_laddered_entries` 的回傳（含 long_entries / short_entries / weighted_avg_entry_long / stop_loss_long / take_profit_long 等欄位），你**必須**：
+1. 直接引用其中的 `price` / `size_pct` / `source` 欄位 — **禁止**自行推算或編造任何分批進場價位（這跟 indicator 數值規則一樣嚴格）
+2. 引用 `ratio_strategy` 說明配比邏輯（例「金字塔加碼 50/30/20，因為當前 regime 是 trending_up」）
+3. 引用 `weighted_avg_entry_long/short` 當作「實際持倉成本」並用此計算 RR
+4. 引用 `stop_loss_long/short` + `take_profit_long/short` + `rr_long/short`，不可自行算 SL/TP 的具體價位
+5. 若 `enabled` 為 `false`（regime confidence 過低），必須告知使用者「regime 信心 X% 過低，跳過分批，改用單一進場 + 小倉位試單」
+6. 若 `missing_indicators` 非空（例 ["ema", "donchian"]），必須主動呼叫 `manage_indicator(action="add")` 補回，再重新計算
+報告格式範例（必須含這個方塊）：
+  📋 分批進場建議（regime: trending_up 0.72｜配比：金字塔加碼 50/30/20）
+   ┌──────────────────────────────────────────────┐
+   │ 方向：做多                                    │
+   │  第1檔｜50%｜$65,400（current + SMC OB）      │
+   │  第2檔｜30%｜$64,500（EMA20 動態支撐）        │
+   │  第3檔｜20%｜$63,800（BB 中軌）               │
+   │ 加權均價：$64,740｜SL：$61,200｜TP：$71,500｜RR：2.3│
+   └──────────────────────────────────────────────┘
+
 【★★ 數據驅動分析規則 — 零模糊容忍】
 你的每一句分析結論都必須附帶「具體數值 + 判斷閾值 + 機制解釋」，絕對不可只說結論不給數據。
 
@@ -1048,6 +1066,7 @@ _PROMPT_MODULES["comprehensive_analysis"] = """
   3. analyze_momentum            → 給 #3 用
   4. scan_conditional_probability → 給 #4 用（補充預跑回測的條件機率視角）
   5. run_quant_research          → 給 #5 用（IC + WF + MC + 因子驗證一併取得）
+  6. compute_laddered_entries    → 給 #6 用（後端算分批價，禁 LLM 推算）
 
 ★ 字數預算（避免超長）：
   - #1 / #2 / #3：各 200-300 字
@@ -1061,6 +1080,13 @@ _PROMPT_MODULES["comprehensive_analysis"] = """
   - 改造後：一次性按結構分配，每個維度只在「指定段落」深入，其他段落引用即可
   - 結果：時間從 15-30 分降到 8-15 分，成本降 ~50%，且報告更易讀
 
+★ #6 結論段必須含「分批進場建議」表格（直接引用 compute_laddered_entries 結果）：
+  - 引用 long_entries / short_entries 的 price + size_pct + source 欄位（不可推算）
+  - 引用 weighted_avg_entry / stop_loss / take_profit / rr 欄位
+  - 引用 ratio_strategy 說明配比邏輯
+  - 若 enabled = false → 改為「regime 信心 X% 過低，建議單一進場 + 小倉位試單」並省略表格
+  - 若 missing_indicators 非空 → 必須先呼叫 manage_indicator(action="add") 補回再重算
+
 ★ 結尾格式（必含）：
 ---
 📋 **全部分析完成 — 跨維度交叉驗證**
@@ -1069,6 +1095,7 @@ _PROMPT_MODULES["comprehensive_analysis"] = """
 ✅ 動能特徵：[多週期方向 + 加速/減速]
 ✅ 8 策略回測：[最佳策略 + Wilson CI 下界]
 ✅ 量化研究：[IC 穩定性 + WF 一致性]
+✅ 分批進場：[配比策略 + 加權均價 + RR]
 🎯 最終結論：[方向] / 信心 [高/中/低] / 建議倉位 [百分比]
 ---
 """
@@ -1959,6 +1986,40 @@ FUNCTION_DEFINITIONS = [
                         "type": "integer",
                         "description": "預測有效期（K 線根數，預設 5）",
                         "default": 5,
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+
+    # ── 分批進場價位計算（v99）──
+    {
+        "type": "function",
+        "function": {
+            "name": "compute_laddered_entries",
+            "description": (
+                "計算分批進場價位（後端從 BB / EMA / Donchian / ATR 取，禁止 LLM 自行推算）。"
+                "依當前 regime 自動決定配比（trending → 50/30/20 金字塔加碼；ranging → 25/35/40 倒金字塔接刀；high_vol → 33/33/34 對稱）。"
+                "輸出多空各 N 檔具體價位 + 加權均價 + SL/TP（基於 ATR），給「全部分析」結論段引用。"
+                "regime confidence < 0.5 時自動跳過分批（用既有 regimeWarning 機制）。"
+                "適用場景：「給我具體進場價」「分批進場建議」「ladder 進場」「scale-in 策略」「全部分析」。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "交易對，留空使用當前圖表"},
+                    "timeframe": {"type": "string", "description": "時間框架（如 1h, 4h, 1d）"},
+                    "direction": {
+                        "type": "string",
+                        "enum": ["long", "short", "both"],
+                        "description": "計算方向（預設 both — 多空都算）",
+                        "default": "both",
+                    },
+                    "n_tranches": {
+                        "type": "integer",
+                        "description": "分檔數（預設 3，本版固定 3）",
+                        "default": 3,
                     },
                 },
                 "required": [],
