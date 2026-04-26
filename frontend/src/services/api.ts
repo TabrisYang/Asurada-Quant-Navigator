@@ -231,7 +231,7 @@ export function streamChatMessage(
         const decoder = new TextDecoder();
         let buffer = '';
         let currentEvent = '';
-        const STREAM_TIMEOUT_MS = 180_000;
+        const STREAM_TIMEOUT_MS = 300_000;
 
         try {
           while (true) {
@@ -248,7 +248,7 @@ export function streamChatMessage(
               if (!value) {
                 // 超時：強制斷開 HTTP 連線，通知後端停止處理
                 controller.abort();
-                wrappedCallbacks.onError?.('分析連線無回應超過 180 秒，已自動斷開（如分析仍在進行請查看後端 log）');
+                wrappedCallbacks.onError?.('分析連線無回應超過 300 秒，已自動斷開（如分析仍在進行請查看後端 log）');
               }
               break;
             }

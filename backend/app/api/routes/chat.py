@@ -1522,7 +1522,18 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                         chart_timeframe = (request.chart_state or {}).get("timeframe", "4h")
                         _msg = "首次分析，正在校準指標參數..." if not _cal_path.exists() else "校準參數已過期，正在更新..."
                         yield _sse_event("status", {"message": _msg})
-                        run_calibration(chart_symbol, chart_timeframe)
+                        # 包成 task + 心跳，避免校準時 SSE 沉默
+                        _cal_task = asyncio.create_task(
+                            asyncio.to_thread(run_calibration, chart_symbol, chart_timeframe)
+                        )
+                        _cal_hb = 0
+                        while not _cal_task.done():
+                            await asyncio.sleep(5)
+                            _cal_hb += 5
+                            yield _sse_event("status", {
+                                "message": f"{_msg.rstrip('...')}... ({_cal_hb}秒)"
+                            })
+                        _cal_task.result()  # 觸發 raise 若有錯
                         logger.info(f"自動校準完成: {chart_symbol}")
                 except Exception as e:
                     logger.warning(f"自動校準失敗（不影響分析）: {e}")
@@ -1577,7 +1588,19 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                 },
             }]
             try:
-                _pre_bt_result = await execute_function_calls(_pre_bt_calls, chart_state=request.chart_state)
+                # 預回測 6 個策略累計 60-180+ 秒，必須帶心跳避免前端 SSE timeout 誤判
+                _pre_bt_task = asyncio.create_task(
+                    execute_function_calls(_pre_bt_calls, chart_state=request.chart_state)
+                )
+                _active_tasks.append(_pre_bt_task)
+                _pre_bt_hb = 0
+                while not _pre_bt_task.done():
+                    await asyncio.sleep(5)
+                    _pre_bt_hb += 5
+                    yield _sse_event("status", {
+                        "message": f"正在預跑 6 個策略回測... ({_pre_bt_hb}秒，通常需 60-180 秒)"
+                    })
+                _pre_bt_result = _pre_bt_task.result()
                 _pre_bt_summary = _format_function_results(_pre_bt_calls, _pre_bt_result)
                 if _pre_bt_summary:
                     # 注入到 messages 的使用者訊息之前（倒數第一條是使用者訊息）
@@ -1706,7 +1729,19 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                             for fn in _missing_funcs
                         ]
                         try:
-                            _fill_result = await execute_function_calls(_fill_calls, chart_state=request.chart_state)
+                            # 補齊函式可能含 run_quant_research 等重操作，要心跳
+                            _fill_task = asyncio.create_task(
+                                execute_function_calls(_fill_calls, chart_state=request.chart_state)
+                            )
+                            _active_tasks.append(_fill_task)
+                            _fill_hb = 0
+                            while not _fill_task.done():
+                                await asyncio.sleep(5)
+                                _fill_hb += 5
+                                yield _sse_event("status", {
+                                    "message": f"正在補齊缺失分析函式... ({_fill_hb}秒，{', '.join(_missing_funcs)})"
+                                })
+                            _fill_result = _fill_task.result()
                             if "results" in _fill_result and _fill_result["results"]:
                                 _fitems = _fill_result["results"] if isinstance(_fill_result["results"], list) else [_fill_result["results"]]
                                 exec_result.setdefault("results", []).extend(_fitems)
