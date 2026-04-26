@@ -948,6 +948,15 @@ GET    /api/health                   # 系統健康狀態
     **Level 1**（unknown regime 自動記錄）：新增 `backend/app/core/unknown_regime_logger.py`，confidence < 0.5 時自動寫進 `unknown_regime_log.db`，累積樣本給未來 Level 2 auto-classify 用
     LLM 解讀指引（function_defs.py）加 currentRegime / regimeWarning / per_regime_metrics 的解讀範例，教 LLM「依當前 regime 過濾哪些策略結果可信」「低信心時主動警示」「跨 regime 比較策略 robustness」
 
+98. ✅ 「全部分析」按鈕去重重構 + 三階段真序列執行（系統 prompt 強化第 4 波）：
+    **A1**（[chat.py:1620](backend/app/api/routes/chat.py#L1620) `_PRE_BT_INTENTS`）：加 `deep_phase3` + `comprehensive_analysis` 進預回測白名單，讓「全部分析」/「完整分析三」也跑 8 策略對比。原本只有 phase1/2 跑，phase3 與 comprehensive 直接跳過 → 缺乏對比基礎
+    **A2**（[ChatInterface.tsx:90](frontend/src/components/ChatInterface/ChatInterface.tsx#L90) + 點擊處理）：「完整分析三階段」按鈕改成 sequence 欄位（含 phase 1/2/3 三條 prompt），按下後第一條直接送、第 2-3 條進 messageQueue 自動接力。原本按鈕文字是「完整分析三階段」但 prompt 只送「完整分析一」，第二、三階段從沒真的跑
+    **A3**（[function_defs.py](backend/app/core/llm/function_defs.py) CORE 第 250 行附近）：加「回測結果引用規則」段落，強制 LLM 必須引用 `per_regime_metrics`（拆 regime 勝率）+ `wilson_ci_lower/upper`（信心區間），策略對比按 Wilson 下界排名，避免被高勝率少樣本誤導
+    **B1+B3+B4**（comprehensive_analysis 新意圖）：function_defs.py 新增 `comprehensive_analysis` intent 關鍵字（"全部分析", "完整全面分析" 等），在 detect_intents 內自動剝除 deep_analysis/factor_validation/momentum_analysis 等低階意圖避免重複；新增 `_DOMINANCE` 字典在 assemble_system_prompt_split 內套用模組支配關係（高階模組存在時自動移除被支配的低階 prompt）；chat.py `_REQUIRED_ANALYSIS_FUNCS` 加 comprehensive_analysis 對應的 6 個必要函式（detect_smc_structure / generate_scenarios / analyze_momentum / compare_strategies / scan_conditional_probability / run_quant_research）
+    **B2**（[function_defs.py](backend/app/core/llm/function_defs.py) `_PROMPT_MODULES["comprehensive_analysis"]`）：新增統合報告 prompt，定義 6 段固定報告結構（市場環境 / 結構 / 動能 / 8 策略回測 / 量化研究 / 跨維度結論）+ 4 條禁止重複規則（動能只寫 #3、因子只寫 #5、regime 只寫 #1、結論段不重述）+ 函式呼叫順序 + 每段字數預算（總計 1500-2000 字 vs 改造前 4000+ 字）
+    **B5**（[chat.py:1639](backend/app/api/routes/chat.py#L1639) 預回測策略）：6 策略加 2 個 ROC 動量策略（多/空）變 8 策略，避免動能分析另外跑回測；status 文案同步更新（"6 個策略" → "8 個策略"，預估時間 60-180s → 80-240s）
+    預期改善：函式呼叫 6-8 → 5；時間 15-30 分 → 8-15 分；token 輸入 40K → 25-30K；報告 10K+ 字 → 6-8K 字；Anthropic 成本省 50%
+
 ### 待開發功能
 
 - ⬜ CI/CD 流程建立

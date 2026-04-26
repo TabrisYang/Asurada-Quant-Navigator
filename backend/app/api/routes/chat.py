@@ -1616,7 +1616,12 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
         )
 
         # ★ 預回測：分析意圖時，在 LLM 呼叫前先跑多空策略回測，注入上下文
-        _PRE_BT_INTENTS = {"analysis", "deep_analysis", "deep_phase1", "deep_phase2"}
+        # ★ A1: 加 deep_phase3 + comprehensive_analysis（讓「全部分析」也跑 6 策略對比）
+        _PRE_BT_INTENTS = {
+            "analysis", "deep_analysis",
+            "deep_phase1", "deep_phase2", "deep_phase3",
+            "comprehensive_analysis",
+        }
         if (_intents & _PRE_BT_INTENTS) and chart_symbol:
             yield _sse_event("status", {"message": "正在預跑策略回測..."})
             _pre_bt_calls = [{
@@ -1632,6 +1637,9 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                         {"name": "趨勢跟蹤(空)", "entry_conditions": ["ema_20 < ema_60", "rsi_14 < 50"], "exit_conditions": ["ema_20 > ema_60"], "direction": "short", "stop_loss_pct": 8.0, "take_profit_pct": 12.0, "compatible_regimes": ["trending_down"]},
                         {"name": "均值回歸(空)", "entry_conditions": ["rsi_14 > 70", "bb_position > 0.8"], "exit_conditions": ["rsi_14 < 30"], "direction": "short", "stop_loss_pct": 5.0, "take_profit_pct": 8.0, "compatible_regimes": ["ranging", "low_vol"]},
                         {"name": "動量突破(空)", "entry_conditions": ["close < bb_lower", "volume_ratio > 1.5"], "exit_conditions": ["rsi_14 < 20", "volume_ratio < 0.8"], "direction": "short", "stop_loss_pct": 6.0, "take_profit_pct": 10.0, "compatible_regimes": ["trending_down", "high_vol"]},
+                        # ★ B5：加 2 個 ROC 動量策略（避免動能分析另外跑回測 → 6 → 8 策略）
+                        {"name": "ROC動量(多)", "entry_conditions": ["roc_10 > 5", "rsi_14 > 55"], "exit_conditions": ["roc_10 < 0"], "direction": "long", "stop_loss_pct": 6.0, "take_profit_pct": 10.0, "compatible_regimes": ["trending_up", "high_vol"]},
+                        {"name": "ROC動量(空)", "entry_conditions": ["roc_10 < -5", "rsi_14 < 45"], "exit_conditions": ["roc_10 > 0"], "direction": "short", "stop_loss_pct": 6.0, "take_profit_pct": 10.0, "compatible_regimes": ["trending_down", "high_vol"]},
                     ],
                 },
             }]
@@ -1648,7 +1656,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                     await asyncio.sleep(5)
                     _pre_bt_hb += 5
                     yield _sse_event("status", {
-                        "message": f"正在預跑 6 個策略回測... ({_pre_bt_hb}秒，通常需 60-180 秒)"
+                        "message": f"正在預跑 8 個策略回測... ({_pre_bt_hb}秒，通常需 80-240 秒)"
                     })
                 _pre_bt_result = _pre_bt_task.result()
                 _pre_bt_summary = _format_function_results(_pre_bt_calls, _pre_bt_result)
@@ -1658,7 +1666,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                         "role": "user",
                         "content": (
                             "[系統預回測結果 — 必須參考]\n"
-                            "以下是系統自動對 6 種策略（做多 3 + 做空 3）執行的歷史回測結果。\n"
+                            "以下是系統自動對 8 種策略（做多 4 + 做空 4，含 ROC 動量）執行的歷史回測結果。\n"
                             "你在分析時必須參考這些數據，結論必須與回測結果一致。\n"
                             "如果所有做多策略回測均虧損，不可建議做多；反之亦然。\n"
                             "如果所有策略均虧損，結論必須為「觀望」或「僅適合小倉位試單」。\n\n"
@@ -1752,7 +1760,13 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                     _llm_called_funcs = {fc.get("name") for fc in response.function_calls} if response.function_calls else set()
 
                     # ★ 分析意圖必要函式補齊：檢查 prompt 要求的函式是否已執行
+                    # 注意：comprehensive_analysis 放最前面（dict 迭代順序 = 插入順序，loop 用 break）
                     _REQUIRED_ANALYSIS_FUNCS: dict[str, list[str]] = {
+                        "comprehensive_analysis": [
+                            "detect_smc_structure", "generate_scenarios",
+                            "analyze_momentum", "compare_strategies",
+                            "scan_conditional_probability", "run_quant_research",
+                        ],
                         "analysis": ["generate_scenarios", "detect_smc_structure"],
                         "deep_phase1": ["generate_scenarios", "detect_smc_structure"],
                         "deep_analysis": ["generate_scenarios", "detect_smc_structure"],

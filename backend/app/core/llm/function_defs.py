@@ -75,6 +75,9 @@ _INTENT_KEYWORDS: dict[str, list[str]] = {
     "deep_phase3": [
         "完整分析三", "完整分析3", "全面分析三", "深度分析三",
     ],
+    "comprehensive_analysis": [
+        "全部分析", "完整全面分析", "一次完整", "comprehensive",
+    ],
     "factor_validation": [
         "因子驗證", "因子排名", "ic排名", "哪個因子", "哪些因子有效",
         "因子分析", "factor validation", "因子評分",
@@ -139,6 +142,15 @@ def detect_intents(message: str, mode: str | None = None) -> set[str]:
         intents.discard("analysis")  # 各階段有專屬模組，不需一般分析模組
     elif "deep_analysis" in intents:
         intents.discard("analysis")  # 完整分析有專屬模組
+
+    # ── comprehensive_analysis（全部分析）支配：吃掉所有其他分析意圖
+    if "comprehensive_analysis" in intents:
+        for sub in (
+            "deep_analysis", "deep_phase1", "deep_phase2", "deep_phase3",
+            "analysis", "factor_validation", "momentum_analysis",
+            "regime_analysis", "strategy_backtest",
+        ):
+            intents.discard(sub)
 
     # 降級邏輯：同時命中 simple_query + analysis 但沒有明確分析詞 → 視為簡單查詢
     if "simple_query" in intents and "analysis" in intents:
@@ -254,6 +266,13 @@ chart_state 中的 indicatorValues 包含系統精確計算的指標數值（最
 - 若策略結果中有 compatible_regimes 標籤（在 strategies 參數裡），你必須**根據當前 regime 過濾哪些策略結果可信**：
     * 當前 regime 在策略 compatible_regimes 內 → 該策略回測結果可採信
     * 當前 regime **不在** compatible_regimes 內 → 該策略結果是「在錯的環境跑出來的」，**不該採信**，可標示「此策略不適合當前 regime，僅作參考」
+
+【★★ 回測結果引用規則 — 強制 ★★】
+任何回測結果（run_backtest / compare_strategies / run_quant_research）回傳含以下欄位時，你**必須**引用，不可只報平均勝率：
+- `per_regime_metrics`：拆解該策略在「不同 regime」下的勝率/Sharpe/交易次數。必須說明「此策略在 trending_up 時勝率 X%，但在 ranging 時掉到 Y%」這類分布訊息。只報平均勝率會掩蓋環境依賴性。
+- `wilson_ci_lower` / `wilson_ci_upper`（Wilson 信心區間）：必須一併報告，不可只報點估值。例：勝率 60%（樣本 25 筆，95% CI: 41% - 77%）。樣本數少時 CI 寬到統計不顯著，要明說「樣本不足以下結論」。
+- 若 `per_regime_metrics` 顯示策略只在某種 regime 有效，且**當前 regime 不是該類**，必須標示「此策略在當前環境不適用」並降低權重。
+- 報告策略對比時，必須以「Wilson CI 下界排名」為主要排序依據（避免被高勝率但少樣本的策略誤導）。
 
 【★★ 數據驅動分析規則 — 零模糊容忍】
 你的每一句分析結論都必須附帶「具體數值 + 判斷閾值 + 機制解釋」，絕對不可只說結論不給數據。
@@ -1001,6 +1020,59 @@ _PROMPT_MODULES["output_deep_phase3"] = """
 🎯 最終結論：[方向] / 信心 [等級] / 建議倉位 [百分比]
 ---"""
 
+_PROMPT_MODULES["comprehensive_analysis"] = """
+【★★★ 全部分析 — 統合報告（去重版） ★★★】
+
+你被要求做一份「跨維度完整分析」。這是「全部分析」按鈕觸發的最高等級分析模式 —
+含市場結構 + 動能 + 多策略回測 + 因子驗證 + 量化研究，但要求**嚴格去重**避免冗長。
+
+★ 報告結構（嚴格依此順序，不可重組）：
+  1. 📊 市場環境（regime 分類 + currentRegime + sector/basket breadth + crossStockSignals）
+  2. 🏛 結構分析（SMC + 趨勢方向 + STL 分解結果 decomposition）
+  3. ⚡ 動能特徵（多週期動量 + 加速度 + 相對強弱 + RSI 背離）
+  4. 🧪 多策略回測比較（系統已預跑 8 策略，含 ROC 動量；引用 per_regime_metrics + Wilson CI）
+  5. 🔬 量化研究（IC + Walk Forward + Monte Carlo + 因子有效性）
+  6. 🎯 跨維度結論 + 倉位建議（綜合 #1-5 交叉驗證，這裡才下決策）
+
+★ 禁止重複規則（嚴格遵守，違反等同分析失敗）：
+  - 「動能」結論只寫在 #3，#2 / #6 提及時用「見動能段落」即可，不可重述數值
+  - 「因子」結論只寫在 #5，#4 引用 IC 數據而非重新解讀因子有效性
+  - 「regime」結論只寫在 #1，後續段落引用 regime 標籤即可
+  - 「SMC 結構」只寫在 #2，#6 引用結論不重述 BOS/CHoCH 細節
+  - 結論段（#6）不重述前段內容，只做「跨維度交叉驗證 + 決策」
+    例：「結構偏多（#2）+ 動能加速（#3）+ 趨勢策略樣本內勝率高（#4）+ IC 穩定（#5）→ 多頭證據齊備」
+
+★ 函式呼叫順序（按需呼叫，不重複；compare_strategies 已由系統預跑，不再呼叫）：
+  1. detect_smc_structure       → 給 #2 用
+  2. generate_scenarios          → 給 #2 用（情境預測併入結構段）
+  3. analyze_momentum            → 給 #3 用
+  4. scan_conditional_probability → 給 #4 用（補充預跑回測的條件機率視角）
+  5. run_quant_research          → 給 #5 用（IC + WF + MC + 因子驗證一併取得）
+
+★ 字數預算（避免超長）：
+  - #1 / #2 / #3：各 200-300 字
+  - #4：300-400 字（含 8 策略對比表 + Wilson CI）
+  - #5：300-400 字（IC + WF + MC 交叉驗證）
+  - #6：200-300 字（純結論 + 倉位建議，不重述）
+  - 總計：1500-2000 字（vs 改造前 4000+ 字）
+
+★ 為何要這樣設計：
+  - 改造前：因子驗證 + 動能分析 + 三階段分析各自跑一套，內容重疊 30-40%，token 浪費
+  - 改造後：一次性按結構分配，每個維度只在「指定段落」深入，其他段落引用即可
+  - 結果：時間從 15-30 分降到 8-15 分，成本降 ~50%，且報告更易讀
+
+★ 結尾格式（必含）：
+---
+📋 **全部分析完成 — 跨維度交叉驗證**
+✅ 市場環境：[regime + 廣度結論]
+✅ 結構分析：[SMC bias + 趨勢方向]
+✅ 動能特徵：[多週期方向 + 加速/減速]
+✅ 8 策略回測：[最佳策略 + Wilson CI 下界]
+✅ 量化研究：[IC 穩定性 + WF 一致性]
+🎯 最終結論：[方向] / 信心 [高/中/低] / 建議倉位 [百分比]
+---
+"""
+
 _PROMPT_MODULES["teaching"] = """
 【教學模式 — 面向學習者的解說】
 你目前處於教學模式。除了正常分析，你必須額外做到：
@@ -1212,6 +1284,31 @@ _INTENT_TO_MODULES: dict[str, list[str]] = {
     "sector_analysis": [
         "regime_v2", "sector_analysis", "output_lite", "risk_checklist",
     ],
+    # ── 全部分析（去重統合版）──
+    # 載入所有相關模組，後續由 _DOMINANCE 統一移除被支配的低階模組
+    "comprehensive_analysis": [
+        "regime_v2", "analysis_v2", "factor_validation",
+        "scenario", "smc", "drawing", "risk_checklist",
+        "backtest", "auto_backtest", "conditional_prob",
+        "quant_research", "calibrate", "alpha_monitor",
+        "comprehensive_analysis",  # 統合報告 prompt（最重要，定義報告結構）
+    ],
+}
+
+# ═══════════════════════════════════════════════════════
+# 模組支配關係（B3）— 高階模組支配低階，避免重複載入
+# ═══════════════════════════════════════════════════════
+# 例：comprehensive_analysis 已包含三階段 + 因子驗證 + 動能 + 量化研究的內容，
+#     若同時被偵測到（理論上 detect_intents 已排除），仍要保險把低階模組移除
+_DOMINANCE: dict[str, list[str]] = {
+    "quant_research": ["factor_validation"],
+    "output_deep_phase3": ["output_deep_phase1", "output_deep_phase2"],
+    "comprehensive_analysis": [
+        "factor_validation_mode", "momentum_analysis_mode",
+        "regime_analysis_mode", "strategy_backtest_mode",
+        "output_deep_phase1", "output_deep_phase2", "output_deep_phase3",
+        "output_lite", "output_full",  # 統合 prompt 自帶輸出格式
+    ],
 }
 
 
@@ -1253,6 +1350,7 @@ _MODULE_ORDER = (
     "auto_backtest", "risk_checklist", "alpha_monitor",
     "output_lite", "output_full",
     "output_deep_phase1", "output_deep_phase2", "output_deep_phase3",
+    "comprehensive_analysis",  # ★ 全部分析統合 prompt（位置在三階段之後、其他細節之前）
     "drawing", "event_analysis", "conditional_prob", "scenario", "smc",
     "quant_research", "calibrate", "backtest",
     "sector_analysis",
@@ -1269,8 +1367,18 @@ def assemble_system_prompt_split(modules_needed: set[str]) -> tuple[str, str]:
     dynamic：時間戳記（每分鐘變）→ 不能 cache，必須放後面
 
     Cache 可命中的關鍵：static 段內容 100% 穩定，跟掛時鐘無關。
+
+    ★ B3：套用 _DOMINANCE 模組支配關係 — 高階模組存在時自動移除被支配的低階模組，
+       避免重複內容浪費 token（例：comprehensive_analysis 會吃掉三階段 + 因子驗證等）。
     """
     from datetime import datetime
+
+    # ★ 模組支配關係處理（避免高階+低階模組同時載入造成重複）
+    modules_needed = set(modules_needed)  # 不污染呼叫端
+    for dominant, dominated_list in _DOMINANCE.items():
+        if dominant in modules_needed:
+            for d in dominated_list:
+                modules_needed.discard(d)
 
     parts = [_PROMPT_CORE]
     for mod_key in _MODULE_ORDER:

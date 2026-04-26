@@ -83,11 +83,12 @@ const ANALYSIS_CATEGORIES = [
   },
   {
     tab: '完整分析',
-    allPrompt: '對 {symbol} 進行完整量化研究 + 因子驗證與監控 + 完整分析三階段',
+    allPrompt: '對 {symbol} 進行全部分析（含市場結構 + 動能 + 多策略回測 + 因子驗證 + 量化研究）',
     items: [
       { label: '完整量化研究', prompt: '對 {symbol} 進行完整量化研究（因子IC + Monte Carlo + Walk Forward + CPCV + GMM/GARCH/HMM）' },
       { label: '因子驗證與監控', prompt: '驗證 {symbol} 當前哪些因子有效、哪些已衰退' },
-      { label: '完整分析三階段', prompt: '完整分析一 {symbol}' },
+      // ★ A2：sequence 欄位讓按鈕真正依序執行 phase 1 → 2 → 3（透過 messageQueue 自動接力）
+      { label: '完整分析三階段', prompt: '完整分析一 {symbol}', sequence: ['完整分析一 {symbol}', '完整分析二 {symbol}', '完整分析三 {symbol}'] },
     ],
   },
 ];
@@ -892,7 +893,22 @@ export default function ChatInterface() {
                 key={i}
                 onClick={() => {
                   const sym = useChartStore.getState().symbol || 'BTC/USDT';
-                  setInput(item.prompt.replace('{symbol}', sym));
+                  // ★ A2：含 sequence 欄位 → 自動依序送 N 條訊息（用既有的 messageQueueRef）
+                  const seq = (item as any).sequence as string[] | undefined;
+                  if (seq && seq.length > 0) {
+                    // 第 1 條：直接送
+                    const first = seq[0].replace('{symbol}', sym);
+                    setInput(first);
+                    setTimeout(() => handleSend(), 50);
+                    // 第 2-N 條：排隊（_processQueue 會在前一條完成後自動接力）
+                    for (let k = 1; k < seq.length; k++) {
+                      const text = seq[k].replace('{symbol}', sym);
+                      messageQueueRef.current.push({ text });
+                    }
+                    setQueueLength(messageQueueRef.current.length);
+                  } else {
+                    setInput(item.prompt.replace('{symbol}', sym));
+                  }
                 }}
                 className="px-2.5 py-1 rounded text-xs cursor-pointer transition-colors"
                 style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)' }}
