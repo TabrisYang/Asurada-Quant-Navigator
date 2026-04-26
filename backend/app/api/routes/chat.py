@@ -1189,6 +1189,33 @@ def _sse_event(event_type: str, data: dict) -> str:
     return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+def _execute_function_calls_in_thread(*args, **kwargs):
+    """在 worker thread 內開新 event loop 跑 execute_function_calls。
+
+    ★ 為什麼需要這個：
+    execute_function_calls 內部會呼叫重 CPU 的 sync 操作（ML 訓練、回測、
+    Monte Carlo、Walk Forward 等），這些是 NumPy/pandas/sklearn 的 sync
+    呼叫，會阻塞 asyncio event loop。
+
+    若直接 await execute_function_calls(...)，主 event loop 在重操作期間
+    無法處理任何其他協程 → 心跳 yield SSE event 排不上時程 → 前端誤判
+    超時斷線。
+
+    解法：用 asyncio.to_thread + 新 event loop，讓 execute 在獨立 thread
+    執行，主 event loop 完全不被佔用。
+
+    用法：
+        _fc_task = asyncio.create_task(asyncio.to_thread(
+            _execute_function_calls_in_thread, fcs, chart_state=..., progress=...
+        ))
+    """
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(execute_function_calls(*args, **kwargs))
+    finally:
+        loop.close()
+
+
 async def _post_process_chat_message(
     *,
     final_text: str,
@@ -1588,10 +1615,12 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                 },
             }]
             try:
-                # 預回測 6 個策略累計 60-180+ 秒，必須帶心跳避免前端 SSE timeout 誤判
-                _pre_bt_task = asyncio.create_task(
-                    execute_function_calls(_pre_bt_calls, chart_state=request.chart_state)
-                )
+                # 預回測 6 個策略累計 60-180+ 秒，跑在 worker thread 避免阻塞主 event loop
+                # （主 loop 必須空著才能即時 yield 心跳 SSE event）
+                _pre_bt_task = asyncio.create_task(asyncio.to_thread(
+                    _execute_function_calls_in_thread,
+                    _pre_bt_calls, chart_state=request.chart_state,
+                ))
                 _active_tasks.append(_pre_bt_task)
                 _pre_bt_hb = 0
                 while not _pre_bt_task.done():
@@ -1661,9 +1690,11 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                 yield _sse_event("status", {"message": "正在執行圖表操作..."})
 
                 # 執行 function calls（無超時限制，以進度百分比回報）
+                # ★ 跑在 worker thread 避免 ML/回測等重 sync 操作阻塞主 event loop
                 try:
                     _fc_progress = ProgressTracker()
-                    _fc_task = asyncio.create_task(execute_function_calls(
+                    _fc_task = asyncio.create_task(asyncio.to_thread(
+                        _execute_function_calls_in_thread,
                         response.function_calls, chart_state=request.chart_state,
                         progress=_fc_progress,
                     ))
@@ -1729,10 +1760,12 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                             for fn in _missing_funcs
                         ]
                         try:
-                            # 補齊函式可能含 run_quant_research 等重操作，要心跳
-                            _fill_task = asyncio.create_task(
-                                execute_function_calls(_fill_calls, chart_state=request.chart_state)
-                            )
+                            # 補齊函式可能含 run_quant_research 等重操作，
+                            # 同樣丟 worker thread 跑 + 主 loop 心跳
+                            _fill_task = asyncio.create_task(asyncio.to_thread(
+                                _execute_function_calls_in_thread,
+                                _fill_calls, chart_state=request.chart_state,
+                            ))
                             _active_tasks.append(_fill_task)
                             _fill_hb = 0
                             while not _fill_task.done():

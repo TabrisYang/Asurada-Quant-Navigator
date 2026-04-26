@@ -933,7 +933,10 @@ GET    /api/health                   # 系統健康狀態
     - **預回測**（line 1580）：6 個策略回測累計 60-180+ 秒，原本 `await execute_function_calls()` 期間完全沉默
     - **補齊缺失函式**（line 1709）：含 run_quant_research 等重操作，可能 30-90 秒沉默
     - **自動校準**（line 1525）：sync 函式 run_calibration 直接呼叫，可能阻塞 10-60 秒
-    解法：三處都包成 `asyncio.create_task` + 每 5 秒 yield 帶秒數的 status event；前端 `STREAM_TIMEOUT_MS` 從 180s 拉到 300s 當雙重保險。實際效果：使用者看到「正在預跑 6 個策略回測... (90 秒，通常需 60-180 秒)」即時進度，知道系統還在跑、不是卡住
+    解法：三處都包成 `asyncio.create_task` + 每 5 秒 yield 帶秒數的 status event；前端 `STREAM_TIMEOUT_MS` 從 180s 拉到 300s 當雙重保險
+96. ✅ 修復「完整分析」期間 SSE timeout 誤報（深層）：上一輪心跳修了「await 沒回應」，但實測仍 300s timeout。
+    根因：function execution 內部呼叫 `run_quant_research` / `run_walk_forward` / `run_monte_carlo` 等都是 sync NumPy/pandas/sklearn 計算，**直接阻塞 asyncio event loop**（無 `await` 切換點）。即使 chat.py heartbeat loop 有 `await asyncio.sleep(2)`，event loop 被卡住期間 sleep 也排不上時程，心跳事件實際間隔變成 60-300+ 秒，前端誤判超時斷線。
+    解法：新增 `_execute_function_calls_in_thread()` helper，把 `execute_function_calls` 透過 `asyncio.to_thread` 丟到 worker thread 執行（thread 內開新 event loop 跑 async 內容）。主 event loop 完全不被 ML 計算佔用 → 心跳每 2-5 秒準時觸發 → 前端持續收到進度 → 不再誤判超時。三個 call site（預回測 / 主函式執行 / 補齊缺失函式）統一改用 thread 模式
 
 ### 待開發功能
 
