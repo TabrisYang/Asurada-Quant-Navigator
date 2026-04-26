@@ -59,8 +59,9 @@
 │  │ +7種分析  │ │ +AI標記  │ │ +策略庫設定            │  │
 │  │ +進度狀態 │ │ +可調副圖│ │ +同步面板+預警系統     │  │
 │  └──────────┘ └──────────┘ └────────────────────────┘  │
-│  分析模式：基礎分析 / 因子驗證 / 策略回測 /              │
-│           市場體制 / 基本面 / 動能分析 / 完整分析         │
+│  分析模式：基礎分析 / 因子驗證 / 策略回測 / 市場體制 /     │
+│           基本面 / 動能分析 / 完整分析三階段 /              │
+│           全部分析（v98 去重統合，6 段固定報告）            │
 └─────────────────────────────────────────────────────────┘
                            ↕
 ┌─────────────────────────────────────────────────────────┐
@@ -72,7 +73,8 @@
 │  │  + Function Calling (21 個函式)                  │      │
 │  │  + 三輪互動 + 截斷自動續寫                      │      │
 │  │  + 使用者策略注入 + 知識蒸餾注入                │      │
-│  │  + 動態 Intent 偵測（18 種意圖）                │      │
+│  │  + 動態 Intent 偵測（19 種意圖，含 comprehensive）│      │
+│  │  + _DOMINANCE 模組支配（高階 prompt 自動吃掉低階）│      │
 │  └────────────────────────────────────────────────┘      │
 │                           ↕                                │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
@@ -573,6 +575,50 @@
 - **回測策略多元化**：5 種策略模板（含不同嚴格度 + 必含至少 1 個做空策略），未指定時自動比較至少 4 種
 - **指標必須同步添加**：文字提到的指標必須同時呼叫 manage_indicator 添加到圖表
 - **知識萃取**：每次分析後自動附加 `---KEY_INSIGHTS---` 結構化知識碎片
+- **回測結果引用強制規則**（v98 新增）：任何回測函式回傳含 `per_regime_metrics` / `wilson_ci_lower/upper` 時，LLM **必須**引用，不可只報平均勝率。策略對比按 Wilson CI 下界排名（避免被高勝率少樣本誤導）；當前 regime 不在策略 `compatible_regimes` 內的結果，必須標示「不適用」並降權
+
+### 意圖驅動的 SYSTEM_PROMPT 動態組裝（v98 強化）
+
+每次對話前由 `detect_intents()` 對訊息做關鍵字匹配，產出意圖集合 → `_INTENT_TO_MODULES` 對應模組 → `assemble_system_prompt_split()` 套用 `_DOMINANCE` 支配關係 → 拆 (static, dynamic) 兩段（static 進 cache_control）。
+
+**意圖支配關係（避免高低階模組同時載入造成重複）**：
+
+| 高階模組 | 支配（移除）的低階模組 |
+|---|---|
+| `quant_research` | `factor_validation` |
+| `output_deep_phase3` | `output_deep_phase1` / `output_deep_phase2` |
+| `comprehensive_analysis`（全部分析）| `output_deep_phase1/2/3` + `output_lite/full` + `factor_validation_mode` + `momentum_analysis_mode` + `regime_analysis_mode` + `strategy_backtest_mode` |
+
+**關鍵字 → 意圖**（節錄）：
+
+| 意圖 | 關鍵字 |
+|---|---|
+| `comprehensive_analysis` | 全部分析、完整全面分析、一次完整、comprehensive |
+| `deep_phase1/2/3` | 完整分析一/二/三、全面分析一/二/三、深度分析一/二/三 |
+| `deep_analysis` | 完整分析、全面分析、詳細分析、深度分析 |
+| `factor_validation` | 因子驗證、因子排名、IC 排名、哪些因子有效 |
+| `momentum_analysis` | 動能、動量、追強、相對強弱、ROC、加速、減速 |
+
+`comprehensive_analysis` 命中後 `detect_intents` 會自動 `discard()` 所有低階分析意圖（deep_analysis / deep_phase1-3 / analysis / factor_validation / momentum_analysis / regime_analysis / strategy_backtest），確保只走「統合報告」單一路徑，不會多載重複 prompt。
+
+### 全部分析統合報告 prompt（v98 新增）
+
+`_PROMPT_MODULES["comprehensive_analysis"]` 載入時定義 6 段固定報告結構：
+
+1. 📊 **市場環境**（regime + currentRegime + sector/basket breadth + crossStockSignals）
+2. 🏛 **結構分析**（SMC + 趨勢方向 + STL decomposition）
+3. ⚡ **動能特徵**（多週期動量 + 加速度 + 相對強弱 + RSI 背離）
+4. 🧪 **多策略回測比較**（系統預跑 8 策略 + per_regime_metrics + Wilson CI）
+5. 🔬 **量化研究**（IC + Walk Forward + Monte Carlo + 因子有效性）
+6. 🎯 **跨維度結論 + 倉位建議**（綜合 #1-5 交叉驗證）
+
+**禁止重複規則**（嚴格遵守）：
+- 「動能」結論只寫 #3，#2/#6 提及時用「見動能段落」
+- 「因子」結論只寫 #5，#4 引用 IC 數據而非重新解讀
+- 「regime」結論只寫 #1，後續引用 regime 標籤即可
+- 結論段（#6）不重述前段，只做交叉驗證 + 決策
+
+**字數預算**：總計 1500-2000 字（vs 改造前 4000+ 字 → 報告長度減半）
 
 ### LLM 安全防護
 
@@ -601,7 +647,13 @@
 | **市場體制** | GMM Regime + GARCH 波動率 + HMM 狀態轉移 + 事件型態 | ~15 秒 |
 | **基本面** | 月營收趨勢 + 法人買賣超 + 財報指標 + 綜合評分（台股限定） | ~10 秒 |
 | **動能分析** | 多週期動量 + 加速度 + 相對強弱 + 反轉偵測 + 策略回測 | ~15 秒 |
-| **完整分析** | 三階段全跑（最完整） | ~2-3 分鐘 |
+| **完整分析三階段**（按鈕）| sequence 自動接力 phase1→2→3（市場環境 → 多策略回測 → 量化研究 + 倉位建議）| ~2-3 分鐘 |
+| **全部分析**（v98 去重統合）| 一次跑：市場結構 + 動能 + 8 策略回測 + 因子驗證 + 量化研究，**禁止重複** 6 段固定結構（市場/結構/動能/回測/量化/結論），系統 prompt 強制每段只寫一次 | **~8-15 分鐘**（vs 舊版 15-30 分，省 50%）|
+
+**「全部分析」與「完整分析三階段」差異**：
+- **三階段**：3 次獨立 LLM 對話，phase1 完成 → 排隊 phase2 → 排隊 phase3，每階段獨立輸出
+- **全部分析**：1 次 LLM 對話含 6 段固定報告，預先做 8 策略回測 + 5 個函式呼叫（含 run_quant_research），統合輸出
+- 適用：要看完整連續決策過程 → 三階段；要省時 + 拿到一份統合報告 → 全部分析
 
 ### 雙軌操作（完全等價，雙向同步）
 
