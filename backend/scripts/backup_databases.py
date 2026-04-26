@@ -3,7 +3,7 @@
 策略：
 - Hot backup（用 SQLite .backup API，不會複製到寫一半的損壞狀態）
 - 跳過純快取 DB（analysis_cache / semantic_cache，可重生）
-- GFS 分層保留：每天 7 + 每週日 4 + 每月 1 號 12 + 每年 1/1 永久
+- GFS 分層保留（無年度永久版）：每天 7 + 每週日 4 + 每月 1 號 12（容量上限 ~230 MB）
 
 執行方式：
 - 手動：python3 backup_databases.py
@@ -24,7 +24,8 @@ _SKIP_PATTERNS = ("analysis_cache", "semantic_cache")  # 純快取，可重生
 _KEEP_DAILY = 7      # 最近 7 天每天保留
 _KEEP_WEEKLY = 4     # 最近 4 個週日多保留
 _KEEP_MONTHLY = 12   # 最近 12 個月初多保留
-# 每年 1/1 永久保留（不限數量）
+# 「今天跑過就跳過」旗標檔（避免 RunAtLoad 重複觸發）
+_LAST_RUN_FILE = _DB_DIR / ".backup_last_run"
 
 
 def hot_backup(src: Path, dst: Path) -> bool:
@@ -109,9 +110,8 @@ def cleanup_old_backups():
             keep.add(d.name)
             months_kept += 1
 
-        # 規則 4：每年 1/1 永久保留
-        if dt.month == 1 and dt.day == 1:
-            keep.add(d.name)
+        # 規則 4（已移除）：原本每年 1/1 永久保留 — 改為「無年度永久版」
+        # 容量上限固定 7+4+12 = 23 份 ~230 MB，永久不長
 
     deleted = 0
     for d in backup_dirs:
@@ -127,11 +127,27 @@ def main():
     print(f"   時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print()
 
+    # 「今天已跑過就跳過」邏輯（避免 RunAtLoad 在已跑過的同日重複觸發）
+    today_str = datetime.now().date().isoformat()
+    if _LAST_RUN_FILE.exists():
+        try:
+            last_str = _LAST_RUN_FILE.read_text().strip()
+            if last_str == today_str:
+                print(f"⊘ Backup 今天 ({today_str}) 已跑過，跳過")
+                return
+        except Exception:
+            pass
+
     target = backup_today()
     if target is None:
         sys.exit(1)
 
     cleanup_old_backups()
+    # 寫入「今天跑過」旗標
+    try:
+        _LAST_RUN_FILE.write_text(today_str)
+    except Exception:
+        pass
     print(f"\n✅ 完成：{target}")
 
 

@@ -27,6 +27,7 @@ _PRED_DB = _DB_DIR / "predictions.db"
 _UNKNOWN_REGIME_DB = _DB_DIR / "unknown_regime_log.db"
 _HEALTH_FILE = _DB_DIR / "system_health.json"
 _HEALTH_LOG = _DB_DIR / "health_history.log"
+_LAST_RUN_FILE = _DB_DIR / ".audit_last_run"  # 「今天跑過就跳過」的旗標檔
 
 # 退化判定閾值
 _DEGRADATION_THRESHOLD_PCT = 15.0
@@ -145,6 +146,17 @@ def main():
         print(f"\n✗ 找不到 DB 目錄：{_DB_DIR}")
         sys.exit(1)
 
+    # 「今天已跑過就跳過」邏輯（避免 RunAtLoad 在已跑過的同日重複觸發）
+    today_str = datetime.now().date().isoformat()
+    if _LAST_RUN_FILE.exists():
+        try:
+            last_str = _LAST_RUN_FILE.read_text().strip()
+            if last_str == today_str:
+                print(f"\n⊘ Audit 今天 ({today_str}) 已跑過，跳過")
+                return
+        except Exception:
+            pass  # 旗標檔讀失敗就照跑
+
     _section("1. LLM 預測命中率")
     pred_30d = compute_pred_accuracy(30)
     pred_90d = compute_pred_accuracy(90)
@@ -189,6 +201,9 @@ def main():
             "unknown_30d": unknown_30d.get("n", 0),
         }, ensure_ascii=False) + "\n")
     print(f"✓ Append 到 {_HEALTH_LOG.name}")
+
+    # 寫入「今天跑過」旗標
+    _LAST_RUN_FILE.write_text(today_str)
 
     print()
 

@@ -53,7 +53,7 @@ cat > "$PLIST_PATH" <<EOF
     <key>WorkingDirectory</key>
     <string>${BACKEND_DIR}</string>
     <key>RunAtLoad</key>
-    <false/>
+    <true/>
 </dict>
 </plist>
 EOF
