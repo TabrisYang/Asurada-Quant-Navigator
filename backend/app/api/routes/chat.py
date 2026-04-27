@@ -674,13 +674,18 @@ def _build_messages(
                 logger.warning(f"活躍預測摘要載入失敗: {e}")
 
         # ★ v101 Phase 2.3：模仿學習推論注入 chart_state.rl_strategic_insight
-        # 4 層守衛（任一未過 → 不暴露 v101 給 user，等同 v100）：
-        #   1. imitation_learning_enabled = True
-        #   2. shadow_mode = False
-        #   3. v101_passes_quality_gate() = True
-        #   4. canary % 命中
+        # 5 層守衛（任一未過 → 不暴露 v101 給 user，等同 v100）：
+        #   1. chart_symbol 非空
+        #   2. intent 命中（comprehensive_analysis / deep_phase3）
+        #   3. ★ chart_state 非 None（防禦：避免 None["..."] 賦值崩潰）
+        #   4. imitation_learning_enabled = True
+        #   5. shadow_mode = False + quality_gate 通過 + canary % 命中
         # SHADOW 模式：v101 偷跑記錄但不注入 chart_state（user 看不到）
-        if chart_symbol and (_intents & {"comprehensive_analysis", "deep_phase3"}):
+        if (
+            chart_symbol
+            and (_intents & {"comprehensive_analysis", "deep_phase3"})
+            and request.chart_state is not None
+        ):
             try:
                 from app.core.canary import use_v101
                 from app.core.shadow_runner import maybe_run_shadow
