@@ -396,7 +396,9 @@
 - Session 過期自動偵測（後端重啟後前端自動清除舊 session）
 - 本地 Ollama 無需 Key
 
-### Function Calling 定義（21 個函式）
+### Function Calling 定義（22 個函式）
+
+> v99 新增 `compute_laddered_entries`（後端算分批進場價，依 regime 動態配比 50/30/20 / 25/35/40 / 33/33/34；禁 LLM 推算）。詳見變更日誌第 99 項。
 
 #### Level 1：圖表操作
 
@@ -563,8 +565,19 @@
 | `token` | 文字串流（逐 token） |
 | `chart` | 圖表更新（指標/標記/數據切換） |
 | `usage` | Token 用量統計 |
+| `accuracy_inject` | **v100 新增**：結論卡「📈 系統參考」由系統替換為實際歷史命中率（前端 onAccuracyInject 接收後即時改寫顯示） |
 | `error` | 錯誤訊息 |
 | `done` | 串流結束 |
+
+**知識整理（蒸餾）專屬 SSE 事件**（v100 修復「按了沒反應」bug 引入）：
+
+| 事件 | 說明 |
+|------|------|
+| `status` | 蒸餾啟動訊息（`{message, total}`）|
+| `progress` | 每蒸餾完一個 symbol 推進度（`{current, total, message, current_symbol}`）|
+| `preview_item` | 每完成一個 symbol 即時推結果，前端邊收邊顯示 |
+| `error` | 蒸餾失敗（包含具體原因）|
+| `done` | 全部完成（含 previews / profile_preview / total_tokens_used）|
 
 ### SYSTEM_PROMPT 核心指引
 
@@ -576,6 +589,9 @@
 - **指標必須同步添加**：文字提到的指標必須同時呼叫 manage_indicator 添加到圖表
 - **知識萃取**：每次分析後自動附加 `---KEY_INSIGHTS---` 結構化知識碎片
 - **回測結果引用強制規則**（v98 新增）：任何回測函式回傳含 `per_regime_metrics` / `wilson_ci_lower/upper` 時，LLM **必須**引用，不可只報平均勝率。策略對比按 Wilson CI 下界排名（避免被高勝率少樣本誤導）；當前 regime 不在策略 `compatible_regimes` 內的結果，必須標示「不適用」並降權
+- **分批進場價位引用規則**（v99 新增）：`compute_laddered_entries` 回傳的 `long_entries` / `short_entries` / `weighted_avg_entry` / `stop_loss` / `take_profit` / `rr` / `ratio_strategy` 欄位，LLM **必須**直接引用，**禁止**自行推算分批價位或 SL/TP。`enabled = false`（regime confidence 過低）→ 改為「單一進場 + 小倉位試單」；`missing_indicators` 非空 → 主動呼叫 `manage_indicator(action="add")` 補回再重算
+- **結構化結論卡規則**（v100 新增）：`comprehensive_analysis` / `deep_phase1-3` 結尾必須產出可見結論卡（emoji + 表格 + 9 欄位：方向/進場/目標/止損/時間框/信心/指標/regime/失效條件）— 取代舊隱藏 `---PREDICTIONS---` block。低信心場景（`regime confidence < 0.5` 或 Wilson CI 下界 < 50%）改用「⚠️ 建議觀望」格式，**不**留下預測。「📈 系統參考」這行寫成 placeholder，後端 `_inject_recent_accuracy()` 會替換為實際歷史命中率
+- **chart_state.recent_accuracy 引用規則**（v100 新增）：若 chart_state 含 `recent_accuracy` 欄位（30d/90d 命中率 + Bayesian CI + Brier + best/worst indicators），LLM **必須**：在信心評估納入此命中率（< 50% 且 n >= 10 強制降信心 + 顯眼處警示）；優先引用 `best_indicators`、對 `worst_indicators` 標警告；`calibration_brier > 0.3` 時提醒「校準偏差大，低倉位試單」
 
 ### 意圖驅動的 SYSTEM_PROMPT 動態組裝（v98 強化）
 
@@ -601,7 +617,7 @@
 
 `comprehensive_analysis` 命中後 `detect_intents` 會自動 `discard()` 所有低階分析意圖（deep_analysis / deep_phase1-3 / analysis / factor_validation / momentum_analysis / regime_analysis / strategy_backtest），確保只走「統合報告」單一路徑，不會多載重複 prompt。
 
-### 全部分析統合報告 prompt（v98 新增）
+### 全部分析統合報告 prompt（v98 新增 / v99 + v100 強化）
 
 `_PROMPT_MODULES["comprehensive_analysis"]` 載入時定義 6 段固定報告結構：
 
@@ -610,7 +626,7 @@
 3. ⚡ **動能特徵**（多週期動量 + 加速度 + 相對強弱 + RSI 背離）
 4. 🧪 **多策略回測比較**（系統預跑 8 策略 + per_regime_metrics + Wilson CI）
 5. 🔬 **量化研究**（IC + Walk Forward + Monte Carlo + 因子有效性）
-6. 🎯 **跨維度結論 + 倉位建議**（綜合 #1-5 交叉驗證）
+6. 🎯 **跨維度結論 + 倉位建議**（綜合 #1-5 交叉驗證 + 引用 `compute_laddered_entries` 結果）
 
 **禁止重複規則**（嚴格遵守）：
 - 「動能」結論只寫 #3，#2/#6 提及時用「見動能段落」
@@ -619,6 +635,35 @@
 - 結論段（#6）不重述前段，只做交叉驗證 + 決策
 
 **字數預算**：總計 1500-2000 字（vs 改造前 4000+ 字 → 報告長度減半）
+
+**v99 強化**：#6 結論段必含「分批進場建議」表格（多空各 3 檔具體價位 + 加權均價 + SL/TP / RR），完全引用 `compute_laddered_entries` 後端計算結果，禁止 LLM 推算。
+
+**v100 強化**：#6 結論段最末必須產出「結構化結論卡」（取代舊隱藏 PREDICTIONS block）— 直接顯示給使用者的可驗證格式，9 欄位 + 「📈 系統參考」placeholder 由後端 `_inject_recent_accuracy()` 替換為實際歷史命中率。低信心場景改用「⚠️ 建議觀望」格式，**不**留下預測（避免汙染統計）。
+
+### 預測驗證閉環（v100 新增）
+
+完成全部分析後，系統自動串連這個閉環：
+
+```
+LLM 產出可見結論卡
+   ↓ regex 解析（_VISIBLE_CARD_PATTERN）
+存入 predictions.db
+   ↓ 每次對話完成後 validate_all_active() 自動驗證
+比對後續 K 線 high/low → hit_target / hit_stop / expired
+   ↓ 累積樣本 → prediction_tracker.get_stats() 算 Brier / ECE / Bayesian
+chart_state.recent_accuracy 結構化注入下次分析
+   ↓ LLM 看到歷史命中率 → 自動校準信心
+低信心 → 走「⚠️ 建議觀望」 → 不再記錄
+```
+
+**前端面板**：
+- `PredictionDashboard` 加「📊 命中率」tab → 顯示加權勝率 + Bayesian 95% CI + Brier/ECE + 信心校準表（看高信心是否真更準）+ regime 拆分 + 可靠性曲線
+- `ChartView` 加「📊 歷史預測」toggle → 自動拉 `/api/predictions/by_symbol` + 用 horizontal_line annotation 在圖上畫過往 entry/SL/TP（多綠空紅）
+- 頂部 + Calibration tab 加免責橫幅「歷史命中率不保證未來表現」
+
+**API endpoints**：
+- `GET /api/predictions/calibration?symbol=X&days=90` — 給 Calibration 面板
+- `GET /api/predictions/by_symbol?symbol=X&days=90` — 給圖表標註
 
 ### LLM 安全防護
 
@@ -639,16 +684,18 @@
 
 ### 8 種分析模式（前端選項）
 
-| 模式 | 內容 | 耗時 |
-|------|------|------|
-| **基礎分析** | 市場環境 + 八維度技術 + SMC + 情境預測 + GMM/GARCH/HMM | ~15 秒 |
-| **因子驗證** | 因子 IC 排名 + 組合 IC + Bucket 評分 + 條件機率 | ~20 秒 |
-| **策略回測** | 多策略比較 + MC + WF + CPCV + SHAP | ~30 秒 |
-| **市場體制** | GMM Regime + GARCH 波動率 + HMM 狀態轉移 + 事件型態 | ~15 秒 |
-| **基本面** | 月營收趨勢 + 法人買賣超 + 財報指標 + 綜合評分（台股限定） | ~10 秒 |
-| **動能分析** | 多週期動量 + 加速度 + 相對強弱 + 反轉偵測 + 策略回測 | ~15 秒 |
-| **完整分析三階段**（按鈕）| sequence 自動接力 phase1→2→3（市場環境 → 多策略回測 → 量化研究 + 倉位建議）| ~2-3 分鐘 |
-| **全部分析**（v98 去重統合）| 一次跑：市場結構 + 動能 + 8 策略回測 + 因子驗證 + 量化研究，**禁止重複** 6 段固定結構（市場/結構/動能/回測/量化/結論），系統 prompt 強制每段只寫一次 | **~8-15 分鐘**（vs 舊版 15-30 分，省 50%）|
+| 模式 | 內容 | 耗時 | 結論卡 |
+|------|------|------|------|
+| **基礎分析** | 市場環境 + 八維度技術 + SMC + 情境預測 + GMM/GARCH/HMM | ~15 秒 | ❌ |
+| **因子驗證** | 因子 IC 排名 + 組合 IC + Bucket 評分 + 條件機率 | ~20 秒 | ❌ |
+| **策略回測** | 多策略比較 + MC + WF + CPCV + SHAP | ~30 秒 | ❌ |
+| **市場體制** | GMM Regime + GARCH 波動率 + HMM 狀態轉移 + 事件型態 | ~15 秒 | ❌ |
+| **基本面** | 月營收趨勢 + 法人買賣超 + 財報指標 + 綜合評分（台股限定） | ~10 秒 | ❌ |
+| **動能分析** | 多週期動量 + 加速度 + 相對強弱 + 反轉偵測 + 策略回測 | ~15 秒 | ❌ |
+| **完整分析三階段**（按鈕）| sequence 自動接力 phase1→2→3（市場環境 → 多策略回測 → 量化研究 + 倉位建議）| ~2-3 分鐘 | ✅ v100 |
+| **全部分析**（v98 去重統合 + v99 ladder + v100 結論卡）| 一次跑：市場結構 + 動能 + 8 策略回測 + 因子驗證 + 量化研究 + ladder 分批進場 + 可驗證結論卡，**禁止重複** 6 段固定結構（市場/結構/動能/回測/量化/結論），prompt 強制每段只寫一次 | **~8-15 分鐘**（vs 舊版 15-30 分，省 50%）| ✅ v100 |
+
+**結論卡欄位**（v100 新增）：方向 / 進場（含 ladder 多檔分批）/ 目標（RR）/ 止損 / 時間框 / 信心（依 Wilson CI + regime 信心）/ 主要指標 / 市場 regime / 失效條件 / 📈 系統參考（自動填入歷史命中率）。低信心 → 改用「⚠️ 建議觀望」格式不留下預測。
 
 **「全部分析」與「完整分析三階段」差異**：
 - **三階段**：3 次獨立 LLM 對話，phase1 完成 → 排隊 phase2 → 排隊 phase3，每階段獨立輸出
