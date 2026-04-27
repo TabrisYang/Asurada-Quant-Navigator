@@ -22,6 +22,7 @@ from app.core.llm.adapter import create_adapter
 from app.core.llm.executor import execute_function_calls, check_input_safety, ProgressTracker
 from app.core.llm.function_defs import detect_intents, assemble_system_prompt
 from app.core.security.key_manager import key_manager
+from app.core.config.settings import settings  # v101: feature flags
 from app.core.usage_tracker import usage_tracker
 from app.core.chat_history import chat_history
 from app.core.knowledge_cache import knowledge_cache
@@ -1377,12 +1378,23 @@ async def _post_process_chat_message(
             pred_tf = (chart_state or {}).get("timeframe", "4h")
             for pred in predictions:
                 try:
-                    prediction_tracker.store(
+                    pred_id = prediction_tracker.store(
                         symbol=pred_symbol,
                         timeframe=pred_tf,
                         prediction=pred,
                         source_question=request_message,
                     )
+                    # ★ Phase 2.0c：即時記錄 39 個特徵快照（feature flag 保護）
+                    if pred_id and settings.feature_recording_enabled:
+                        try:
+                            from app.core.feature_extractor import record_features
+                            from app.data.fetchers.crypto_engine import crypto_engine
+                            df = crypto_engine.load_local_data(pred_symbol, pred_tf)
+                            if df is not None and not df.empty:
+                                pred_for_features = {**pred, "symbol": pred_symbol}
+                                record_features(pred_id, df, chart_state, pred_for_features)
+                        except Exception as fe:
+                            logger.debug(f"[bg] 特徵記錄失敗（不影響預測）: {fe}")
                 except Exception as pe:
                     logger.warning(f"[bg] 儲存預測失敗: {pe}")
             logger.info(f"[bg] 自動提取 {len(predictions)} 筆預測（{pred_symbol}）")

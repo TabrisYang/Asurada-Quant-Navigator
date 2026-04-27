@@ -292,6 +292,100 @@ class PredictionTracker:
         """)
         self._conn.commit()
 
+        # ★ v101 schema：純加法（鐵律：不動既有 predictions 表結構）
+        self._ensure_schema_v101()
+
+    def _ensure_schema_v101(self):
+        """v101 模仿學習 schema — 純加法保護。
+
+        鐵律：
+        - ✅ CREATE TABLE IF NOT EXISTS / ALTER TABLE ADD COLUMN
+        - ❌ 嚴禁 DROP / RENAME / MODIFY 既有結構
+        - 任何時候關掉 v101 flag，舊 v100 query 仍能正常運作
+        """
+        if not self._conn:
+            return
+
+        # prediction_features：每筆預測當時的 39 特徵快照（給模仿學習訓練用）
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS prediction_features (
+                prediction_id INTEGER PRIMARY KEY,
+                -- 動量超買超賣 (4)
+                rsi_14 REAL, stoch_rsi REAL, macd_hist REAL, macd_signal_diff REAL,
+                -- 趨勢 (4)
+                adx_14 REAL, ema_20_60_diff_pct REAL, supertrend_dir INTEGER, plus_minus_di REAL,
+                -- 波動率 (4)
+                atr_pct REAL, bb_width REAL, bb_position REAL, hv_30 REAL,
+                -- 量能 (3)
+                volume_ratio REAL, obv_slope_10 REAL, cvd_change REAL,
+                -- 結構 (4)
+                smc_bias INTEGER, decomp_trend_slope REAL, decomp_residual_vol REAL, fvg_count INTEGER,
+                -- regime one-hot (7)
+                regime_trending_up INTEGER, regime_trending_down INTEGER, regime_ranging INTEGER,
+                regime_high_vol INTEGER, regime_low_vol INTEGER, regime_unknown INTEGER, regime_confidence REAL,
+                -- 跨股廣度 (4)
+                breadth_pct REAL, btc_dominance_pct REAL, rs_vs_basket REAL, leadership_score REAL,
+                -- 預測 metadata (6)
+                direction_long INTEGER, confidence_score INTEGER, timeframe_hours INTEGER,
+                target_distance_pct REAL, stop_distance_pct REAL, rr_ratio REAL,
+                -- 歷史校準 (3)
+                recent_30d_winrate REAL, recent_n INTEGER, calibration_brier REAL,
+                -- meta
+                snapshot_at TEXT, source TEXT,
+                FOREIGN KEY (prediction_id) REFERENCES predictions(id)
+            )
+        """)
+
+        # shadow_predictions：v101 在 SHADOW MODE 期間偷跑的預測（不給使用者看，用來驗證）
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS shadow_predictions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                prediction_id INTEGER,
+                v100_p_hit REAL,
+                v101_p_hit REAL,
+                v101_p_ml REAL,
+                v101_p_rule REAL,
+                v101_blend_alpha REAL,
+                v101_mode TEXT,
+                model_version TEXT,
+                created_at TEXT,
+                FOREIGN KEY (prediction_id) REFERENCES predictions(id)
+            )
+        """)
+
+        # imitation_model_metrics：每次訓練的 metrics + Champion-Challenger 狀態
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS imitation_model_metrics (
+                version INTEGER PRIMARY KEY AUTOINCREMENT,
+                trained_at TEXT NOT NULL,
+                trainset_n INTEGER,
+                auc REAL,
+                train_auc REAL,
+                lockbox_auc REAL,
+                brier REAL,
+                overfit_gap REAL,
+                feature_importance TEXT,
+                status TEXT,
+                is_champion INTEGER DEFAULT 0,
+                is_stable_fallback INTEGER DEFAULT 0,
+                quality_gate_passed INTEGER DEFAULT 0,
+                quality_gate_failed_reasons TEXT
+            )
+        """)
+
+        # quality_gate_log：每週評估的紀錄（Phase 0.9 用）
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS quality_gate_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                evaluated_at TEXT NOT NULL,
+                ready INTEGER,
+                gates_json TEXT,
+                metrics_json TEXT,
+                action_taken TEXT
+            )
+        """)
+        self._conn.commit()
+
     def store(
         self,
         symbol: str,

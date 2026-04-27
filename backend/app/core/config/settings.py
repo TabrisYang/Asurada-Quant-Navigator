@@ -76,6 +76,19 @@ class Settings(BaseSettings):
     # 時區
     display_timezone: str = "Asia/Taipei"
 
+    # ═══════════════════════════════════════════════════════════
+    # v101 模仿學習 + Quality Gate（預設全部 OFF / SHADOW，user 體驗 = v100）
+    # ═══════════════════════════════════════════════════════════
+    imitation_learning_enabled: bool = False     # 主開關（user 端注入）
+    imitation_blend_enabled: bool = False         # 動態 blend（rule × ML 權重）
+    imitation_shadow_mode: bool = True            # SHADOW 模式：v101 偷跑不輸出
+    imitation_canary_pct: int = 0                 # Canary 流量 %（0/1/10/25/50/100）
+    quality_gate_enabled: bool = True             # Quality Gate 7 硬閾值（永遠開）
+    adversarial_val_enabled: bool = False         # Drift 偵測
+    champion_challenger_enabled: bool = False     # 自動模型切換
+    auto_rollback_enabled: bool = True            # 表現變差自動關閉（永遠開）
+    feature_recording_enabled: bool = True        # Phase 2.0 特徵快照記錄
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",
