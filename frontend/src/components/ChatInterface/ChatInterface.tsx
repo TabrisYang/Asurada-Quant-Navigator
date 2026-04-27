@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useChartStore } from '../../stores/chartStore';
-import { streamChatMessage, fetchUsageSummary, fetchChatHistory, fetchConversationMessages, fetchDistillStatus, previewDistill, confirmDistill, fetchFragments, deleteFragment, addUserNote } from '../../services/api';
+import { streamChatMessage, fetchUsageSummary, fetchChatHistory, fetchConversationMessages, fetchDistillStatus, streamDistillPreview, confirmDistill, fetchFragments, deleteFragment, addUserNote } from '../../services/api';
 import { toast } from '../Toast';
 import type { FragmentItem } from '../../services/api';
 import type { ChatMessage, TokenUsage, LLMProvider, Timeframe, Annotation } from '../../types';
@@ -146,6 +146,10 @@ export default function ChatInterface() {
   const [distillLoading, setDistillLoading] = useState(false);
   const [distillStep, setDistillStep] = useState<'status' | 'preview' | 'done'>('status');
   const [distillHint, setDistillHint] = useState(false);
+  // ★ v100：SSE 蒸餾進度 + 錯誤顯示
+  const [distillProgress, setDistillProgress] = useState<{ current: number; total: number; message: string } | null>(null);
+  const [distillError, setDistillError] = useState<string | null>(null);
+  const distillAbortRef = useRef<(() => void) | null>(null);
   const [quickQuestions, setQuickQuestions] = useState<string[]>(loadQuickQuestions);
   const [editingQuick, setEditingQuick] = useState(false);
   const [activeAnalysisTab, setActiveAnalysisTab] = useState(0);
@@ -261,26 +265,41 @@ export default function ChatInterface() {
     finally { setDistillLoading(false); }
   }, []);
 
-  // 執行蒸餾預覽
-  const runDistillPreview = useCallback(async () => {
+  // ★ v100：執行蒸餾預覽 — 改用 SSE 串流（不再受 axios timeout 限制）
+  const runDistillPreview = useCallback(() => {
     if (!llmConfig.sessionId) return;
     setDistillLoading(true);
     setDistillStep('preview');
-    try {
-      const data = await previewDistill(
-        llmConfig.provider as LLMProvider,
-        llmConfig.sessionId,
-      );
-      if (data.status === 'ok') {
-        setDistillPreviews(data.previews || []);
-        setDistillProfile(data.profile_preview || '');
-        setDistillTokens(data.total_tokens_used || 0);
-      } else {
-        setDistillPreviews(null);
-        setDistillStep('status');
-      }
-    } catch { setDistillStep('status'); }
-    finally { setDistillLoading(false); }
+    setDistillError(null);
+    setDistillProgress(null);
+    // 串流期間累積 previews，避免最終事件遺失時前端空空
+    const accumPreviews: Array<Record<string, unknown>> = [];
+
+    distillAbortRef.current = streamDistillPreview(
+      llmConfig.provider as LLMProvider,
+      llmConfig.sessionId,
+      {
+        onStatus: (msg, total) => setDistillProgress({ current: 0, total, message: msg }),
+        onProgress: (current, total, message) => setDistillProgress({ current, total, message }),
+        onPreviewItem: (item) => {
+          accumPreviews.push(item);
+          // 邊收邊推到畫面（使用者可以看到一個個冒出來）
+          setDistillPreviews([...accumPreviews]);
+        },
+        onError: (msg) => {
+          setDistillError(msg);
+          setDistillLoading(false);
+          // 不退回 status — 留在 preview 步驟讓使用者看到錯誤
+        },
+        onDone: (payload) => {
+          setDistillPreviews(payload.previews);
+          setDistillProfile(payload.profile_preview || '');
+          setDistillTokens(payload.total_tokens_used || 0);
+          setDistillProgress(null);
+          setDistillLoading(false);
+        },
+      },
+    );
   }, [llmConfig.sessionId, llmConfig.provider]);
 
   // 確認蒸餾
@@ -805,9 +824,28 @@ export default function ChatInterface() {
           step={distillStep}
           loading={distillLoading}
           tokensUsed={distillTokens}
+          progress={distillProgress}
+          error={distillError}
           onPreview={runDistillPreview}
           onConfirm={runDistillConfirm}
-          onClose={() => { setShowDistillPanel(false); setDistillStep('status'); setDistillPreviews(null); }}
+          onCancel={() => {
+            distillAbortRef.current?.();
+            distillAbortRef.current = null;
+            setDistillLoading(false);
+            setDistillStep('status');
+            setDistillError(null);
+            setDistillProgress(null);
+            setDistillPreviews(null);
+          }}
+          onClose={() => {
+            distillAbortRef.current?.();
+            distillAbortRef.current = null;
+            setShowDistillPanel(false);
+            setDistillStep('status');
+            setDistillPreviews(null);
+            setDistillError(null);
+            setDistillProgress(null);
+          }}
         />
       )}
 
@@ -1254,8 +1292,11 @@ function DistillPanel({
   step,
   loading,
   tokensUsed,
+  progress,
+  error,
   onPreview,
   onConfirm,
+  onCancel,
   onClose,
 }: {
   status: Record<string, unknown> | null;
@@ -1264,8 +1305,11 @@ function DistillPanel({
   step: 'status' | 'preview' | 'done';
   loading: boolean;
   tokensUsed: number;
+  progress: { current: number; total: number; message: string } | null;
+  error: string | null;
   onPreview: () => void;
   onConfirm: () => void;
+  onCancel: () => void;
   onClose: () => void;
 }) {
   const formatNum = (n: unknown) => {
@@ -1357,10 +1401,55 @@ function DistillPanel({
         {/* 步驟二：預覽 */}
         {step === 'preview' && (
           <>
+            {/* ★ v100：錯誤訊息（非靜默退回，給重試按鈕）*/}
+            {error && (
+              <div className="mb-2 p-2 rounded" style={{ background: 'rgba(248,81,73,0.1)', border: '1px solid var(--accent-red, #f85149)' }}>
+                <p className="font-medium mb-1" style={{ color: 'var(--accent-red, #f85149)' }}>
+                  ⚠️ 蒸餾失敗
+                </p>
+                <p style={{ color: 'var(--text-primary)', fontSize: '11px' }}>{error}</p>
+                <div className="flex gap-2 mt-2">
+                  <button onClick={onPreview} className="flex-1 py-1.5 rounded text-xs cursor-pointer"
+                    style={{ background: 'var(--accent-blue)', color: '#fff' }}>重試</button>
+                  <button onClick={onCancel} className="flex-1 py-1.5 rounded text-xs cursor-pointer"
+                    style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)' }}>返回</button>
+                </div>
+              </div>
+            )}
+
             {loading ? (
               <div className="py-4 text-center" style={{ color: 'var(--text-secondary)' }}>
                 <p className="mb-1">🧠 AI 正在整理你的歷史對話...</p>
-                <p style={{ fontSize: '10px' }}>這可能需要 30-60 秒，請耐心等候</p>
+                {/* ★ v100：SSE 進度條 */}
+                {progress && progress.total > 0 ? (
+                  <>
+                    <div className="my-2 mx-2" style={{ background: 'var(--bg-tertiary)', height: '6px', borderRadius: '3px', overflow: 'hidden' }}>
+                      <div style={{
+                        background: 'var(--accent-blue)', height: '100%',
+                        width: `${Math.round((progress.current / progress.total) * 100)}%`,
+                        transition: 'width 0.3s ease',
+                      }} />
+                    </div>
+                    <p className="font-medium" style={{ color: 'var(--accent-blue)', fontSize: '11px' }}>
+                      {progress.message || `${progress.current} / ${progress.total}`}
+                    </p>
+                  </>
+                ) : (
+                  <p style={{ fontSize: '10px' }}>這可能需要 1-7 分鐘（依未蒸餾 symbol 數量），請耐心等候</p>
+                )}
+                {/* 邊收邊顯示已完成的預覽（讓使用者看到一個個冒出來，不會以為當機）*/}
+                {previews && previews.length > 0 && (
+                  <p className="mt-2" style={{ fontSize: '10px', color: 'var(--text-secondary)' }}>
+                    已完成 {previews.length} 個 symbol
+                  </p>
+                )}
+                <button
+                  onClick={onCancel}
+                  className="mt-3 px-3 py-1 rounded text-xs cursor-pointer"
+                  style={{ background: 'var(--bg-tertiary)', color: 'var(--text-secondary)' }}
+                >
+                  取消蒸餾
+                </button>
               </div>
             ) : previews && previews.length > 0 ? (
               <>

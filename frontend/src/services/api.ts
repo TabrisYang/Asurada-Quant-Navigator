@@ -640,16 +640,111 @@ export async function fetchDistillStatus() {
   return res.data;
 }
 
-export async function previewDistill(
+/**
+ * SSE 串流版蒸餾預覽（v100）。
+ *
+ * 蒸餾需要 N 個 symbol × 1 次 LLM 呼叫 + 1 次 user profile，
+ * N 個 symbol 多時總時長可達 3-7 分鐘，遠超 axios 預設 timeout。
+ * 改 SSE 後靠 stream 事件持續維持連線，不再被 timeout 中斷。
+ *
+ * 回呼參數：
+ *   onProgress({current, total, message}): 每蒸餾完一個 symbol 觸發
+ *   onPreviewItem(item): 每個 symbol 完成蒸餾就推一筆
+ *   onError(message): 後端錯誤
+ *   onDone(payload): 全部完成，含 previews / profile_preview / total_tokens_used
+ *
+ * 回傳 abort 函式：呼叫即可主動斷開（並不會影響後端正在跑的 LLM 呼叫）。
+ */
+export function streamDistillPreview(
   provider: LLMProvider,
-  sessionId?: string,
-) {
-  const res = await api.post('/chat/distill/preview', {
-    message: '_distill_',
-    provider,
-    session_id: sessionId,
-  }, { timeout: 120000 }); // 蒸餾可能需要較長時間
-  return res.data;
+  sessionId: string | undefined,
+  callbacks: {
+    onStatus?: (msg: string, total: number) => void;
+    onProgress?: (current: number, total: number, message: string, currentSymbol?: string) => void;
+    onPreviewItem?: (item: Record<string, unknown>) => void;
+    onError?: (message: string) => void;
+    onDone?: (payload: {
+      previews: Array<Record<string, unknown>>;
+      profile_preview: string | null;
+      total_tokens_used: number;
+    }) => void;
+  },
+): () => void {
+  const controller = new AbortController();
+
+  (async () => {
+    try {
+      const response = await fetch('/api/chat/distill/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: '_distill_',
+          provider,
+          session_id: sessionId,
+        }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        callbacks.onError?.(`伺服器錯誤 (${response.status})`);
+        return;
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) {
+        callbacks.onError?.('瀏覽器不支援 streaming');
+        return;
+      }
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let currentEvent = '';
+
+      while (true) {
+        if (controller.signal.aborted) break;
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            currentEvent = line.slice(7).trim();
+          } else if (line.startsWith('data: ')) {
+            const dataStr = line.slice(6);
+            try {
+              const data = JSON.parse(dataStr);
+              if (currentEvent === 'status') {
+                callbacks.onStatus?.(data.message ?? '', data.total ?? 0);
+              } else if (currentEvent === 'progress') {
+                callbacks.onProgress?.(data.current ?? 0, data.total ?? 0, data.message ?? '', data.current_symbol);
+              } else if (currentEvent === 'preview_item') {
+                callbacks.onPreviewItem?.(data);
+              } else if (currentEvent === 'error') {
+                callbacks.onError?.(data.message ?? '未知錯誤');
+              } else if (currentEvent === 'done') {
+                if (data.status === 'ok') {
+                  callbacks.onDone?.({
+                    previews: data.previews ?? [],
+                    profile_preview: data.profile_preview ?? null,
+                    total_tokens_used: data.total_tokens_used ?? 0,
+                  });
+                }
+                return;
+              }
+            } catch (e) {
+              // 解析失敗 → 略過該行
+            }
+          }
+        }
+      }
+    } catch (e) {
+      if (controller.signal.aborted) return;  // 主動取消不算錯誤
+      const msg = e instanceof Error ? e.message : String(e);
+      callbacks.onError?.(`連線中斷：${msg}`);
+    }
+  })();
+
+  return () => controller.abort();
 }
 
 export async function confirmDistill(

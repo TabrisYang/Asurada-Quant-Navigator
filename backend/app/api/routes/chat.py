@@ -2378,93 +2378,121 @@ async def get_distill_status():
 @router.post("/distill/preview")
 async def preview_distill(request: ChatRequest):
     """
-    預覽蒸餾結果（不實際執行）。
+    預覽蒸餾結果 — SSE 串流版（v100）。
 
-    呼叫 LLM 生成摘要，讓使用者確認後才存入。
+    為什麼要 SSE：
+    - 蒸餾要 N 個 symbol × 1 次 LLM 呼叫，加上 1 次 user profile 呼叫
+    - N 可能 5-15 個，每次 10-30 秒 → 總共 3-7 分鐘，會超過 axios 預設 timeout
+    - 改 SSE 後：邊跑邊推進度（"正在蒸餾 ADA/USDT (1/12)..."）+ 完成後推 done event
     """
-    provider, api_key, base_url, model_name = _resolve_api_key(request)
-    if not api_key and provider not in ("ollama", "claude_subscription"):
-        return {"status": "error", "message": "需要有效的 LLM session 才能執行蒸餾"}
 
-    # 準備材料
-    if not chat_history._conn:
-        return {"status": "error", "message": "對話歷史未初始化"}
-    material = knowledge_distiller.prepare_distill_material(chat_history._conn)
-    if material["total_messages"] < 4:
-        return {"status": "error", "message": "對話數量不足（至少需要 4 條以上訊息）"}
+    async def event_gen():
+        provider, api_key, base_url, model_name = _resolve_api_key(request)
+        if not api_key and provider not in ("ollama", "claude_subscription"):
+            yield _sse_event("error", {"message": "需要有效的 LLM session 才能執行蒸餾"})
+            yield _sse_event("done", {})
+            return
 
-    try:
-        adapter = create_adapter(provider=provider, api_key=api_key, model_name=model_name, base_url=base_url)
-    except Exception as e:
-        return {"status": "error", "message": f"無法連接 LLM: {str(e)}"}
+        if not chat_history._conn:
+            yield _sse_event("error", {"message": "對話歷史未初始化"})
+            yield _sse_event("done", {})
+            return
 
-    previews = []
-    total_tokens_used = 0
+        material = knowledge_distiller.prepare_distill_material(chat_history._conn)
+        if material["total_messages"] < 4:
+            yield _sse_event("error", {"message": "對話數量不足（至少需要 4 條以上訊息）"})
+            yield _sse_event("done", {})
+            return
 
-    # 為每個幣種生成摘要
-    for symbol, qa_pairs in material["groups"].items():
-        if len(qa_pairs) < 2:
-            continue
-
-        prompt = knowledge_distiller.build_distill_prompt(symbol, qa_pairs)
         try:
-            response = await adapter.chat(
-                [{"role": "user", "content": prompt}],
-            )
-            summary = response.message or ""
-            tokens = 0
-            if response.usage:
-                tokens = response.usage.total_tokens
+            adapter = create_adapter(provider=provider, api_key=api_key, model_name=model_name, base_url=base_url)
+        except Exception as e:
+            yield _sse_event("error", {"message": f"無法連接 LLM: {str(e)}"})
+            yield _sse_event("done", {})
+            return
+
+        # 過濾 < 2 組 Q&A 的 symbol（也計入總數時排除）
+        groups = {sym: qas for sym, qas in material["groups"].items() if len(qas) >= 2}
+        all_qa = []
+        for pairs in groups.values():
+            all_qa.extend(pairs)
+        # 蒸餾總任務 = N 個 symbol + 1 個 user profile（若 all_qa >= 5）
+        total_tasks = len(groups) + (1 if len(all_qa) >= 5 else 0)
+        yield _sse_event("status", {
+            "message": f"準備蒸餾 {len(groups)} 個 symbol，預估需 {total_tasks * 20}-{total_tasks * 40} 秒",
+            "total": total_tasks, "current": 0,
+        })
+
+        previews = []
+        total_tokens_used = 0
+        completed = 0
+
+        for symbol, qa_pairs in groups.items():
+            completed += 1
+            display_name = symbol if symbol != "_general" else "一般問題"
+            yield _sse_event("progress", {
+                "message": f"正在蒸餾 {display_name}（{completed}/{total_tasks}）",
+                "current": completed, "total": total_tasks,
+                "current_symbol": symbol,
+            })
+
+            prompt = knowledge_distiller.build_distill_prompt(symbol, qa_pairs)
+            try:
+                response = await adapter.chat([{"role": "user", "content": prompt}])
+                summary = response.message or ""
+                tokens = response.usage.total_tokens if response.usage else 0
                 total_tokens_used += tokens
 
-            # 找出時間範圍
-            times = [qa["time"][:10] for qa in qa_pairs if qa.get("time")]
-            period_start = min(times) if times else ""
-            period_end = max(times) if times else ""
+                times = [qa["time"][:10] for qa in qa_pairs if qa.get("time")]
+                period_start = min(times) if times else ""
+                period_end = max(times) if times else ""
 
-            previews.append({
-                "symbol": symbol,
-                "period_start": period_start,
-                "period_end": period_end,
-                "summary": summary,
-                "source_count": len(qa_pairs),
-                "original_chars": sum(len(qa["q"]) + len(qa["a"]) for qa in qa_pairs),
-                "distilled_chars": len(summary),
-                "tokens_used": tokens,
+                preview_item = {
+                    "symbol": symbol,
+                    "period_start": period_start,
+                    "period_end": period_end,
+                    "summary": summary,
+                    "source_count": len(qa_pairs),
+                    "original_chars": sum(len(qa["q"]) + len(qa["a"]) for qa in qa_pairs),
+                    "distilled_chars": len(summary),
+                    "tokens_used": tokens,
+                }
+                previews.append(preview_item)
+                yield _sse_event("preview_item", preview_item)
+            except Exception as e:
+                logger.error(f"蒸餾 {symbol} 失敗: {e}")
+                err_item = {"symbol": symbol, "error": str(e)}
+                previews.append(err_item)
+                yield _sse_event("preview_item", err_item)
+
+        # 使用者風格分析
+        profile_preview = None
+        if len(all_qa) >= 5:
+            completed += 1
+            yield _sse_event("progress", {
+                "message": f"正在分析使用者風格（{completed}/{total_tasks}）",
+                "current": completed, "total": total_tasks,
+                "current_symbol": "_user_profile",
             })
-        except Exception as e:
-            logger.error(f"蒸餾 {symbol} 失敗: {e}")
-            previews.append({
-                "symbol": symbol,
-                "error": str(e),
-            })
+            try:
+                profile_prompt = knowledge_distiller.build_profile_prompt(all_qa)
+                response = await adapter.chat([{"role": "user", "content": profile_prompt}])
+                profile_preview = response.message or ""
+                if response.usage:
+                    total_tokens_used += response.usage.total_tokens
+            except Exception as e:
+                logger.warning(f"使用者風格分析失敗: {e}")
 
-    # 生成使用者風格分析
-    all_qa = []
-    for pairs in material["groups"].values():
-        all_qa.extend(pairs)
+        yield _sse_event("done", {
+            "status": "ok",
+            "previews": previews,
+            "profile_preview": profile_preview,
+            "total_tokens_used": total_tokens_used,
+            "total_messages": material["total_messages"],
+            "total_chars": material["total_chars"],
+        })
 
-    profile_preview = None
-    if len(all_qa) >= 5:
-        try:
-            profile_prompt = knowledge_distiller.build_profile_prompt(all_qa)
-            response = await adapter.chat(
-                [{"role": "user", "content": profile_prompt}],
-            )
-            profile_preview = response.message or ""
-            if response.usage:
-                total_tokens_used += response.usage.total_tokens
-        except Exception as e:
-            logger.warning(f"使用者風格分析失敗: {e}")
-
-    return {
-        "status": "ok",
-        "previews": previews,
-        "profile_preview": profile_preview,
-        "total_tokens_used": total_tokens_used,
-        "total_messages": material["total_messages"],
-        "total_chars": material["total_chars"],
-    }
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
 
 
 @router.post("/distill/confirm")
