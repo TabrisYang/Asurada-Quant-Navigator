@@ -633,6 +633,35 @@ def _build_messages(
                 )
                 if _feedback_prompt:
                     context_parts.append(f"【預測績效反饋】\n{_feedback_prompt}")
+
+                # ★ v100：把命中率也以結構化形式注入 chart_state.recent_accuracy
+                # 讓 LLM 不只看純文字反饋，還能精確引用數字校準自己的信心
+                try:
+                    _stats_30d = prediction_tracker.get_stats(symbol=chart_symbol, days=30)
+                    _stats_90d = prediction_tracker.get_stats(symbol=chart_symbol, days=90)
+                    if _stats_30d.get("total", 0) >= 3 or _stats_90d.get("total", 0) >= 3:
+                        _bayes = _stats_30d.get("bayesian", {})
+                        _ind_stats = _stats_30d.get("indicator_stats", {})
+                        _best = sorted(_ind_stats.items(), key=lambda x: x[1].get("win_rate", 0), reverse=True)
+                        _worst = sorted(_ind_stats.items(), key=lambda x: x[1].get("win_rate", 0))
+                        _best_inds = [k for k, _ in _best[:3] if _[1].get("samples", 0) >= 3] if _ind_stats else []
+                        _worst_inds = [k for k, _ in _worst[:2] if _[1].get("samples", 0) >= 3] if _ind_stats else []
+                        if request.chart_state is None:
+                            request.chart_state = {}
+                        request.chart_state["recent_accuracy"] = {
+                            "symbol": chart_symbol,
+                            "regime": _current_regime,
+                            "win_rate_30d": _stats_30d.get("win_rate_weighted"),
+                            "win_rate_90d": _stats_90d.get("win_rate_weighted"),
+                            "n_30d": _stats_30d.get("total"),
+                            "n_90d": _stats_90d.get("total"),
+                            "bayesian_ci_95": _bayes.get("credible_interval_95"),
+                            "calibration_brier": _stats_30d.get("calibration", {}).get("brier_score"),
+                            "best_indicators": _best_inds,
+                            "worst_indicators": _worst_inds,
+                        }
+                except Exception as _ra_err:
+                    logger.debug(f"recent_accuracy 注入失敗: {_ra_err}")
             except Exception as e:
                 logger.warning(f"預測反饋載入失敗: {e}")
 
@@ -1209,6 +1238,40 @@ def _sse_event(event_type: str, data: dict) -> str:
     return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+# ─── v100：結論卡「📈 系統參考」自動注入歷史命中率 ────────
+_PLACEHOLDER_PATTERN = re.compile(
+    r"📈\s*系統參考：[^\n]*",
+)
+
+
+def _inject_recent_accuracy(final_text: str, symbol: str, regime: str) -> str:
+    """v100：替換結論卡「📈 系統參考：」佔位行為實際歷史命中率。
+
+    若 final_text 不含此佔位行（不是結論卡格式），原樣返回。
+    若樣本不足（< 3 筆驗證），顯示「樣本不足」訊息。
+    """
+    if not _PLACEHOLDER_PATTERN.search(final_text):
+        return final_text
+    try:
+        stats = prediction_tracker.get_stats(symbol=symbol, regime=regime, days=30)
+    except Exception as e:
+        logger.warning(f"_inject_recent_accuracy 取統計失敗：{e}")
+        return final_text
+
+    total = stats.get("total", 0)
+    if total < 3:
+        replacement = f"📈 系統參考：樣本不足（n={total}，需 ≥ 3 筆已驗證），命中率尚不可估"
+    else:
+        wr = stats.get("win_rate_weighted", 0)
+        bayesian = stats.get("bayesian", {})
+        ci = bayesian.get("credible_interval_95", [None, None])
+        ci_str = f"，CI {ci[0]}-{ci[1]}%" if ci[0] is not None else ""
+        replacement = (
+            f"📈 系統參考：你近 30 天類似條件（{regime}）命中率 {wr}%（n={total}{ci_str}）"
+        )
+    return _PLACEHOLDER_PATTERN.sub(replacement, final_text)
+
+
 def _execute_function_calls_in_thread(*args, **kwargs):
     """在 worker thread 內開新 event loop 跑 execute_function_calls。
 
@@ -1301,8 +1364,14 @@ async def _post_process_chat_message(
             if stored_d:
                 logger.info(f"[bg] 自動提取 {stored_d} 筆蒸餾碎片（{frag_symbol}）")
 
-        # 提取並存儲預測
+        # 提取並存儲預測（v100：低信心過濾，避免汙染命中率統計）
         predictions = parse_predictions(final_text)
+        # v100：過濾掉信心="low" 的預測（雙保險，prompt 已要求低信心改用「建議觀望」格式）
+        before_filter = len(predictions)
+        predictions = [p for p in predictions if p.get("confidence") != "low"]
+        if before_filter > len(predictions):
+            logger.info(f"[bg] 過濾 {before_filter - len(predictions)} 筆低信心預測（不追蹤）")
+
         if predictions:
             pred_symbol = extract_symbol_from_text(request_message) or chart_symbol_for_save or ""
             pred_tf = (chart_state or {}).get("timeframe", "4h")
@@ -2305,6 +2374,21 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                         await t
                     except (asyncio.CancelledError, Exception):
                         pass
+
+        # 4c. v100：結論卡「📈 系統參考」自動注入歷史命中率（必須在 done 之前，讓前端能即時替換）
+        try:
+            if final_text and "📈" in final_text and "系統參考" in final_text:
+                _regime_info = (request.chart_state or {}).get("currentRegime") or {}
+                _regime = _regime_info.get("regime", "unknown") if isinstance(_regime_info, dict) else "unknown"
+                injected_text = _inject_recent_accuracy(final_text, chart_symbol_for_save or "", _regime)
+                if injected_text != final_text:
+                    yield _sse_event("accuracy_inject", {
+                        "old_pattern": "📈 系統參考：",
+                        "new_text": _PLACEHOLDER_PATTERN.search(injected_text).group(0),
+                    })
+                    final_text = injected_text
+        except Exception as e:
+            logger.warning(f"accuracy 注入失敗（不影響主流程）：{e}")
 
         # 5. 立刻發 done event，post-processing 改在背景跑（避免 SSE 沉默觸發前端 timeout）
         done_data: dict = {"conversation_id": conversation_id}

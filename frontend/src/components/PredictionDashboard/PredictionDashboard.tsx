@@ -49,7 +49,10 @@ export default function PredictionDashboard() {
   const [activePreds, setActivePreds] = useState<PredictionItem[]>([]);
   const [historyPreds, setHistoryPreds] = useState<PredictionItem[]>([]);
   const [loading, setLoading] = useState(true);
-  const [viewTab, setViewTab] = useState<'scenarios' | 'active' | 'history' | 'indicators' | 'adjustments' | 'reviews'>('scenarios');
+  const [viewTab, setViewTab] = useState<'scenarios' | 'active' | 'history' | 'indicators' | 'adjustments' | 'reviews' | 'calibration'>('scenarios');
+  // ★ v100：Calibration 數據（命中率 / Brier / ECE / regime / indicator 拆分）
+  const [calibrationData, setCalibrationData] = useState<any>(null);
+  const [calibrationLoading, setCalibrationLoading] = useState(false);
 
   // 情境預測
   const [scenarioData, setScenarioData] = useState<any>(null);
@@ -144,10 +147,23 @@ export default function PredictionDashboard() {
     finally { setReviewsLoading(false); }
   }, []);
 
+  // ★ v100：載入 calibration 數據
+  const loadCalibration = useCallback(async () => {
+    setCalibrationLoading(true);
+    try {
+      const params = chartSymbol ? `?symbol=${encodeURIComponent(chartSymbol)}&days=90` : '?days=90';
+      const res = await fetch(`/api/predictions/calibration${params}`);
+      const data = await res.json();
+      setCalibrationData(data);
+    } catch { setCalibrationData(null); }
+    finally { setCalibrationLoading(false); }
+  }, [chartSymbol]);
+
   useEffect(() => { loadData(); }, [loadData]);
   useEffect(() => { if (viewTab === 'scenarios') loadScenarios(); }, [viewTab, loadScenarios]);
   useEffect(() => { if (viewTab === 'adjustments') loadAdjustments(); }, [viewTab, loadAdjustments]);
   useEffect(() => { if (viewTab === 'reviews') loadReviews(); }, [viewTab, loadReviews]);
+  useEffect(() => { if (viewTab === 'calibration') loadCalibration(); }, [viewTab, loadCalibration]);
 
   const handleSaveNote = async (predId: number) => {
     setSavingNote(true);
@@ -209,6 +225,11 @@ export default function PredictionDashboard() {
 
   return (
     <div className="space-y-4">
+      {/* ★ v100：免責聲明 */}
+      <div className="p-2 rounded text-xs" style={{ background: 'rgba(251,191,36,0.1)', border: '1px solid rgba(251,191,36,0.3)', color: 'var(--text-secondary)' }}>
+        ⚠️ 系統判讀僅供參考，不構成投資建議。歷史命中率不保證未來表現，請依自身判斷下單。
+      </div>
+
       {/* ===== 統計概覽 ===== */}
       <div className="grid grid-cols-4 gap-3">
         <StatCard label="總預測數" value={totalPreds} />
@@ -260,11 +281,12 @@ export default function PredictionDashboard() {
 
       {/* ===== Sub-tabs ===== */}
       <div className="flex gap-2 border-b overflow-x-auto" style={{ borderColor: 'var(--border-primary)' }}>
-        {(['scenarios', 'active', 'history', 'reviews', 'indicators', 'adjustments'] as const).map((tab) => {
+        {(['scenarios', 'active', 'history', 'calibration', 'reviews', 'indicators', 'adjustments'] as const).map((tab) => {
           const labels: Record<string, string> = {
             scenarios: '情境預測',
             active: `進行中 (${activePreds.length})`,
             history: `歷史記錄 (${historyPreds.length})`,
+            calibration: '📊 命中率',
             reviews: '覆盤報告',
             indicators: '指標勝率',
             adjustments: '自動調整',
@@ -552,6 +574,122 @@ export default function PredictionDashboard() {
                 )}
               </div>
             ))
+          )}
+        </div>
+      )}
+
+      {/* ===== v100：Calibration 命中率 ===== */}
+      {viewTab === 'calibration' && (
+        <div className="space-y-3">
+          <div className="p-2 rounded text-xs" style={{ background: 'rgba(248,81,73,0.08)', border: '1px solid rgba(248,81,73,0.3)', color: 'var(--text-secondary)' }}>
+            ⚠️ 歷史命中率不保證未來表現。樣本數少（n &lt; 10）時 CI 寬，僅作參考。
+          </div>
+
+          {calibrationLoading ? (
+            <div className="text-center py-8 text-xs" style={{ color: 'var(--text-secondary)' }}>正在載入命中率數據...</div>
+          ) : !calibrationData || calibrationData.total === 0 ? (
+            <div className="text-center py-8 text-xs" style={{ color: 'var(--text-secondary)' }}>
+              尚無已驗證預測。系統會在預測時間到期後自動驗證並更新此面板。
+            </div>
+          ) : (
+            <>
+              {/* 整體命中率卡 */}
+              <div className="p-3 rounded" style={{ background: 'var(--bg-tertiary)' }}>
+                <div className="text-xs mb-1" style={{ color: 'var(--text-secondary)' }}>整體命中率（90 天加權）</div>
+                <div className="font-mono text-2xl" style={{ color: 'var(--accent-blue)' }}>
+                  {calibrationData.win_rate_weighted ?? 0}%
+                </div>
+                <div className="text-xs mt-1" style={{ color: 'var(--text-secondary)' }}>
+                  樣本：{calibrationData.total} 筆
+                  {calibrationData.bayesian?.credible_interval_95 && (
+                    <span className="ml-2">| Bayesian 95% CI：{calibrationData.bayesian.credible_interval_95[0]}-{calibrationData.bayesian.credible_interval_95[1]}%</span>
+                  )}
+                </div>
+              </div>
+
+              {/* Brier + ECE */}
+              {calibrationData.calibration && (
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="p-2 rounded text-xs" style={{ background: 'var(--bg-tertiary)' }}>
+                    <div style={{ color: 'var(--text-secondary)' }}>Brier Score</div>
+                    <div className="font-mono text-base" style={{ color: 'var(--text-primary)' }}>
+                      {calibrationData.calibration.brier_score?.toFixed(3) ?? 'N/A'}
+                    </div>
+                    <div style={{ color: 'var(--text-secondary)', fontSize: '10px' }}>
+                      {calibrationData.calibration.brier_score && calibrationData.calibration.brier_score < 0.25 ? '✅ 校準良好' : '⚠️ 校準偏差'}
+                    </div>
+                  </div>
+                  <div className="p-2 rounded text-xs" style={{ background: 'var(--bg-tertiary)' }}>
+                    <div style={{ color: 'var(--text-secondary)' }}>ECE</div>
+                    <div className="font-mono text-base" style={{ color: 'var(--text-primary)' }}>
+                      {calibrationData.calibration.ece?.toFixed(3) ?? 'N/A'}
+                    </div>
+                    <div style={{ color: 'var(--text-secondary)', fontSize: '10px' }}>
+                      預期校準誤差（越低越好）
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* 信心校準 */}
+              {calibrationData.confidence_calibration && Object.keys(calibrationData.confidence_calibration).length > 0 && (
+                <div className="p-2 rounded" style={{ background: 'var(--bg-tertiary)' }}>
+                  <div className="text-xs mb-2 font-medium" style={{ color: 'var(--text-primary)' }}>信心校準（看「高信心」是否真的更準）</div>
+                  <table className="w-full text-xs">
+                    <thead><tr style={{ color: 'var(--text-secondary)' }}>
+                      <th className="text-left py-1">信心</th><th className="text-right">命中率</th><th className="text-right">樣本</th>
+                    </tr></thead>
+                    <tbody>
+                      {Object.entries(calibrationData.confidence_calibration).map(([conf, data]: any) => (
+                        <tr key={conf}><td className="py-1">{conf === 'high' ? '高' : conf === 'medium' ? '中' : '低'}</td>
+                          <td className="text-right font-mono" style={{ color: 'var(--accent-blue)' }}>{data.win_rate}%</td>
+                          <td className="text-right" style={{ color: 'var(--text-secondary)' }}>{data.samples}</td></tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {/* 按 regime 拆分 */}
+              {calibrationData.by_regime && Object.keys(calibrationData.by_regime).length > 0 && (
+                <div className="p-2 rounded" style={{ background: 'var(--bg-tertiary)' }}>
+                  <div className="text-xs mb-2 font-medium" style={{ color: 'var(--text-primary)' }}>按市場 regime 拆分</div>
+                  <table className="w-full text-xs">
+                    <thead><tr style={{ color: 'var(--text-secondary)' }}>
+                      <th className="text-left py-1">Regime</th><th className="text-right">命中率</th><th className="text-right">樣本</th>
+                    </tr></thead>
+                    <tbody>
+                      {Object.entries(calibrationData.by_regime).map(([rg, data]: any) => (
+                        <tr key={rg}><td className="py-1">{rg}</td>
+                          <td className="text-right font-mono" style={{ color: 'var(--accent-blue)' }}>{data.win_rate}%</td>
+                          <td className="text-right" style={{ color: 'var(--text-secondary)' }}>{data.samples}</td></tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {/* Reliability curve */}
+              {calibrationData.calibration?.reliability_curve && calibrationData.calibration.reliability_curve.length > 0 && (
+                <div className="p-2 rounded" style={{ background: 'var(--bg-tertiary)' }}>
+                  <div className="text-xs mb-2 font-medium" style={{ color: 'var(--text-primary)' }}>可靠性曲線（預測信心 vs 實際命中率）</div>
+                  <table className="w-full text-xs">
+                    <thead><tr style={{ color: 'var(--text-secondary)' }}>
+                      <th className="text-left py-1">信心區間</th><th className="text-right">實際命中率</th><th className="text-right">樣本</th>
+                    </tr></thead>
+                    <tbody>
+                      {calibrationData.calibration.reliability_curve.map((bin: any, i: number) => (
+                        <tr key={i}><td className="py-1">{bin.bin_label || `bin ${i+1}`}</td>
+                          <td className="text-right font-mono" style={{ color: 'var(--accent-blue)' }}>
+                            {(bin.actual_win_rate * 100).toFixed(1)}%
+                          </td>
+                          <td className="text-right" style={{ color: 'var(--text-secondary)' }}>{bin.samples}</td></tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
           )}
         </div>
       )}

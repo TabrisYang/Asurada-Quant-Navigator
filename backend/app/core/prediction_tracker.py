@@ -36,6 +36,84 @@ _PREDICTION_LINE = re.compile(
     r"(?:\s+invalidation=(.+))?"
 )
 
+# ═══════════════════════════════════════════════════════════
+# v100：可見結論卡 regex（使用者看得到的格式 — 取代舊隱藏 block）
+# ═══════════════════════════════════════════════════════════
+_VISIBLE_CARD_PATTERN = re.compile(
+    r"📊\s*本次分析總結.*?(?=═══|\Z)",
+    re.DOTALL,
+)
+# 「建議觀望」格式 — 不產生 prediction，但要識別出來避免誤抓上面的 placeholder
+_OBSERVE_CARD_PATTERN = re.compile(
+    r"⚠️\s*本次分析無法產生具體預測",
+)
+
+_CARD_DIRECTION = re.compile(r"🎯\s*方向：\s*(做多|做空)\s*([\S]+)?")
+_CARD_ENTRY = re.compile(r"📍\s*進場：\s*\$?([\d.,]+)")
+_CARD_TARGET = re.compile(r"🎯\s*目標：\s*\$?([\d.,]+)")
+_CARD_STOP = re.compile(r"🛑\s*止損：\s*\$?([\d.,]+)")
+_CARD_TIMEFRAME = re.compile(r"⏱\s*時間框：\s*(\S+)")
+_CARD_CONFIDENCE = re.compile(r"📊\s*信心：\s*(高|中|低|high|medium|low)")
+_CARD_INDICATORS = re.compile(r"🔍\s*主要指標：\s*([^\n]+)")
+_CARD_REGIME = re.compile(r"🌐\s*市場\s*regime：\s*(\S+)")
+_CARD_INVALIDATION = re.compile(r"❌\s*失效條件：\s*(.+?)(?=\n|───|$)", re.DOTALL)
+
+_CONFIDENCE_MAP = {"高": "high", "中": "medium", "低": "low"}
+
+
+def _parse_visible_card(text: str) -> Optional[dict]:
+    """v100：從可見結論卡解析 prediction（單筆，因為新版每回應只有 1 張卡）。
+
+    Returns:
+        dict（同 _PREDICTION_LINE 解析結果結構），失敗回 None。
+    """
+    card = _VISIBLE_CARD_PATTERN.search(text)
+    if not card:
+        return None
+    block = card.group(0)
+
+    # 數字含逗號去除
+    norm = re.sub(r"(\d),(\d)", r"\1\2", block)
+
+    direction_m = _CARD_DIRECTION.search(norm)
+    entry_m = _CARD_ENTRY.search(norm)
+    target_m = _CARD_TARGET.search(norm)
+    stop_m = _CARD_STOP.search(norm)
+    tf_m = _CARD_TIMEFRAME.search(norm)
+    conf_m = _CARD_CONFIDENCE.search(norm)
+    ind_m = _CARD_INDICATORS.search(norm)
+    regime_m = _CARD_REGIME.search(norm)
+    inv_m = _CARD_INVALIDATION.search(norm)
+
+    # 必要欄位缺失 → 棄
+    if not all([direction_m, entry_m, target_m, stop_m, tf_m, conf_m]):
+        return None
+
+    direction = "long" if direction_m.group(1) == "做多" else "short"
+    confidence_raw = conf_m.group(1).lower()
+    confidence = _CONFIDENCE_MAP.get(conf_m.group(1), confidence_raw)
+
+    try:
+        entry = float(entry_m.group(1))
+        target = float(target_m.group(1))
+        stop = float(stop_m.group(1))
+    except (ValueError, IndexError):
+        return None
+
+    tf_str = tf_m.group(1)
+    return {
+        "direction": direction,
+        "entry_price": entry,
+        "target_price": target,
+        "stop_price": stop,
+        "timeframe_str": tf_str,
+        "timeframe_hours": _parse_timeframe_hours(tf_str),
+        "confidence": confidence,
+        "regime": regime_m.group(1) if regime_m else "unknown",
+        "indicators": ind_m.group(1).strip().replace(" ", "") if ind_m else "",
+        "invalidation": inv_m.group(1).strip() if inv_m else "",
+    }
+
 
 def _sanitize_prediction_block(block: str) -> str:
     """預處理預測區塊，提高正則匹配容錯性。"""
@@ -55,7 +133,16 @@ def _sanitize_prediction_block(block: str) -> str:
 
 
 def parse_predictions(llm_response: str) -> list[dict]:
-    """從 LLM 回答中解析 PREDICTIONS 區塊。"""
+    """從 LLM 回答中解析預測（v100：優先解析可見結論卡，舊隱藏 block 做向下相容）。"""
+    # v100：優先嘗試新可見結論卡
+    if _OBSERVE_CARD_PATTERN.search(llm_response):
+        # 「建議觀望」卡 — 不產生 prediction
+        return []
+    visible_pred = _parse_visible_card(llm_response)
+    if visible_pred:
+        return [visible_pred]
+
+    # Fallback：舊隱藏 ---PREDICTIONS--- block（向下相容歷史對話）
     match = _PREDICTIONS_PATTERN.search(llm_response)
     if not match:
         return []

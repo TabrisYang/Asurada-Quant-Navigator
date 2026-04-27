@@ -1018,6 +1018,16 @@ GET    /api/health                   # 系統健康狀態
     端到端驗證（BTC/USDT 1d，2026-04-27）：regime 自動分類 trending_up（conf 0.726）→ 3 檔 long entries（current + EMA20 + BB middle）→ weighted_avg $76,074 / SL $72,299 / TP $83,623 / RR 2.0
     預期效益：投資建議從「30% 倉位」抽象變「$X 進 50% / $Y 進 30% / $Z 進 20%」具體；ladder vs 單進場有完整回測對照（含 WF + MC）；LLM 幻覺風險 = 0（強制引用後端計算）
 
+100. ✅ 預測驗證閉環 — 結構化結論卡 + Calibration 面板 + 圖表標註過往預測 + recent_accuracy 結構化注入（v100）：
+    **問題**：系統提出投資分析後，使用者無法驗證準確度。3 個關鍵缺口：① 隱藏 ---PREDICTIONS--- block 跟正文結論可能漂移 ② 後端有 calibration（Brier/ECE/Bayesian）但前端看不到 ③ 圖表上沒有歷史預測痕跡
+    **Phase 1**（[function_defs.py](backend/app/core/llm/function_defs.py) CORE + [prediction_tracker.py](backend/app/core/prediction_tracker.py) + [chat.py](backend/app/api/routes/chat.py)）：CORE prompt PREDICTIONS 段改成「結構化結論卡」（emoji + 表格 + 用戶可見），含方向/進場/目標/止損/時間框/信心/指標/regime/失效條件 9 欄位。新增 `_VISIBLE_CARD_PATTERN` regex 從可見卡解析 + 「建議觀望」格式偵測（不存 prediction）；舊隱藏 block 保留 fallback 向下相容。chat.py post-process 加低信心過濾（confidence="low" 不存 DB）+ `_inject_recent_accuracy()` 自動替換「📈 系統參考：」佔位行為實際歷史命中率（從 prediction_tracker.get_stats）；SSE 新事件 `accuracy_inject` 讓前端即時替換顯示
+    **Phase 2**（[predictions.py](backend/app/api/routes/predictions.py) + [PredictionDashboard.tsx](frontend/src/components/PredictionDashboard/PredictionDashboard.tsx)）：新 `/api/predictions/calibration` endpoint 暴露 Brier/ECE/信心桶/Bayesian/regime/indicator 拆分；PredictionDashboard 新增「📊 命中率」tab 顯示整體命中率（含 Bayesian 95% CI）、Brier/ECE 解讀、信心校準表（看高信心是否真更準）、按 regime 拆分、可靠性曲線。頂部加免責橫幅
+    **Phase 3**（[predictions.py](backend/app/api/routes/predictions.py) + [ChartView.tsx](frontend/src/components/ChartView/ChartView.tsx)）：新 `/api/predictions/by_symbol` endpoint 拉某 symbol 過去 90 天預測（含 entry/target/stop/status/MFE/MAE）；ChartView 加「📊 歷史預測」toggle 按鈕（預設關閉），開啟後自動載入 + 用既有 horizontal_line annotation 系統畫進場價/SL/TP 線（多綠空紅 + ✓/✗/⏳ 結果標籤），歸到 `past_predictions` group 方便管理
+    **Phase 4**（[chat.py:631](backend/app/api/routes/chat.py#L631)）：把 prediction_feedback 的純文字注入升級為 `chart_state.recent_accuracy` 結構化欄位（30d/90d 命中率、樣本數、Bayesian CI、Brier、best/worst indicators）；CORE prompt 加引用規則：win_rate < 50% 且 n >= 10 必須警示 + 強制降信心；best_indicators 優先引用 worst_indicators 標警告
+    **Phase 5**：PredictionDashboard 頂部 + Calibration tab 加免責聲明「歷史命中率不保證未來表現，僅供參考」
+    端到端閉環：使用者按「全部分析」→ LLM 產生可見結構化結論卡 → 後端 regex 解析存進 predictions.db → 後續 K 線到期自動驗證（既有 prediction_validator.validate_all_active）→ 累積 30 天後 Calibration 面板顯示真實命中率 → chart_state.recent_accuracy 注回下次分析讓 LLM 校準信心
+    預期效益：使用者首次能驗證系統準確度（不再黑盒）；模糊建議無法量化的問題被「低信心 → 建議觀望，不存 prediction」解決；圖表上直觀看到「上次預測對在哪錯在哪」
+
 ### 待開發功能
 
 - ⬜ CI/CD 流程建立

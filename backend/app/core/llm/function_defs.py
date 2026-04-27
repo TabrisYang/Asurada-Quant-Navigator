@@ -274,6 +274,17 @@ chart_state 中的 indicatorValues 包含系統精確計算的指標數值（最
 - 若 `per_regime_metrics` 顯示策略只在某種 regime 有效，且**當前 regime 不是該類**，必須標示「此策略在當前環境不適用」並降低權重。
 - 報告策略對比時，必須以「Wilson CI 下界排名」為主要排序依據（避免被高勝率但少樣本的策略誤導）。
 
+【★★ chart_state.recent_accuracy 引用規則 — 強制（v100）★★】
+若 chart_state 含 `recent_accuracy` 欄位（系統的歷史預測命中率統計），你**必須**：
+1. 在結論卡的「📊 信心」評估時，把 `win_rate_30d` 納入校準依據（明確寫在「依據：」內）：
+   - `win_rate_30d` >= 60% 且 n >= 5 → 可用「高」信心
+   - `win_rate_30d` 50-60% → 至多「中」
+   - `win_rate_30d` < 50% 且 n >= 10 → 強制降為「中」或「低」（低信心改用「⚠️ 建議觀望」格式）
+2. 若 `win_rate_30d` < 50% 且 `n_30d` >= 10，必須在分析開頭顯眼處警示：
+   「⚠️ 你最近 30 天此類分析命中率僅 X%（n=Y），本次建議降低倉位 / 觀望為主」
+3. 若 `best_indicators` 含某指標，分析時優先引用該指標；`worst_indicators` 中的指標必須標警告（例「⚠️ MACD 在你近期表現偏弱（n=12 勝率 35%），僅作參考」）
+4. 若 `calibration_brier` > 0.3，提醒使用者「系統信心校準偏差較大，請以低倉位試單為主」
+
 【★★ 分批進場價位引用規則 — 強制（v99）★★】
 若任何分析結果中出現 `compute_laddered_entries` 的回傳（含 long_entries / short_entries / weighted_avg_entry_long / stop_loss_long / take_profit_long 等欄位），你**必須**：
 1. 直接引用其中的 `price` / `size_pct` / `source` 欄位 — **禁止**自行推算或編造任何分批進場價位（這跟 indicator 數值規則一樣嚴格）
@@ -380,12 +391,43 @@ chart_state 中的 indicatorValues 包含系統精確計算的指標數值（最
 type 可選：support_resistance, trend, pattern, indicator, strategy, volume, sentiment, general
 每條碎片至少30字含具體數值和幣種名稱，最多5條。純知識問答不需附加。
 
-【預測追蹤】有明確進出場數值時附加：
----PREDICTIONS---
-- [direction:long/short] entry=價格 target=目標 stop=止損 timeframe=48h/72h/7d/14d confidence=high/medium/low regime=趨勢/盤整/高波動 indicators=指標1,指標2 invalidation=推翻本次判斷的具體條件
----END_PREDICTIONS---
-每次最多 2 個預測。invalidation 欄位為必填 — 明確寫出「哪些條件發生將推翻本次判斷」。
-注意：PREDICTIONS 區塊會被系統自動擷取，使用者看不到。你「必須」在回覆正文中用自然語言列出策略有效期和失效條件。
+【★★ 結構化結論卡（v100）— 取代隱藏 PREDICTIONS block ★★】
+僅在 comprehensive_analysis（全部分析）/ deep_phase1-3（完整分析三階段）模式才產出，且必須以下列「使用者可見」格式呈現於回應結尾。系統會 regex 解析此卡的欄位儲存到 predictions.db 用於命中率追蹤。
+
+★ 標準格式（高/中信心場景，必含所有欄位）：
+═══════════════════════════════════════════════
+📊 本次分析總結（系統會追蹤驗證）
+⚠️ 此為系統判讀，不構成投資建議
+───
+🎯 方向：[做多/做空] [標的代碼，例：BTC/USDT]
+📍 進場：[價位，若有 ladder 則寫多檔分批]
+🎯 目標：[價位]（預期 RR [比例]）
+🛑 止損：[價位]
+⏱  時間框：[48h/72h/7d/14d]
+📊 信心：[高/中]（依據：[具體統計依據，如 Wilson CI 下界 X% / regime 信心 Y%]）
+🔍 主要指標：[逗號分隔，例：RSI,ADX,BB]
+🌐 市場 regime：[trending_up/trending_down/ranging/high_vol/low_vol]
+❌ 失效條件：[具體條件，例：跌破 $63,000 或 RSI > 80]
+───
+📈 系統參考：（這行由系統替換為實際命中率，不要自填數字）
+🤖 此預測會被系統追蹤，X 小時後自動驗證
+═══════════════════════════════════════════════
+
+★ 低信心場景（regime confidence < 0.5 或 8 策略 Wilson CI 下界 < 50%）— 必須改用此格式：
+═══════════════════════════════════════════════
+⚠️ 本次分析無法產生具體預測 — 建議觀望
+───
+原因：[具體說明，如 regime 信心 0.42（低於 0.5 閾值）/ 策略樣本不足]
+備註：系統不會記錄此次為預測，避免汙染命中率統計
+═══════════════════════════════════════════════
+
+★ 規則：
+- 每次回應最多 1 張結論卡（與舊版 2 個預測不同 — 新版聚焦單一決策）
+- entry/target/stop 必須是具體數字（不可寫「在支撐附近」）
+- 信心欄位「高」必須有 Wilson CI 下界 ≥ 60% + regime 信心 ≥ 0.7 才能用；否則用「中」
+- 純查詢（指標數值、切換）/ 教學模式 / 簡單分析 / 動能分析 / SMC / 基本面：不產生結論卡
+- 「📈 系統參考」這一行 prompt 中保留為 placeholder，後端會替換為實際歷史命中率，你不要自填數字
+- 不再產出 ---PREDICTIONS--- 隱藏 block
 
 【ML 增強信號】
 若 chart_state 中存在 mlPrediction 欄位，代表系統的 ML 模型已產生前兆模式辨識預測：
@@ -1029,14 +1071,20 @@ _PROMPT_MODULES["output_deep_phase3"] = """
    - 量化驗證結果（本階段結論）+ CPCV/WF/MC 交叉驗證
    - 最終建議：部署 / 觀望 / 暫停 + 理由
 
-【結尾格式】
+【結尾格式（v100 強制）】
+1. 寫摘要區（如下）
+2. 接著貼 v100 結構化結論卡（CORE prompt 已定義格式）
+3. 「📈 系統參考：」這行寫成佔位文字，後端會替換為實際命中率，不要自填數字
+
 ---
 📋 **完整分析進度：[3/3] — 全部完成**
 ✅ 第一階段：市場環境 + 情境預測 + SMC 結構
 ✅ 第二階段：多策略回測 + 條件機率
 ✅ 第三階段：量化研究 + Monte Carlo + 倉位管理
 🎯 最終結論：[方向] / 信心 [等級] / 建議倉位 [百分比]
----"""
+---
+
+[接著貼 v100 結構化結論卡 — 詳見 CORE prompt 規則。低信心 → 改用「⚠️ 建議觀望」格式]"""
 
 _PROMPT_MODULES["comprehensive_analysis"] = """
 【★★★ 全部分析 — 統合報告（去重版） ★★★】
@@ -1087,7 +1135,11 @@ _PROMPT_MODULES["comprehensive_analysis"] = """
   - 若 enabled = false → 改為「regime 信心 X% 過低，建議單一進場 + 小倉位試單」並省略表格
   - 若 missing_indicators 非空 → 必須先呼叫 manage_indicator(action="add") 補回再重算
 
-★ 結尾格式（必含）：
+★ 結尾格式（v100 強制）：
+1. 先寫「📋 全部分析完成 — 跨維度交叉驗證」摘要區（如下）
+2. 接著寫 v100 結構化結論卡（CORE prompt 已定義格式，必含所有欄位）
+3. 「📈 系統參考：」這行寫成佔位文字，後端會替換為實際命中率，不要自填數字
+
 ---
 📋 **全部分析完成 — 跨維度交叉驗證**
 ✅ 市場環境：[regime + 廣度結論]
@@ -1098,6 +1150,8 @@ _PROMPT_MODULES["comprehensive_analysis"] = """
 ✅ 分批進場：[配比策略 + 加權均價 + RR]
 🎯 最終結論：[方向] / 信心 [高/中/低] / 建議倉位 [百分比]
 ---
+
+[接著貼 v100 結構化結論卡 — 詳見 CORE prompt 規則。低信心 → 改用「⚠️ 建議觀望」格式]
 """
 
 _PROMPT_MODULES["teaching"] = """

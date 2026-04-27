@@ -59,6 +59,72 @@ async def get_prediction_history(
     return {"status": "success", "predictions": history, "count": len(history)}
 
 
+# ─── v100：Calibration 面板專用 endpoint ──────────────────────
+@router.get("/calibration")
+async def get_calibration(
+    symbol: Optional[str] = Query(None),
+    days: int = Query(90, ge=7, le=365),
+):
+    """暴露 Brier / ECE / 信心桶 / Bayesian / regime / indicator 拆分數據（前端 Calibration 面板用）。"""
+    stats = prediction_tracker.get_stats(symbol=symbol, days=days)
+    return {
+        "status": "success",
+        "calibration": stats.get("calibration", {}),                      # Brier / ECE / reliability_curve
+        "confidence_calibration": stats.get("confidence_calibration", {}),  # 信心 vs 命中率
+        "bayesian": stats.get("bayesian", {}),                            # credible interval
+        "by_regime": stats.get("by_regime", {}),                          # per-regime 拆分
+        "by_indicator": stats.get("indicator_stats", {}),                 # per-indicator 拆分
+        "win_rate_weighted": stats.get("win_rate_weighted", 0),
+        "total": stats.get("total", 0),
+    }
+
+
+# ─── v100：圖表標註過往預測用 endpoint ────────────────────────
+@router.get("/by_symbol")
+async def get_predictions_for_chart(
+    symbol: str = Query(..., description="必填：幣種如 BTC/USDT"),
+    timeframe: Optional[str] = Query(None, description="若指定，僅回傳該時間框架的預測"),
+    days: int = Query(90, ge=7, le=365),
+):
+    """給圖表用 — 拉某 symbol 過去 N 天的所有預測（含 active + validated）。
+
+    用於 ChartView 自動標註過往預測（箭頭 + SL/TP 線 + 結果 ✓/✗）。
+    """
+    prediction_tracker._ensure_db()
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+    query = "SELECT * FROM predictions WHERE symbol = ? AND created_at >= ?"
+    params: list = [symbol, cutoff]
+    if timeframe:
+        query += " AND timeframe = ?"
+        params.append(timeframe)
+    query += " ORDER BY created_at ASC"
+
+    rows = prediction_tracker._conn.execute(query, params).fetchall()
+    predictions = []
+    for r in rows:
+        d = dict(r)
+        predictions.append({
+            "id": d.get("id"),
+            "created_at": d.get("created_at"),
+            "validated_at": d.get("validated_at"),
+            "expires_at": d.get("expires_at"),
+            "status": d.get("status"),
+            "direction": d.get("direction"),
+            "entry_price": d.get("entry_price"),
+            "target_price": d.get("target_price"),
+            "stop_price": d.get("stop_price"),
+            "timeframe_hours": d.get("timeframe_hours"),
+            "confidence": d.get("confidence"),
+            "regime": d.get("regime"),
+            "indicators": d.get("indicators"),
+            "actual_outcome_pct": d.get("actual_outcome_pct"),
+            "max_favorable_pct": d.get("max_favorable_pct"),
+            "max_adverse_pct": d.get("max_adverse_pct"),
+            "invalidation": d.get("invalidation"),
+        })
+    return {"status": "success", "symbol": symbol, "count": len(predictions), "predictions": predictions}
+
+
 class NoteUpdate(BaseModel):
     note: str
 

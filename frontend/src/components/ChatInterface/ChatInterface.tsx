@@ -698,6 +698,16 @@ export default function ChatInterface() {
             setDistillHint(true);
           }
         },
+        // v100：結論卡「📈 系統參考」由系統替換為實際命中率
+        onAccuracyInject: (data: { old_pattern: string; new_text: string }) => {
+          const currentMsg = useChartStore.getState().messages.find(m => m.id === assistantMsgId);
+          if (!currentMsg) return;
+          const replaced = String(currentMsg.content || '').replace(
+            /📈\s*系統參考：[^\n]*/,
+            data.new_text,
+          );
+          updateMessage(assistantMsgId, { content: replaced });
+        },
       },
       currentConversationId || undefined,
       store.getChartStateSummary(),

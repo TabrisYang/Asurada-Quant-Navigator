@@ -137,6 +137,8 @@ export interface StreamCallbacks {
   onUsage?: (usage: TokenUsage) => void;
   onError?: (error: string) => void;
   onDone?: (conversationId?: string, hints?: Record<string, unknown>) => void;
+  // v100：結論卡「📈 系統參考」由系統替換為實際命中率
+  onAccuracyInject?: (data: { old_pattern: string; new_text: string }) => void;
 }
 
 /** SSE 串流回傳值：promise 等待完成，abort 可主動斷開連線 */
@@ -366,6 +368,9 @@ function _handleSSEEvent(
       break;
     case 'done':
       callbacks.onDone?.(data.conversation_id as string | undefined, data);
+      break;
+    case 'accuracy_inject':
+      callbacks.onAccuracyInject?.(data as unknown as { old_pattern: string; new_text: string });
       break;
     default:
       break;

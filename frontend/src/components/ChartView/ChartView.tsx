@@ -494,6 +494,78 @@ export default function ChartView() {
   const clearAnnotations = useChartStore((s) => s.clearAnnotations);
   const toggleAnnotationGroup = useChartStore((s) => s.toggleAnnotationGroup);
   const removeAnnotationGroup = useChartStore((s) => s.removeAnnotationGroup);
+  const addAnnotation = useChartStore((s) => s.addAnnotation);
+
+  // ★ v100：歷史預測標註 toggle
+  const [showPastPredictions, setShowPastPredictions] = useState(false);
+  const [predictionsLoading, setPredictionsLoading] = useState(false);
+
+  // 載入歷史預測 → 轉成 annotations
+  useEffect(() => {
+    if (!showPastPredictions || !symbol) return;
+    let cancelled = false;
+    setPredictionsLoading(true);
+    (async () => {
+      try {
+        removeAnnotationGroup('past_predictions');
+        const params = `?symbol=${encodeURIComponent(symbol)}&days=90`;
+        if (timeframe) {
+          // 不限制 timeframe，讓所有 timeframe 的預測都顯示在當前圖上
+        }
+        const res = await fetch(`/api/predictions/by_symbol${params}`);
+        const data = await res.json();
+        if (cancelled || !data.predictions) return;
+        for (const p of data.predictions) {
+          if (!p.entry_price || !p.target_price || !p.stop_price) continue;
+          const isLong = p.direction === 'long';
+          const status = p.status || 'active';
+          const statusEmoji = status === 'hit_target' ? '✓' : status === 'hit_stop' ? '✗' : status === 'expired' ? '⏱' : '⏳';
+          const ts = p.created_at;
+          // entry 線
+          addAnnotation({
+            id: `pred_${p.id}_entry`,
+            groupId: 'past_predictions',
+            groupName: '歷史預測（90 天）',
+            type: 'horizontal_line',
+            price: p.entry_price,
+            label: `${statusEmoji} ${isLong ? '多' : '空'}進 ${p.confidence || ''}`,
+            color: isLong ? '#3fb950' : '#f85149',
+            time: ts,
+          } as any);
+          addAnnotation({
+            id: `pred_${p.id}_target`,
+            groupId: 'past_predictions',
+            groupName: '歷史預測（90 天）',
+            type: 'horizontal_line',
+            price: p.target_price,
+            label: 'TP',
+            color: '#3fb950',
+          } as any);
+          addAnnotation({
+            id: `pred_${p.id}_stop`,
+            groupId: 'past_predictions',
+            groupName: '歷史預測（90 天）',
+            type: 'horizontal_line',
+            price: p.stop_price,
+            label: 'SL',
+            color: '#f85149',
+          } as any);
+        }
+      } catch (e) {
+        console.error('載入歷史預測失敗', e);
+      } finally {
+        setPredictionsLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [showPastPredictions, symbol, timeframe, addAnnotation, removeAnnotationGroup]);
+
+  // toggle 關閉時清除預測 annotations
+  useEffect(() => {
+    if (!showPastPredictions) {
+      removeAnnotationGroup('past_predictions');
+    }
+  }, [showPastPredictions, removeAnnotationGroup]);
   const getAnnotationGroups = useChartStore((s) => s.getAnnotationGroups);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const annotationSeriesRef = useRef<Map<string, ISeriesApi<any>>>(new Map());
@@ -1163,6 +1235,19 @@ export default function ChartView() {
               ✕ 清除全部標記
             </button>
           )}
+          {/* ★ v100：歷史預測 toggle */}
+          <button
+            onClick={() => setShowPastPredictions(v => !v)}
+            className="ml-3 text-xs cursor-pointer hover:opacity-80 px-1.5 py-0.5 rounded"
+            style={{
+              background: showPastPredictions ? 'var(--accent-blue)' : 'var(--bg-tertiary)',
+              color: showPastPredictions ? '#fff' : 'var(--text-secondary)',
+            }}
+            title="顯示過去 90 天的歷史預測（含驗證結果）"
+            disabled={predictionsLoading}
+          >
+            📊 歷史預測 {predictionsLoading ? '載入中...' : (showPastPredictions ? '✓' : '')}
+          </button>
         </div>
 
         {/* AI 標記分組管理面板（可收合） */}
