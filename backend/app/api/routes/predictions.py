@@ -79,6 +79,42 @@ async def get_calibration(
     }
 
 
+# ─── v101：模仿學習狀態 + Champion-Challenger 控制 ───────────
+@router.get("/imitation/status")
+async def get_imitation_status():
+    """取目前模型版本 + AUC + Quality Gate + Canary 狀態（前端 PredictionDashboard 用）。"""
+    from app.core.champion_challenger import get_status
+    return get_status()
+
+
+@router.post("/imitation/retrain")
+async def retrain_imitation_endpoint(force: bool = Query(False)):
+    """手動觸發重訓。force=True 跳過 Champion-Challenger 切換閾值。"""
+    from app.core.imitation_trainer import train_imitation_model
+    return train_imitation_model(min_samples=50, force=force)
+
+
+@router.post("/imitation/disable")
+async def disable_imitation_endpoint():
+    """1-click 停用 v101 — 所有使用者立刻退回 v100 體驗。"""
+    from app.core.champion_challenger import disable_v101
+    return disable_v101()
+
+
+@router.post("/imitation/rollback")
+async def rollback_imitation_endpoint():
+    """1-click 回退到 stable_fallback 模型。"""
+    from app.core.champion_challenger import manual_rollback_to_stable
+    return manual_rollback_to_stable()
+
+
+@router.get("/imitation/quality_gate")
+async def evaluate_quality_gate_endpoint():
+    """手動觸發 Quality Gate 評估（不更動 canary）。"""
+    from app.core.v101_self_validator import evaluate_v101_readiness
+    return evaluate_v101_readiness()
+
+
 # ─── v100：圖表標註過往預測用 endpoint ────────────────────────
 @router.get("/by_symbol")
 async def get_predictions_for_chart(

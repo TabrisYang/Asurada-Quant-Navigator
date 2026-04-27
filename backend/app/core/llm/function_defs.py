@@ -274,6 +274,27 @@ chart_state 中的 indicatorValues 包含系統精確計算的指標數值（最
 - 若 `per_regime_metrics` 顯示策略只在某種 regime 有效，且**當前 regime 不是該類**，必須標示「此策略在當前環境不適用」並降低權重。
 - 報告策略對比時，必須以「Wilson CI 下界排名」為主要排序依據（避免被高勝率但少樣本的策略誤導）。
 
+【★★ rl_strategic_insight 引用規則（v101 模仿學習）★★】
+若 chart_state 含 `rl_strategic_insight` 欄位（v101 模仿學習推論結果），你**必須**在第 6 段「🤖 RL 戰略結論」遵守以下規則：
+
+1. **直接引用** policy_distribution 三個機率（buy/wait/sell）+ q_value，**禁止編造**
+2. **Mode 自然語言改寫**（不要直接說 mode 字串）：
+   - `cold_start` → 「⚠️ 樣本不足（n < 30），目前使用規則融合估算，準確度待累積」
+   - `blended` → 「混合模式（ML 權重 X%，樣本 n=Y）」
+   - `ml_dominant` → 「ML 主導模式（樣本 n=Y 充足，AUC=Z）」
+3. **SHAP top 3** 必引（cold_start 略過）：每個寫成「[特徵名]：當前值 [val]，影響度 [shap]，推向 [看多/看空]」
+4. **路徑類比**：引用 similar_paths（如「歷史 3 筆相似情境中 X 筆命中，勝率 XX%」）
+5. **conflicts 強制警示**：若 conflicts 非空，必須在開頭顯眼處警示
+6. **position_multiplier**：若 < 1.0，倉位建議必須乘上此 multiplier（例：建議倉位 30% → 改 15%）
+7. **veto_active = true**：強制改用「保守觀望 / 小倉位試單」措辭
+8. **model_metrics.lockbox_auc < 0.6**：標警示「⚠️ 模型表現一般，僅供參考」
+
+【★ 絕對禁止】：
+  ✗ 自行編造 policy 機率或 Q-value
+  ✗ 用 top_features 之外的特徵當「主因」
+  ✗ Cold start 時稱「ML 預測」（必稱「規則融合預測」）
+  ✗ 忽略 conflicts 或 veto_active
+
 【★★ chart_state.recent_accuracy 引用規則 — 強制（v100）★★】
 若 chart_state 含 `recent_accuracy` 欄位（系統的歷史預測命中率統計），你**必須**：
 1. 在結論卡的「📊 信心」評估時，把 `win_rate_30d` 納入校準依據（明確寫在「依據：」內）：
@@ -1134,6 +1155,21 @@ _PROMPT_MODULES["comprehensive_analysis"] = """
   - 引用 ratio_strategy 說明配比邏輯
   - 若 enabled = false → 改為「regime 信心 X% 過低，建議單一進場 + 小倉位試單」並省略表格
   - 若 missing_indicators 非空 → 必須先呼叫 manage_indicator(action="add") 補回再重算
+
+★ #6 結論段（v101 強化）— 必含「🤖 RL 戰略結論」子段（若 chart_state 有 rl_strategic_insight）：
+  6.5 🤖 RL 戰略結論（依 chart_state.rl_strategic_insight）
+
+      📊 模型推論機率：Buy XX% / Wait XX% / Sell XX%（Q-Value: X.XXX）
+      🔬 模式：[依 mode 自然語言改寫，cold_start/blended/ml_dominant]
+              ML 估 X% vs 規則估 X%
+
+      🔍 主要驅動因子（SHAP top 3，cold_start 略過）：
+        - [feature]：當前 [val]，[推向看多/看空]（影響度 X.XX）
+
+      📚 歷史相似情境：3 筆中 X 筆命中（XX% 勝率）
+
+      ⚠️ 衝突警示（若有）：[逐條列出 conflicts]
+      🎯 倉位調整：基準倉位 × [position_multiplier]
 
 ★ 結尾格式（v100 強制）：
 1. 先寫「📋 全部分析完成 — 跨維度交叉驗證」摘要區（如下）

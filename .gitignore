@@ -60,3 +60,5 @@ FINAL-*.png
 
 # ===== 個人研究文件（不公開）=====
 量化條件庫.xlsx
+models/*.pkl
+data/db_pre_v101_*/

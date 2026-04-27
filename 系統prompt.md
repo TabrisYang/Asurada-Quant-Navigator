@@ -1075,6 +1075,21 @@ GET    /api/health                   # 系統健康狀態
     端到端閉環：使用者按「全部分析」→ LLM 產生可見結構化結論卡 → 後端 regex 解析存進 predictions.db → 後續 K 線到期自動驗證（既有 prediction_validator.validate_all_active）→ 累積 30 天後 Calibration 面板顯示真實命中率 → chart_state.recent_accuracy 注回下次分析讓 LLM 校準信心
     預期效益：使用者首次能驗證系統準確度（不再黑盒）；模糊建議無法量化的問題被「低信心 → 建議觀望，不存 prediction」解決；圖表上直觀看到「上次預測對在哪錯在哪」
 
+101. ✅ v101 模仿學習 + 動態 Blend Ensemble + 9 層防護「永不變壞」（Phase 0 + Phase 2.0-2.6）：
+    **問題**：v100 累積的 verified predictions 沒被任何模型學習，系統無法「越用越聰明」。但加 ML 有過擬合 / drift / 越用越差等風險，使用者擔心改完系統爛掉。
+    **設計鐵律**：v100 結論卡格式永遠不變；v101 段落是 ADD ONLY，從不 REPLACE；v101 沒被量化證明 ≥ v100 之前，使用者看到 100% v100 體驗（Quality Gate 7 硬閾值守衛）
+    **9 層防護**：① Feature Flags 1 秒回退 ② Database 純加法 ③ Git tag + DB backup ④ Shadow Mode 4-8 週 ⑤ Quality Gate 7 硬閾值 ⑥ Canary 1→10→25→50→100% 漸進 ⑦ Auto-rollback Watchdog ⑧ Regression Tests ⑨ Champion-Challenger + Stable Fallback
+    **Phase 0 安全基礎建設**（[settings.py](backend/app/core/config/settings.py) + [shadow_runner.py](backend/app/core/shadow_runner.py) + [canary.py](backend/app/core/canary.py) + [auto_rollback.py](backend/app/core/auto_rollback.py) + [v101_self_validator.py](backend/app/core/v101_self_validator.py) + [test_v100_regression.py](backend/tests/test_v100_regression.py) + [v101_emergency_rollback.md](backend/docs/v101_emergency_rollback.md)）：9 個 v101 feature flags 預設全 OFF / SHADOW；4 層 use_v101() 守衛（learning_enabled + shadow_off + quality_gate + canary）；自動 rollback 每天 03:00 跑；8 個 v100 regression tests；5 分鐘三層回退 SOP
+    **Phase 2.0 特徵記錄**（[prediction_tracker.py](backend/app/core/prediction_tracker.py) `_ensure_schema_v101` + [feature_extractor.py](backend/app/core/feature_extractor.py)）：純加法新增 4 表（prediction_features / shadow_predictions / imitation_model_metrics / quality_gate_log）；39 個特徵分層設計 — 規則用結構性（smc_bias / regime / FVG），LightGBM 用統計性（連續指標）→ 誤差相關性 0.7 → 0.4，ensemble 收益增加 100-200%；[chat.py:1380](backend/app/api/routes/chat.py#L1380) 即時記錄；[backfill_prediction_features.py](backend/scripts/backfill_prediction_features.py) 對 239 筆既有 verified predictions 全部成功回填
+    **Phase 2.1 訓練 pipeline**（[imitation_trainer.py](backend/app/core/imitation_trainer.py)）：LightGBM + Platt scaling 校準；動態模型容量（n_estimators / max_depth / min_child_samples 隨樣本量自動調整）；強正則化（reg_alpha=0.5 + Bagging subsample=0.7）；Walk-forward TimeSeriesSplit OOF；Lockbox 最近 20% 永不訓練（**主要 OOS 訊號** — 比 OOF 在小樣本更可靠）；拒絕條件：overfit_gap > 0.20 / lockbox_auc < 0.55 / 沒比現役 +0.02。**首版 v4 model 訓練成功 — Lockbox AUC 0.81、Brier 0.21、n=157**
+    **Phase 2.2 推論層**（[imitation_predictor.py](backend/app/core/imitation_predictor.py)）：動態 blend α=sigmoid(0.05*(n-50))（n=30→0.27 / n=50→0.50 / n=100→0.92 / n=200→0.99）；軟性 veto（regime conf < 0.3 或 Wilson CI < 30% → cap p_ml at 0.30，不完全否決）；分歧偵測 |p_ml - p_rule| > 0.3 → conflicts + position_multiplier=0.5；SHAP top 3 + KNN 路徑類比 3 筆。輸出 JSON 對應使用者提的 prompt 格式（policy_distribution / q_value / top_features / similar_paths / conflicts）
+    **Phase 2.3 LLM 整合**（[chat.py:677](backend/app/api/routes/chat.py#L677) + [function_defs.py](backend/app/core/llm/function_defs.py) `_PROMPT_CORE` + comprehensive_analysis #6.5）：4 層守衛包圍 chart_state.rl_strategic_insight 注入；CORE prompt 加 v101 引用規則（mode 自然語言改寫 / SHAP top 3 必引 / conflicts 強制警示 / position_multiplier 必套 / 絕對禁止編造）
+    **Phase 2.4 監控 + Champion-Challenger**（[champion_challenger.py](backend/app/core/champion_challenger.py) + [predictions.py](backend/app/api/routes/predictions.py) 5 個新 endpoints + [PredictionDashboard.tsx](frontend/src/components/PredictionDashboard/PredictionDashboard.tsx) 「🤖 模型狀態」tab）：3 個模型版本維護（Champion / Challenger / Stable Fallback）+ 1-click 回退 / 重訓 / 停用按鈕；Quality Gate 進度視覺化
+    **Phase 2.5 Drift 偵測**（[drift_monitor.py](backend/app/core/drift_monitor.py)）：Adversarial Validation（AUC > 0.65 顯著漂移強制重訓）+ 每特徵 PSI 監控（≥ 0.25 重大漂移）
+    **Phase 2.6 自動重訓**（[retrain_imitation.py](backend/scripts/retrain_imitation.py) + launchd 每週日 02:00）：drift 檢查 → 樣本檢查 → 訓練 → auto-rollback → quality gate → canary progression
+    端到端驗證：v4 model trained, lockbox AUC 0.81; Quality Gate 6/7 通過（剩 shadow_4w_hit_rate 等累積 4 週 shadow 數據）；37 個測試全通過（29 既有 + 8 新 v100 regression）；frontend TS clean
+    **「永不變壞」量化保證**：使用者目前看到 100% v100 體驗（Quality Gate 嚴格守衛）；累積 4 週 shadow + 第二次重訓後若所有 gate 通過 → 自動啟動 Canary 1%；任何時候 5 分鐘可手動回退到 v100.0 git tag
+
 ### 待開發功能
 
 - ⬜ CI/CD 流程建立

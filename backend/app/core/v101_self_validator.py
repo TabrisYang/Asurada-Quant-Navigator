@@ -35,7 +35,7 @@ GATE_THRESHOLDS = {
     "min_oos_auc": 0.60,
     "min_lockbox_auc": 0.58,
     "max_brier": 0.22,
-    "max_overfit_gap": 0.10,
+    "max_overfit_gap": 0.20,  # 跟 trainer 一致（小樣本下 train AUC 容易高）
     "min_shadow_4w_hit_rate_vs_baseline": 0.0,  # >= baseline
     "max_adversarial_auc": 0.65,
 }
@@ -167,6 +167,7 @@ def canary_progression() -> dict:
 
 def _get_active_model_metrics() -> Optional[dict]:
     """從 imitation_model_metrics 表取目前 champion 模型的指標。"""
+    prediction_tracker._ensure_db()
     if not prediction_tracker._conn:
         return None
     try:

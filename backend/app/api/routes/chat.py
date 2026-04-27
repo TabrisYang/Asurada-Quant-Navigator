@@ -673,6 +673,42 @@ def _build_messages(
             except Exception as e:
                 logger.warning(f"活躍預測摘要載入失敗: {e}")
 
+        # ★ v101 Phase 2.3：模仿學習推論注入 chart_state.rl_strategic_insight
+        # 4 層守衛（任一未過 → 不暴露 v101 給 user，等同 v100）：
+        #   1. imitation_learning_enabled = True
+        #   2. shadow_mode = False
+        #   3. v101_passes_quality_gate() = True
+        #   4. canary % 命中
+        # SHADOW 模式：v101 偷跑記錄但不注入 chart_state（user 看不到）
+        if chart_symbol and (_intents & {"comprehensive_analysis", "deep_phase3"}):
+            try:
+                from app.core.canary import use_v101
+                from app.core.shadow_runner import maybe_run_shadow
+                from app.core.imitation_predictor import imitation_predictor
+
+                # 收集當前特徵
+                _current_features = {
+                    "direction_long": 1,  # 預設 long（LLM 後續會根據實際決定）
+                    "confidence_score": 1,
+                    "regime_confidence": float(((request.chart_state or {}).get("currentRegime") or {}).get("confidence", 0)),
+                    "recent_30d_winrate": (request.chart_state or {}).get("recent_accuracy", {}).get("win_rate_30d"),
+                }
+
+                if use_v101(chart_symbol):
+                    # 通過所有守衛 → 真正注入給 user
+                    insight = imitation_predictor.predict(_current_features, request.chart_state)
+                    request.chart_state["rl_strategic_insight"] = insight
+                    logger.info(f"[v101] 注入 rl_strategic_insight: mode={insight['mode']} p_blend={insight['p_hit_target']}")
+                elif settings.imitation_shadow_mode:
+                    # SHADOW MODE：偷跑但不注入 → 記錄到 shadow_predictions 給 quality gate 評估
+                    maybe_run_shadow(
+                        "imitation_predict",
+                        imitation_predictor.predict,
+                        _current_features, request.chart_state,
+                    )
+            except Exception as _ie:
+                logger.debug(f"v101 推論失敗（不影響 v100 流程）: {_ie}")
+
         if chart_symbol and (_intents & {"analysis", "backtest", "calibrate"}):
             try:
                 _calibration_prompt = format_calibration_for_prompt(chart_symbol)

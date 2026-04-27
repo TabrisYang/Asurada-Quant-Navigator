@@ -49,10 +49,13 @@ export default function PredictionDashboard() {
   const [activePreds, setActivePreds] = useState<PredictionItem[]>([]);
   const [historyPreds, setHistoryPreds] = useState<PredictionItem[]>([]);
   const [loading, setLoading] = useState(true);
-  const [viewTab, setViewTab] = useState<'scenarios' | 'active' | 'history' | 'indicators' | 'adjustments' | 'reviews' | 'calibration'>('scenarios');
-  // ★ v100：Calibration 數據（命中率 / Brier / ECE / regime / indicator 拆分）
+  const [viewTab, setViewTab] = useState<'scenarios' | 'active' | 'history' | 'indicators' | 'adjustments' | 'reviews' | 'calibration' | 'imitation'>('scenarios');
+  // ★ v100：Calibration 數據
   const [calibrationData, setCalibrationData] = useState<any>(null);
   const [calibrationLoading, setCalibrationLoading] = useState(false);
+  // ★ v101：模仿學習模型狀態
+  const [imitationStatus, setImitationStatus] = useState<any>(null);
+  const [imitationLoading, setImitationLoading] = useState(false);
 
   // 情境預測
   const [scenarioData, setScenarioData] = useState<any>(null);
@@ -159,11 +162,23 @@ export default function PredictionDashboard() {
     finally { setCalibrationLoading(false); }
   }, [chartSymbol]);
 
+  // ★ v101：載入模型狀態
+  const loadImitation = useCallback(async () => {
+    setImitationLoading(true);
+    try {
+      const res = await fetch('/api/predictions/imitation/status');
+      const data = await res.json();
+      setImitationStatus(data);
+    } catch { setImitationStatus(null); }
+    finally { setImitationLoading(false); }
+  }, []);
+
   useEffect(() => { loadData(); }, [loadData]);
   useEffect(() => { if (viewTab === 'scenarios') loadScenarios(); }, [viewTab, loadScenarios]);
   useEffect(() => { if (viewTab === 'adjustments') loadAdjustments(); }, [viewTab, loadAdjustments]);
   useEffect(() => { if (viewTab === 'reviews') loadReviews(); }, [viewTab, loadReviews]);
   useEffect(() => { if (viewTab === 'calibration') loadCalibration(); }, [viewTab, loadCalibration]);
+  useEffect(() => { if (viewTab === 'imitation') loadImitation(); }, [viewTab, loadImitation]);
 
   const handleSaveNote = async (predId: number) => {
     setSavingNote(true);
@@ -281,12 +296,13 @@ export default function PredictionDashboard() {
 
       {/* ===== Sub-tabs ===== */}
       <div className="flex gap-2 border-b overflow-x-auto" style={{ borderColor: 'var(--border-primary)' }}>
-        {(['scenarios', 'active', 'history', 'calibration', 'reviews', 'indicators', 'adjustments'] as const).map((tab) => {
+        {(['scenarios', 'active', 'history', 'calibration', 'imitation', 'reviews', 'indicators', 'adjustments'] as const).map((tab) => {
           const labels: Record<string, string> = {
             scenarios: '情境預測',
             active: `進行中 (${activePreds.length})`,
             history: `歷史記錄 (${historyPreds.length})`,
             calibration: '📊 命中率',
+            imitation: '🤖 模型狀態',
             reviews: '覆盤報告',
             indicators: '指標勝率',
             adjustments: '自動調整',
@@ -687,6 +703,122 @@ export default function PredictionDashboard() {
                       ))}
                     </tbody>
                   </table>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ===== v101：模型狀態（Champion-Challenger）===== */}
+      {viewTab === 'imitation' && (
+        <div className="space-y-3">
+          <div className="p-2 rounded text-xs" style={{ background: 'rgba(56,139,253,0.1)', border: '1px solid var(--accent-blue)', color: 'var(--text-secondary)' }}>
+            🤖 v101 模仿學習：當 Quality Gate 通過後才會啟用，使用者可能仍看到 v100 體驗。
+          </div>
+
+          {imitationLoading ? (
+            <div className="text-center py-8 text-xs" style={{ color: 'var(--text-secondary)' }}>正在載入...</div>
+          ) : !imitationStatus ? (
+            <div className="text-center py-8 text-xs" style={{ color: 'var(--text-secondary)' }}>無資料</div>
+          ) : (
+            <>
+              {/* Canary 狀態 */}
+              <div className="p-3 rounded" style={{ background: 'var(--bg-tertiary)' }}>
+                <div className="text-xs mb-2 font-medium" style={{ color: 'var(--text-primary)' }}>Canary 狀態</div>
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <div>使用者啟用：<span style={{ color: imitationStatus.canary?.active_for_users ? 'var(--accent-green, #4ade80)' : 'var(--text-secondary)' }}>
+                    {imitationStatus.canary?.active_for_users ? '✓ ON' : '○ OFF（看 v100）'}
+                  </span></div>
+                  <div>SHADOW MODE：<span style={{ color: imitationStatus.canary?.shadow_mode ? 'var(--accent-blue)' : 'var(--text-secondary)' }}>
+                    {imitationStatus.canary?.shadow_mode ? '✓ ON' : '○ OFF'}
+                  </span></div>
+                  <div>Quality Gate：<span style={{ color: imitationStatus.canary?.quality_gate_passed ? 'var(--accent-green, #4ade80)' : '#fbbf24' }}>
+                    {imitationStatus.canary?.quality_gate_passed ? '✓ 通過' : '⏳ 等待中'}
+                  </span></div>
+                  <div>Canary %：<span className="font-mono" style={{ color: 'var(--accent-blue)' }}>{imitationStatus.canary?.canary_pct ?? 0}%</span></div>
+                </div>
+              </div>
+
+              {/* Champion 模型 */}
+              {imitationStatus.champion ? (
+                <div className="p-3 rounded" style={{ background: 'var(--bg-tertiary)' }}>
+                  <div className="text-xs mb-2 font-medium" style={{ color: 'var(--accent-green, #4ade80)' }}>👑 Champion 模型 v{imitationStatus.champion.version}</div>
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    <div>樣本量：<span className="font-mono">{imitationStatus.champion.trainset_n}</span></div>
+                    <div>Lockbox AUC：<span className="font-mono" style={{ color: 'var(--accent-blue)' }}>{imitationStatus.champion.lockbox_auc?.toFixed(3) || 'N/A'}</span></div>
+                    <div>OOS AUC：<span className="font-mono">{imitationStatus.champion.auc?.toFixed(3) || 'N/A'}</span></div>
+                    <div>Brier：<span className="font-mono">{imitationStatus.champion.brier?.toFixed(3) || 'N/A'}</span></div>
+                  </div>
+                  <div className="text-xs mt-1" style={{ color: 'var(--text-secondary)' }}>訓練於 {imitationStatus.champion.trained_at}</div>
+
+                  {/* Feature importance top 10 */}
+                  {imitationStatus.champion.feature_importance && (
+                    <div className="mt-2">
+                      <div className="text-xs font-medium" style={{ color: 'var(--text-primary)' }}>Top 10 重要特徵</div>
+                      <div className="text-xs mt-1" style={{ color: 'var(--text-secondary)' }}>
+                        {Object.entries(imitationStatus.champion.feature_importance as Record<string, number>)
+                          .sort(([, a], [, b]) => Number(b) - Number(a))
+                          .slice(0, 10)
+                          .map(([k, v]) => `${k}: ${Number(v).toFixed(0)}`)
+                          .join(' ｜ ')}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="p-3 rounded text-xs" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-secondary)' }}>
+                  無 Champion 模型 — 樣本累積到 50+ 後可手動觸發訓練
+                </div>
+              )}
+
+              {/* Stable Fallback */}
+              {imitationStatus.stable_fallback && (
+                <div className="p-2 rounded text-xs" style={{ background: 'var(--bg-tertiary)' }}>
+                  🛟 Stable Fallback v{imitationStatus.stable_fallback.version}（AUC {imitationStatus.stable_fallback.lockbox_auc?.toFixed(3)}）
+                </div>
+              )}
+
+              {/* 控制按鈕 */}
+              <div className="flex gap-2">
+                <button
+                  onClick={async () => {
+                    if (!confirm('立即重訓？需 30-60 秒。')) return;
+                    const res = await fetch('/api/predictions/imitation/retrain', { method: 'POST' });
+                    const data = await res.json();
+                    alert(`結果：${data.status}\n${JSON.stringify(data, null, 2).slice(0, 500)}`);
+                    loadImitation();
+                  }}
+                  className="flex-1 py-1.5 rounded text-xs cursor-pointer"
+                  style={{ background: 'var(--accent-blue)', color: '#fff' }}
+                >立即重訓</button>
+                <button
+                  onClick={async () => {
+                    if (!confirm('回到 stable_fallback 模型？')) return;
+                    await fetch('/api/predictions/imitation/rollback', { method: 'POST' });
+                    loadImitation();
+                  }}
+                  className="flex-1 py-1.5 rounded text-xs cursor-pointer"
+                  style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)' }}
+                >退回 Stable</button>
+                <button
+                  onClick={async () => {
+                    if (!confirm('停用 v101？所有使用者立刻退回 v100。')) return;
+                    await fetch('/api/predictions/imitation/disable', { method: 'POST' });
+                    loadImitation();
+                  }}
+                  className="flex-1 py-1.5 rounded text-xs cursor-pointer"
+                  style={{ background: 'rgba(248,81,73,0.2)', color: '#f85149' }}
+                >停用 v101</button>
+              </div>
+
+              {/* Quality Gate 細節 */}
+              {imitationStatus.last_quality_gate && (
+                <div className="p-2 rounded text-xs" style={{ background: 'var(--bg-tertiary)' }}>
+                  <div className="font-medium mb-1" style={{ color: 'var(--text-primary)' }}>最近 Quality Gate 評估</div>
+                  <div style={{ color: 'var(--text-secondary)' }}>
+                    {imitationStatus.last_quality_gate.evaluated_at} - {imitationStatus.last_quality_gate.action_taken}
+                  </div>
                 </div>
               )}
             </>
