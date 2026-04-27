@@ -12,6 +12,7 @@ v101 表現顯著差於 v100 → 自動關閉 IMITATION_LEARNING_ENABLED。
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from typing import Optional
 
 from loguru import logger
 
@@ -20,12 +21,25 @@ from app.core.prediction_tracker import prediction_tracker
 
 
 def check_v101_health() -> dict:
-    """每天 03:00 跑 — 若 v101 表現太差自動關 flag。"""
+    """每天 03:00 跑 — 若 v101 表現太差自動關 flag。
+
+    防誤判：新模型上線後 30 天 warmup 期間不 auto-rollback（樣本太少誤差大）。
+    """
     if not settings.auto_rollback_enabled:
         return {"checked": False, "reason": "auto_rollback_enabled = False"}
 
     if not settings.imitation_learning_enabled:
         return {"checked": False, "reason": "v101 未啟用，無需檢查"}
+
+    # ★ Warmup 保護：champion 上線 < 30 天 → 不 auto-rollback
+    warmup_days = _champion_age_days()
+    if warmup_days is not None and warmup_days < 30:
+        return {
+            "checked": False,
+            "in_warmup": True,
+            "warmup_days_remaining": 30 - warmup_days,
+            "reason": f"Champion 上線 {warmup_days} 天 < 30 天 warmup，跳過 auto-rollback 防誤判",
+        }
 
     issues = []
 
@@ -62,6 +76,23 @@ def check_v101_health() -> dict:
         "v101_hit": v101_hit,
         "v100_baseline": v100_baseline,
     }
+
+
+def _champion_age_days() -> Optional[int]:
+    """Champion 模型上線多少天了（給 warmup 判斷用）。"""
+    if not prediction_tracker._conn:
+        return None
+    try:
+        row = prediction_tracker._conn.execute(
+            """SELECT trained_at FROM imitation_model_metrics
+               WHERE is_champion = 1 ORDER BY version DESC LIMIT 1"""
+        ).fetchone()
+        if not row or not row[0]:
+            return None
+        trained_at = datetime.fromisoformat(row[0])
+        return (datetime.now() - trained_at).days
+    except Exception:
+        return None
 
 
 def _v101_recent_hit_rate(n: int = 50) -> float | None:

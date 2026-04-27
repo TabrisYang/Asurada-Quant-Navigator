@@ -115,6 +115,20 @@ async def evaluate_quality_gate_endpoint():
     return evaluate_v101_readiness()
 
 
+@router.get("/imitation/last_run")
+async def get_last_run_status():
+    """讀最近一次 launchd 重訓的執行紀錄（給前端顯示「上次自動重訓何時、結果如何」）。"""
+    from pathlib import Path
+    import json
+    status_path = Path("data/db/imitation_status.json")
+    if not status_path.exists():
+        return {"status": "no_run_yet", "message": "尚未執行過自動重訓"}
+    try:
+        return json.loads(status_path.read_text())
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
 # ─── v100：圖表標註過往預測用 endpoint ────────────────────────
 @router.get("/by_symbol")
 async def get_predictions_for_chart(
