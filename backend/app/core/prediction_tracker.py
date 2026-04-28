@@ -43,6 +43,11 @@ _VISIBLE_CARD_PATTERN = re.compile(
     r"📊\s*本次分析總結.*?(?=═══|\Z)",
     re.DOTALL,
 )
+# v104 Fix C：偏多/偏空單向計劃（lean_long / lean_short）— 信心 medium、倉位 ×0.7
+_LEAN_CARD_PATTERN = re.compile(
+    r"(?:🟢\s*偏多單向計劃|🔴\s*偏空單向計劃).*?(?=═══|\Z)",
+    re.DOTALL,
+)
 # 「建議觀望」格式 — 不產生 prediction
 _OBSERVE_CARD_PATTERN = re.compile(
     r"⚠️\s*本次分析無法產生具體預測",
@@ -67,7 +72,7 @@ _BILAT_SL = re.compile(r"SL[：:]?\s*\$?([\d.,]+)")
 _BILAT_TP = re.compile(r"TP[：:]?\s*\$?([\d.,]+)")
 _BILAT_RR = re.compile(r"RR[\s：:]*([\d.]+)")
 
-_CARD_DIRECTION = re.compile(r"🎯\s*方向：\s*(做多|做空)\s*([\S]+)?")
+_CARD_DIRECTION = re.compile(r"🎯\s*方向：\s*(做多|做空|偏多|偏空)\s*([\S]+)?")
 _CARD_ENTRY = re.compile(r"📍\s*進場：\s*\$?([\d.,]+)")
 _CARD_TARGET = re.compile(r"🎯\s*目標：\s*\$?([\d.,]+)")
 _CARD_STOP = re.compile(r"🛑\s*止損：\s*\$?([\d.,]+)")
@@ -108,9 +113,14 @@ def _parse_visible_card(text: str) -> Optional[dict]:
     if not all([direction_m, entry_m, target_m, stop_m, tf_m, conf_m]):
         return None
 
-    direction = "long" if direction_m.group(1) == "做多" else "short"
+    raw_dir = direction_m.group(1)
+    direction = "long" if raw_dir in ("做多", "偏多") else "short"
+    is_lean = raw_dir in ("偏多", "偏空")  # v104 Fix C：偏多/偏空 = lean 卡
     confidence_raw = conf_m.group(1).lower()
     confidence = _CONFIDENCE_MAP.get(conf_m.group(1), confidence_raw)
+    # 偏多/偏空強制 confidence=medium（即使 LLM 寫 high 也降）
+    if is_lean:
+        confidence = "medium"
 
     try:
         entry = float(entry_m.group(1))
@@ -131,6 +141,9 @@ def _parse_visible_card(text: str) -> Optional[dict]:
         "regime": regime_m.group(1) if regime_m else "unknown",
         "indicators": ind_m.group(1).strip().replace(" ", "") if ind_m else "",
         "invalidation": inv_m.group(1).strip() if inv_m else "",
+        # v104 Fix C：lean 卡標記（偏多/偏空 = 倉位 ×0.7）
+        "is_lean": is_lean,
+        "position_size_multiplier": 0.7 if is_lean else 1.0,
     }
 
 
@@ -239,8 +252,28 @@ def _sanitize_prediction_block(block: str) -> str:
     return block
 
 
+def _parse_lean_card(text: str) -> Optional[dict]:
+    """v104 Fix C：偏多/偏空單向計劃 — 跟 visible card 解析邏輯相同，但前綴是 🟢/🔴。
+
+    技巧：找到 lean card 區塊，把開頭加上「📊 本次分析總結」假標頭，
+    然後丟給 _parse_visible_card 解析（重用所有欄位 regex），最後標 is_lean。
+    """
+    card = _LEAN_CARD_PATTERN.search(text)
+    if not card:
+        return None
+    # 包成 visible card 格式讓既有解析重用
+    pseudo = "📊 本次分析總結\n" + card.group(0)
+    pred = _parse_visible_card(pseudo)
+    if pred and not pred.get("is_lean"):
+        # _parse_visible_card 已根據「偏多/偏空」標 is_lean，但保險起見再標一次
+        pred["is_lean"] = True
+        pred["position_size_multiplier"] = 0.7
+        pred["confidence"] = "medium"
+    return pred
+
+
 def parse_predictions(llm_response: str) -> list[dict]:
-    """從 LLM 回答中解析預測（v103：雙向計劃 → 2 筆 / 單向 → 1 筆 / 觀望 → 0 筆）。"""
+    """從 LLM 回答中解析預測（v104：雙向 → 2 筆 / 單向（含 lean）→ 1 筆 / 觀望 → 0 筆）。"""
     # 觀望卡：不產生 prediction
     if _OBSERVE_CARD_PATTERN.search(llm_response):
         return []
@@ -249,6 +282,11 @@ def parse_predictions(llm_response: str) -> list[dict]:
     bilateral_preds = _parse_bilateral_card(llm_response)
     if bilateral_preds:
         return bilateral_preds
+
+    # v104 Fix C：偏多/偏空單向計劃（lean）— 在標準 visible card 之前嘗試
+    lean_pred = _parse_lean_card(llm_response)
+    if lean_pred:
+        return [lean_pred]
 
     # 單向結論卡（v100 既有）
     visible_pred = _parse_visible_card(llm_response)
