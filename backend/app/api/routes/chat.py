@@ -978,7 +978,7 @@ def _format_function_results(function_calls: list[dict], exec_result: dict) -> s
         result = results[i] if i < len(results) else {}
 
         parts.append(f"### 函式 {i+1}: {fname}")
-        parts.append(f"參數: {json.dumps(fargs, ensure_ascii=False)}")
+        parts.append(f"參數: {json.dumps(fargs, ensure_ascii=False, default=_json_safe_default)}")
 
         if "error" in result:
             parts.append(f"錯誤: {result['error']}")
@@ -1335,21 +1335,57 @@ def _format_function_results(function_calls: list[dict], exec_result: dict) -> s
                         parts.append(f"  ✗ {c.get('name', '?')}: {c.get('message', '錯誤')}")
             else:
                 # 通用格式化（截斷過長內容）
-                result_str = json.dumps(r, ensure_ascii=False)
+                result_str = json.dumps(r, ensure_ascii=False, default=_json_safe_default)
                 if len(result_str) > 3000:
                     result_str = result_str[:3000] + "..."
                 parts.append(f"結果: {result_str}")
         parts.append("")
 
     if chart_updates:
-        parts.append(f"圖表更新: {json.dumps(chart_updates, ensure_ascii=False)[:300]}")
+        parts.append(f"圖表更新: {json.dumps(chart_updates, ensure_ascii=False, default=_json_safe_default)[:300]}")
 
     return "\n".join(parts)
 
 
+def _json_safe_default(o):
+    """json.dumps 用的 default callback：把 numpy / pandas 型別轉成 Python 原生。
+
+    numpy.bool_ 不是 Python bool 的子類別，會讓標準 json 拋 TypeError；
+    numpy 數值 / ndarray / pandas Timestamp 同樣不被原生 json 認識。
+    """
+    # numpy 標量
+    try:
+        import numpy as _np
+        if isinstance(o, _np.bool_):
+            return bool(o)
+        if isinstance(o, _np.integer):
+            return int(o)
+        if isinstance(o, _np.floating):
+            f = float(o)
+            return f if f == f else None  # NaN → None
+        if isinstance(o, _np.ndarray):
+            return o.tolist()
+    except Exception:
+        pass
+    # pandas Timestamp / Timedelta
+    try:
+        import pandas as _pd
+        if isinstance(o, (_pd.Timestamp, _pd.Timedelta)):
+            return str(o)
+        if hasattr(o, "to_dict"):  # DataFrame / Series
+            return o.to_dict()
+    except Exception:
+        pass
+    # set / frozenset
+    if isinstance(o, (set, frozenset)):
+        return list(o)
+    # 最後手段：str()
+    return str(o)
+
+
 def _sse_event(event_type: str, data: dict) -> str:
     """格式化 SSE event"""
-    return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+    return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False, default=_json_safe_default)}\n\n"
 
 
 # ─── v100/v103 1B：結論卡「📈 系統參考」自動注入歷史命中率 ────────
