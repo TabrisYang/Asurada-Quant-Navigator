@@ -2046,9 +2046,18 @@ async def _exec_compute_laddered_entries(args: dict, default_symbol: str, defaul
     regime = rg.get("regime", "unknown")
     confidence = float(rg.get("confidence", 0.0))
 
+    # v104 Fix A：把 confidence 數值轉成標籤（high/medium/low）
+    if confidence >= 0.7:
+        confidence_label = "high"
+    elif confidence >= 0.4:
+        confidence_label = "medium"
+    else:
+        confidence_label = "low"
+
     result = compute_laddered_entries(
         df=df, direction=direction, regime=regime,
         regime_confidence=confidence, n_tranches=n_tranches,
+        timeframe_str=timeframe, confidence_label=confidence_label,
     )
     result["status"] = "success"
     result["symbol"] = symbol

@@ -56,8 +56,69 @@ _REGIME_RATIO_MAP: dict[str, dict[str, Any]] = {
 
 _CONFIDENCE_THRESHOLD = 0.5  # 低於此值整個 ladder 跳過
 _MIN_RR_RATIO = 2.0          # SL/TP 最低風險報酬比
-_SL_ATR_MULT = 1.5           # SL = min_entry - ATR × 1.5
-_TP_ATR_MULT = 2.0           # TP = weighted_avg ± ATR × 2（or risk × _MIN_RR_RATIO，取較大）
+_SL_ATR_MULT = 1.5           # 舊固定值（feature flag OFF 時 fallback 用）
+_TP_ATR_MULT = 2.0           # 舊固定值（feature flag OFF 時 fallback 用）
+
+# v104 Fix A：timeframe-aware ATR 倍數基礎表（經驗值 — TODO: walk-forward 量化最優）
+# 1d 持倉用 1.5×ATR 設 SL 通常 1-2 天就被打到（過緊）；timeframe 越長倍數越大
+_TIMEFRAME_BASE_MULTS = {
+    "15m": (0.8, 1.5),
+    "30m": (1.0, 1.8),
+    "1h":  (1.2, 2.0),
+    "2h":  (1.4, 2.3),
+    "4h":  (1.5, 2.5),
+    "12h": (2.0, 3.2),
+    "1d":  (2.5, 4.0),
+    "3d":  (3.2, 5.0),
+    "1w":  (4.0, 6.0),
+}
+
+# regime / 信心修正係數
+_REGIME_MULT_ADJUST = {"high_vol": 1.3, "low_vol": 0.8}  # 其他 regime → 1.0
+_CONFIDENCE_TP_ADJUST = {"high": 1.3, "medium": 1.0, "low": 0.8}
+
+# Cap：最終倍數限制在基礎值 ±50% 內，避免疊加過度
+_MULT_CAP_MIN = 0.7  # 最終 ≥ 基礎值 × 0.7
+_MULT_CAP_MAX = 1.5  # 最終 ≤ 基礎值 × 1.5
+
+
+def _get_atr_mults(
+    timeframe: Optional[str] = None,
+    regime: Optional[str] = None,
+    confidence: Optional[str] = None,
+) -> tuple[float, float]:
+    """v104 Fix A：依 timeframe + regime + 信心算 ATR 倍數（含 cap）。
+
+    feature flag adaptive_atr_mults_enabled 為 False → 直接回 (1.5, 2.0)。
+    timeframe 沒給或不認識 → fallback (1.5, 2.0)。
+    各維度疊加後用 cap 限在基礎值 ±50% 內。
+    """
+    try:
+        from app.core.config.settings import settings as _s
+        if not getattr(_s, "adaptive_atr_mults_enabled", True):
+            return _SL_ATR_MULT, _TP_ATR_MULT
+    except Exception:
+        pass
+
+    if not timeframe or timeframe not in _TIMEFRAME_BASE_MULTS:
+        return _SL_ATR_MULT, _TP_ATR_MULT
+
+    base_sl, base_tp = _TIMEFRAME_BASE_MULTS[timeframe]
+
+    # regime 修正（影響 SL+TP 對稱）
+    regime_adj = _REGIME_MULT_ADJUST.get(regime or "", 1.0) if regime else 1.0
+
+    # 信心修正（只影響 TP — 高信心可以拉遠賺更多）
+    conf_adj = _CONFIDENCE_TP_ADJUST.get(confidence or "", 1.0) if confidence else 1.0
+
+    sl_mult = base_sl * regime_adj
+    tp_mult = base_tp * regime_adj * conf_adj
+
+    # Cap：最終值限制在 base × [0.7, 1.5]
+    sl_mult = max(base_sl * _MULT_CAP_MIN, min(base_sl * _MULT_CAP_MAX, sl_mult))
+    tp_mult = max(base_tp * _MULT_CAP_MIN, min(base_tp * _MULT_CAP_MAX, tp_mult))
+
+    return round(sl_mult, 3), round(tp_mult, 3)
 
 
 def _last_valid(values: list) -> Optional[float]:
@@ -218,11 +279,17 @@ def _weighted_average(entries: list[dict]) -> Optional[float]:
     return sum(e["price"] * e["size_pct"] for e in entries) / total_weight
 
 
-def _compute_sl_tp(entries: list[dict], atr: float, side: Literal["long", "short"]) -> tuple[Optional[float], Optional[float], Optional[float]]:
-    """從 entries + ATR 反推 SL / TP / RR。
+def _compute_sl_tp(
+    entries: list[dict],
+    atr: float,
+    side: Literal["long", "short"],
+    sl_mult: float = _SL_ATR_MULT,
+    tp_mult: float = _TP_ATR_MULT,
+) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    """從 entries + ATR 反推 SL / TP / RR（v104：倍數可外部注入）。
 
-    Long:  SL = min(entries) - 1.5 ATR ；TP = avg + max(2 ATR, risk × 2)
-    Short: SL = max(entries) + 1.5 ATR ；TP = avg - max(2 ATR, risk × 2)
+    Long:  SL = min(entries) - sl_mult × ATR ；TP = avg + max(tp_mult × ATR, risk × MIN_RR)
+    Short: SL = max(entries) + sl_mult × ATR ；TP = avg - max(tp_mult × ATR, risk × MIN_RR)
     """
     if not entries or atr <= 0:
         return None, None, None
@@ -231,14 +298,14 @@ def _compute_sl_tp(entries: list[dict], atr: float, side: Literal["long", "short
         return None, None, None
     prices = [e["price"] for e in entries]
     if side == "long":
-        sl = min(prices) - _SL_ATR_MULT * atr
+        sl = min(prices) - sl_mult * atr
         risk = avg - sl
-        tp = avg + max(_TP_ATR_MULT * atr, risk * _MIN_RR_RATIO)
+        tp = avg + max(tp_mult * atr, risk * _MIN_RR_RATIO)
     else:
-        sl = max(prices) + _SL_ATR_MULT * atr
+        sl = max(prices) + sl_mult * atr
         risk = sl - avg
-        tp = avg - max(_TP_ATR_MULT * atr, risk * _MIN_RR_RATIO)
-    rr = max(_TP_ATR_MULT, _MIN_RR_RATIO)
+        tp = avg - max(tp_mult * atr, risk * _MIN_RR_RATIO)
+    rr = max(tp_mult, _MIN_RR_RATIO)
     return sl, tp, rr
 
 
@@ -261,6 +328,8 @@ def compute_laddered_entries(
     smc_long_entry: Optional[float] = None,
     smc_short_entry: Optional[float] = None,
     n_tranches: int = 3,
+    timeframe_str: Optional[str] = None,
+    confidence_label: Optional[str] = None,
 ) -> dict:
     """後端算分批進場價，全部從 indicator values 取，禁止推算。
 
@@ -271,6 +340,8 @@ def compute_laddered_entries(
         regime_confidence: 0.0~1.0，< 0.5 直接跳過
         smc_long_entry / smc_short_entry: 若 SMC 已給 entry 則優先當第一檔
         n_tranches: 預設 3（本版固定，未來再做動態）
+        timeframe_str: v104 — "15m"/"1h"/"4h"/"1d"/... 讓 ATR 倍數隨 timeframe 自適應
+        confidence_label: v104 — "high"/"medium"/"low" 影響 TP 倍數（高信心拉遠賺更多）
 
     Returns:
         dict — 含 enabled / long_entries / short_entries / SL / TP / 加權均價 / regime / strategy / warning。
@@ -308,9 +379,12 @@ def compute_laddered_entries(
         short_entries = _normalize_ratios(entries)
         missing_set.update(missing)
 
-    # SL / TP
-    long_sl, long_tp, long_rr = _compute_sl_tp(long_entries, atr, "long") if long_entries else (None, None, None)
-    short_sl, short_tp, short_rr = _compute_sl_tp(short_entries, atr, "short") if short_entries else (None, None, None)
+    # v104 Fix A：依 timeframe + regime + 信心算 ATR 倍數（含 cap + feature flag）
+    sl_mult, tp_mult = _get_atr_mults(timeframe_str, regime, confidence_label)
+
+    # SL / TP（用自適應倍數）
+    long_sl, long_tp, long_rr = _compute_sl_tp(long_entries, atr, "long", sl_mult, tp_mult) if long_entries else (None, None, None)
+    short_sl, short_tp, short_rr = _compute_sl_tp(short_entries, atr, "short", sl_mult, tp_mult) if short_entries else (None, None, None)
 
     # 對外輸出（價格全部四捨五入到合適小數位）
     out_long = [
@@ -330,6 +404,11 @@ def compute_laddered_entries(
         "n_tranches": n_tranches,
         "current_price": _round_price(current_price),
         "atr_used": _round_price(atr) if atr > 0 else None,
+        # v104 Fix A：透明化使用的 ATR 倍數（給 LLM / UI 引用）
+        "sl_mult_used": sl_mult,
+        "tp_mult_used": tp_mult,
+        "timeframe_used": timeframe_str,
+        "confidence_label_used": confidence_label,
         "long_entries": out_long,
         "short_entries": out_short,
         "weighted_avg_entry_long": _round_price(_weighted_average(long_entries)),

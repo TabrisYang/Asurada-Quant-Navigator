@@ -93,6 +93,10 @@ class Settings(BaseSettings):
     auto_rollback_enabled: bool = True            # 表現變差自動關閉（永遠開）
     feature_recording_enabled: bool = True        # Phase 2.0 特徵快照記錄（純 SQL 安全）
 
+    # v104：自適應 ATR 倍數（timeframe + regime + 信心三維度）
+    # 預設 True；若實測新倍數比舊差，設 False 即一鍵回退到 1.5/2.0 固定值
+    adaptive_atr_mults_enabled: bool = True
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",
