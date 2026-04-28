@@ -59,10 +59,16 @@ class ImitationPredictor:
         self._model = active.get("model")
         self._metrics = active.get("metrics") or {}
         self._loaded_version = version
+        # ★ Lazy load SHAP — 不在 _reload 觸發，避免 native lib 同時 init 觸發 segfault
+        self._plain_model = None
+        self._shap_explainer = None
 
-        # 嘗試載入 plain model + 建 SHAP explainer（容忍失敗）
+    def _ensure_shap(self) -> None:
+        """SHAP 第一次需要時才載入（避免 module import 時 native 衝突）。"""
+        if self._shap_explainer is not None or self._loaded_version is None:
+            return
         try:
-            self._plain_model = get_plain_model_for_shap(version)
+            self._plain_model = get_plain_model_for_shap(self._loaded_version)
             if self._plain_model is not None:
                 import shap
                 self._shap_explainer = shap.TreeExplainer(self._plain_model)
@@ -286,6 +292,8 @@ class ImitationPredictor:
 
     def _top_shap(self, current_features: dict, k: int = 3) -> list[dict]:
         """SHAP top k 驅動因子。失敗回 []。"""
+        # 第一次需要時才載入 SHAP（lazy）— 避免 native lib 衝突
+        self._ensure_shap()
         if self._shap_explainer is None or self._plain_model is None:
             return []
         try:

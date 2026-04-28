@@ -170,9 +170,15 @@ fi
 echo "8000" > "$ROOT_DIR/backend/.port"
 
 # 啟動後端（背景執行）
+# ★ v101 修復：明確用 .venv python（避免 system python 版本不符 segfault）
+# ★ v101 修復：限制 OpenMP / MKL 執行緒，避免 lightgbm/sklearn/shap/numpy 同時搶 native threads → segfault
 echo -e "  ${YELLOW}啟動後端 (port 8000)...${NC}"
 cd "$ROOT_DIR/backend"
-python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --log-level warning &
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export KMP_DUPLICATE_LIB_OK=TRUE
+"$VENV_DIR/bin/python3" -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --log-level warning &
 BACKEND_PID=$!
 cd "$ROOT_DIR"
 

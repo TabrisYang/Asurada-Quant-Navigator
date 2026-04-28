@@ -32,6 +32,11 @@ _start() {
     fi
 
     cd "$BACKEND_DIR"
+    # ★ v101 修復：限制 OpenMP / MKL 執行緒，避免 ML 庫同時搶 native threads → segfault
+    export OMP_NUM_THREADS=1
+    export MKL_NUM_THREADS=1
+    export OPENBLAS_NUM_THREADS=1
+    export KMP_DUPLICATE_LIB_OK=TRUE
     nohup .venv/bin/python3 -m uvicorn app.main:app \
         --host 0.0.0.0 --port 8000 \
         > "$LOGFILE" 2>&1 &
