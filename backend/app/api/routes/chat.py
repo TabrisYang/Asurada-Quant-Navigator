@@ -1798,16 +1798,64 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                     "symbol": chart_symbol,
                     "timeframe": chart_timeframe_ctx or "1d",
                     "strategies": [
-                        # Phase 1B：放寬 SL/TP（給策略呼吸空間）+ Phase 1A：標 compatible_regimes（給 LLM 判斷哪些結果可信）
-                        {"name": "趨勢跟蹤(多)", "entry_conditions": ["ema_20 > ema_60", "rsi_14 > 50"], "exit_conditions": ["ema_20 < ema_60"], "direction": "long", "stop_loss_pct": 8.0, "take_profit_pct": 12.0, "compatible_regimes": ["trending_up"]},
-                        {"name": "均值回歸(多)", "entry_conditions": ["rsi_14 < 30", "bb_position < 0.2"], "exit_conditions": ["rsi_14 > 70"], "direction": "long", "stop_loss_pct": 5.0, "take_profit_pct": 8.0, "compatible_regimes": ["ranging", "low_vol"]},
-                        {"name": "動量突破(多)", "entry_conditions": ["close > bb_upper", "volume_ratio > 1.5"], "exit_conditions": ["rsi_14 > 80", "volume_ratio < 0.8"], "direction": "long", "stop_loss_pct": 6.0, "take_profit_pct": 10.0, "compatible_regimes": ["trending_up", "high_vol"]},
-                        {"name": "趨勢跟蹤(空)", "entry_conditions": ["ema_20 < ema_60", "rsi_14 < 50"], "exit_conditions": ["ema_20 > ema_60"], "direction": "short", "stop_loss_pct": 8.0, "take_profit_pct": 12.0, "compatible_regimes": ["trending_down"]},
-                        {"name": "均值回歸(空)", "entry_conditions": ["rsi_14 > 70", "bb_position > 0.8"], "exit_conditions": ["rsi_14 < 30"], "direction": "short", "stop_loss_pct": 5.0, "take_profit_pct": 8.0, "compatible_regimes": ["ranging", "low_vol"]},
-                        {"name": "動量突破(空)", "entry_conditions": ["close < bb_lower", "volume_ratio > 1.5"], "exit_conditions": ["rsi_14 < 20", "volume_ratio < 0.8"], "direction": "short", "stop_loss_pct": 6.0, "take_profit_pct": 10.0, "compatible_regimes": ["trending_down", "high_vol"]},
-                        # ★ B5：加 2 個 ROC 動量策略（避免動能分析另外跑回測 → 6 → 8 策略）
-                        {"name": "ROC動量(多)", "entry_conditions": ["roc_10 > 5", "rsi_14 > 55"], "exit_conditions": ["roc_10 < 0"], "direction": "long", "stop_loss_pct": 6.0, "take_profit_pct": 10.0, "compatible_regimes": ["trending_up", "high_vol"]},
-                        {"name": "ROC動量(空)", "entry_conditions": ["roc_10 < -5", "rsi_14 < 45"], "exit_conditions": ["roc_10 > 0"], "direction": "short", "stop_loss_pct": 6.0, "take_profit_pct": 10.0, "compatible_regimes": ["trending_down", "high_vol"]},
+                        # ★ v103 Phase 2A：dict 格式（engine 才認得）+ 正確 decimal 百分比（0.05 = 5%）
+                        # 用 cross_above/cross_below 確保會真的觸發 trade（修舊版 0 trades bug）
+                        {
+                            "name": "均值回歸(多)",
+                            "entry_conditions": [{"indicator": "rsi", "series": "RSI", "operator": "cross_above", "value": 30}],
+                            "exit_conditions": [{"indicator": "rsi", "series": "RSI", "operator": "cross_above", "value": 70}],
+                            "direction": "long", "stop_loss_pct": 0.05, "take_profit_pct": 0.10,
+                            "compatible_regimes": ["ranging", "low_vol"],
+                        },
+                        {
+                            "name": "均值回歸(空)",
+                            "entry_conditions": [{"indicator": "rsi", "series": "RSI", "operator": "cross_below", "value": 70}],
+                            "exit_conditions": [{"indicator": "rsi", "series": "RSI", "operator": "cross_below", "value": 30}],
+                            "direction": "short", "stop_loss_pct": 0.05, "take_profit_pct": 0.10,
+                            "compatible_regimes": ["ranging", "low_vol"],
+                        },
+                        {
+                            "name": "MACD動量(多)",
+                            "entry_conditions": [{"indicator": "macd", "series": "MACD_Hist", "operator": "cross_above", "value": 0}],
+                            "exit_conditions": [{"indicator": "macd", "series": "MACD_Hist", "operator": "cross_below", "value": 0}],
+                            "direction": "long", "stop_loss_pct": 0.06, "take_profit_pct": 0.12,
+                            "compatible_regimes": ["trending_up"],
+                        },
+                        {
+                            "name": "MACD動量(空)",
+                            "entry_conditions": [{"indicator": "macd", "series": "MACD_Hist", "operator": "cross_below", "value": 0}],
+                            "exit_conditions": [{"indicator": "macd", "series": "MACD_Hist", "operator": "cross_above", "value": 0}],
+                            "direction": "short", "stop_loss_pct": 0.06, "take_profit_pct": 0.12,
+                            "compatible_regimes": ["trending_down"],
+                        },
+                        {
+                            "name": "ROC動量(多)",
+                            "entry_conditions": [{"indicator": "roc", "series": "ROC", "operator": "cross_above", "value": 3}],
+                            "exit_conditions": [{"indicator": "roc", "series": "ROC", "operator": "cross_below", "value": 0}],
+                            "direction": "long", "stop_loss_pct": 0.06, "take_profit_pct": 0.12,
+                            "compatible_regimes": ["trending_up", "high_vol"],
+                        },
+                        {
+                            "name": "ROC動量(空)",
+                            "entry_conditions": [{"indicator": "roc", "series": "ROC", "operator": "cross_below", "value": -3}],
+                            "exit_conditions": [{"indicator": "roc", "series": "ROC", "operator": "cross_above", "value": 0}],
+                            "direction": "short", "stop_loss_pct": 0.06, "take_profit_pct": 0.12,
+                            "compatible_regimes": ["trending_down", "high_vol"],
+                        },
+                        {
+                            "name": "StochRSI 超賣反彈(多)",
+                            "entry_conditions": [{"indicator": "stochrsi", "series": "StochRSI_K", "operator": "cross_above", "value": 0.2}],
+                            "exit_conditions": [{"indicator": "stochrsi", "series": "StochRSI_K", "operator": "cross_above", "value": 0.8}],
+                            "direction": "long", "stop_loss_pct": 0.05, "take_profit_pct": 0.10,
+                            "compatible_regimes": ["ranging", "low_vol"],
+                        },
+                        {
+                            "name": "StochRSI 超買反轉(空)",
+                            "entry_conditions": [{"indicator": "stochrsi", "series": "StochRSI_K", "operator": "cross_below", "value": 0.8}],
+                            "exit_conditions": [{"indicator": "stochrsi", "series": "StochRSI_K", "operator": "cross_below", "value": 0.2}],
+                            "direction": "short", "stop_loss_pct": 0.05, "take_profit_pct": 0.10,
+                            "compatible_regimes": ["ranging", "low_vol"],
+                        },
                     ],
                 },
             }]

@@ -85,7 +85,13 @@ def validate_for_symbol(symbol: str) -> dict:
 
 
 def _validate_one(pred: dict, now: datetime) -> str:
-    """驗證單一預測。返回 status 或 'still_active'/'no_data'。"""
+    """驗證單一預測。返回 status 或 'still_active'/'no_data'。
+
+    v103 2C：若 is_bilateral=1，走 bilateral 驗證流程（先觸碰 entry 才算進場）。
+    """
+    if pred.get("is_bilateral") == 1 and pred.get("bilateral_pair_id"):
+        return _validate_bilateral(pred, now)
+
     expires_at = datetime.fromisoformat(pred["expires_at"])
     created_at = datetime.fromisoformat(pred["created_at"])
     is_expired = now > expires_at
@@ -236,3 +242,203 @@ def _validate_one(pred: dict, now: datetime) -> str:
 
     logger.info(f"預測 #{pred['id']} {pred['symbol']} {direction}: {status} (MFE={mfe_pct:+.1f}% MAE={mae_pct:+.1f}% {milestones_str})")
     return status
+
+
+def _validate_bilateral(pred: dict, now: datetime) -> str:
+    """v103 2C：雙向計劃驗證流程。
+
+    流程：
+    1. 找出本 pair 兩筆 prediction（long + short）。
+    2. 載入 OHLCV，找出哪一邊 entry 先被觸及（K 線 [low, high] 包含 entry）。
+    3. 勝方從進場點開始正常驗證 target/stop。
+    4. 敗方標記為 cancelled_by_pair。
+    5. 兩邊都未觸及 → 過期則一起標 expired，否則 still_active。
+    """
+    pair_id = pred["bilateral_pair_id"]
+
+    from app.core.prediction_tracker import prediction_tracker as _pt
+    _pt._ensure_db()
+    with _pt._lock:
+        rows = _pt._conn.execute(
+            "SELECT * FROM predictions WHERE bilateral_pair_id=?",
+            (pair_id,),
+        ).fetchall()
+    pair = [dict(r) for r in rows]
+
+    self_row = next((p for p in pair if p["id"] == pred["id"]), None)
+    if self_row and self_row.get("status") != "active":
+        return self_row["status"]
+
+    long_pred = next((p for p in pair if p["direction"] == "long"), None)
+    short_pred = next((p for p in pair if p["direction"] == "short"), None)
+
+    if not long_pred or not short_pred:
+        logger.warning(
+            f"雙向 pair_id={pair_id} 不完整 (long={bool(long_pred)} short={bool(short_pred)})，當作單向驗證 fallback"
+        )
+        pred_no_bilat = {**pred, "is_bilateral": 0, "bilateral_pair_id": None}
+        return _validate_one(pred_no_bilat, now)
+
+    if long_pred.get("status") != "active" and short_pred.get("status") != "active":
+        return self_row["status"] if self_row else "still_active"
+
+    expires_at = datetime.fromisoformat(pred["expires_at"])
+    created_at = datetime.fromisoformat(pred["created_at"])
+    is_expired = now > expires_at
+
+    candle_tf = _infer_candle_tf(pred["timeframe_hours"])
+    df = crypto_engine.load_local_data(
+        pred["symbol"],
+        candle_tf,
+        created_at.strftime("%Y-%m-%d"),
+        now.strftime("%Y-%m-%d"),
+    )
+
+    if df.empty or len(df) < 2:
+        if is_expired:
+            for p in (long_pred, short_pred):
+                if p.get("status") == "active":
+                    prediction_tracker.update_validation(
+                        p["id"], "expired", 0.0, 0.0, 0.0,
+                        "雙向計劃：數據不足，標記為過期",
+                    )
+            return "expired"
+        return "no_data"
+
+    highs = df["high"].values
+    lows = df["low"].values
+
+    long_entry = long_pred["entry_price"]
+    short_entry = short_pred["entry_price"]
+    long_touch_idx = None
+    short_touch_idx = None
+    for i in range(len(df)):
+        if long_touch_idx is None and lows[i] <= long_entry <= highs[i]:
+            long_touch_idx = i
+        if short_touch_idx is None and lows[i] <= short_entry <= highs[i]:
+            short_touch_idx = i
+        if long_touch_idx is not None and short_touch_idx is not None:
+            break
+
+    if long_touch_idx is None and short_touch_idx is None:
+        if is_expired:
+            for p in (long_pred, short_pred):
+                if p.get("status") == "active":
+                    prediction_tracker.update_validation(
+                        p["id"], "expired", 0.0, 0.0, 0.0,
+                        "雙向計劃：兩邊 entry 皆未觸及，過期",
+                    )
+            return "expired"
+        return "still_active"
+
+    if long_touch_idx is not None and short_touch_idx is not None:
+        if long_touch_idx <= short_touch_idx:
+            winner, cancelled, winner_idx = long_pred, short_pred, long_touch_idx
+        else:
+            winner, cancelled, winner_idx = short_pred, long_pred, short_touch_idx
+    elif long_touch_idx is not None:
+        winner, cancelled, winner_idx = long_pred, short_pred, long_touch_idx
+    else:
+        winner, cancelled, winner_idx = short_pred, long_pred, short_touch_idx
+
+    if cancelled.get("status") == "active":
+        prediction_tracker.update_validation(
+            cancelled["id"],
+            status="cancelled_by_pair",
+            actual_outcome_pct=0.0,
+            max_favorable_pct=0.0,
+            max_adverse_pct=0.0,
+            note=f"雙向計劃：對向 #{winner['id']} {winner['direction']} 先觸發進場，本方向取消",
+        )
+
+    if winner.get("status") != "active":
+        return self_row["status"] if self_row else "still_active"
+
+    df_win = df.iloc[winner_idx:].reset_index(drop=True)
+    entry = winner["entry_price"]
+    target = winner["target_price"]
+    stop = winner["stop_price"]
+    direction = winner["direction"]
+
+    slippage_buffer = 0.001
+    if direction == "long":
+        effective_target = target * (1 + slippage_buffer)
+        effective_stop = stop * (1 + slippage_buffer)
+    else:
+        effective_target = target * (1 - slippage_buffer)
+        effective_stop = stop * (1 - slippage_buffer)
+
+    win_highs = df_win["high"].values
+    win_lows = df_win["low"].values
+    win_closes = df_win["close"].values
+
+    if direction == "long":
+        mfe_pct = float((max(win_highs) - entry) / entry * 100)
+        mae_pct = float((min(win_lows) - entry) / entry * 100)
+        final_pct = float((win_closes[-1] - entry) / entry * 100)
+        hit_target_idx = None
+        hit_stop_idx = None
+        for i in range(len(df_win)):
+            if hit_target_idx is None and win_highs[i] >= effective_target:
+                hit_target_idx = i
+            if hit_stop_idx is None and win_lows[i] <= effective_stop:
+                hit_stop_idx = i
+    else:
+        mfe_pct = float((entry - min(win_lows)) / entry * 100)
+        mae_pct = float((entry - max(win_highs)) / entry * 100)
+        final_pct = float((entry - win_closes[-1]) / entry * 100)
+        hit_target_idx = None
+        hit_stop_idx = None
+        for i in range(len(df_win)):
+            if hit_target_idx is None and win_lows[i] <= effective_target:
+                hit_target_idx = i
+            if hit_stop_idx is None and win_highs[i] >= effective_stop:
+                hit_stop_idx = i
+
+    hit_idx_local = None
+    if hit_target_idx is not None and hit_stop_idx is not None:
+        if hit_target_idx <= hit_stop_idx:
+            status = "hit_target"
+            hit_idx_local = hit_target_idx
+            note = f"雙向計劃 {direction} 進場後先觸及目標（pair#{pair_id}）"
+        else:
+            status = "hit_stop"
+            hit_idx_local = hit_stop_idx
+            note = f"雙向計劃 {direction} 進場後先觸及止損（pair#{pair_id}）"
+    elif hit_target_idx is not None:
+        status = "hit_target"
+        hit_idx_local = hit_target_idx
+        note = f"雙向計劃 {direction} 進場後觸及目標（pair#{pair_id}）"
+    elif hit_stop_idx is not None:
+        status = "hit_stop"
+        hit_idx_local = hit_stop_idx
+        note = f"雙向計劃 {direction} 進場後觸及止損（pair#{pair_id}）"
+    elif is_expired:
+        status = "expired"
+        note = f"雙向計劃 {direction} 進場後持倉期結束，盈虧 {final_pct:+.2f}%"
+    else:
+        return "still_active"
+
+    hit_at = None
+    if hit_idx_local is not None and "timestamp" in df.columns:
+        ts = df.iloc[winner_idx + hit_idx_local]["timestamp"]
+        hit_at = str(ts)
+
+    prediction_tracker.update_validation(
+        winner["id"],
+        status=status,
+        actual_outcome_pct=round(final_pct, 2),
+        max_favorable_pct=round(mfe_pct, 2),
+        max_adverse_pct=round(mae_pct, 2),
+        note=note,
+        hit_at=hit_at,
+    )
+
+    logger.info(
+        f"雙向預測 pair#{pair_id} 驗證: winner=#{winner['id']} {direction} {status} "
+        f"(MFE={mfe_pct:+.1f}% MAE={mae_pct:+.1f}%) | loser=#{cancelled['id']} cancelled_by_pair"
+    )
+
+    if pred["id"] == winner["id"]:
+        return status
+    return "cancelled_by_pair"
