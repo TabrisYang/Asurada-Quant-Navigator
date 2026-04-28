@@ -81,13 +81,18 @@ class Settings(BaseSettings):
     # ═══════════════════════════════════════════════════════════
     imitation_learning_enabled: bool = False     # 主開關（user 端注入）
     imitation_blend_enabled: bool = False         # 動態 blend（rule × ML 權重）
-    imitation_shadow_mode: bool = True            # SHADOW 模式：v101 偷跑不輸出
+    # ★ v101 修復：預設 SHADOW=False — chat 流程完全不呼叫 lightgbm/shap，
+    #   避免 native lib（numpy/pandas_ta/statsmodels/sklearn × lightgbm/shap）
+    #   在 macOS Python 3.12 上競爭資源造成 segfault
+    #   → 保留訓練（launchd 獨立進程）+ 特徵記錄（純 SQL，無 native）
+    #   → 未來 v102 加 subprocess 隔離後可再啟用 SHADOW
+    imitation_shadow_mode: bool = False           # 預設 OFF（避免 chat 流程觸發 native 衝突）
     imitation_canary_pct: int = 0                 # Canary 流量 %（0/1/10/25/50/100）
     quality_gate_enabled: bool = True             # Quality Gate 7 硬閾值（永遠開）
     adversarial_val_enabled: bool = False         # Drift 偵測
     champion_challenger_enabled: bool = False     # 自動模型切換
     auto_rollback_enabled: bool = True            # 表現變差自動關閉（永遠開）
-    feature_recording_enabled: bool = True        # Phase 2.0 特徵快照記錄
+    feature_recording_enabled: bool = True        # Phase 2.0 特徵快照記錄（純 SQL 安全）
 
     model_config = {
         "env_file": ".env",

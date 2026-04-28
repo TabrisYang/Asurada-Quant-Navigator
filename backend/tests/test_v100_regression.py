@@ -33,9 +33,9 @@ def reset_settings():
 
 def test_default_settings_user_sees_v100():
     """預設設定下 use_v101() 必須回 False（user 看到 v100）。"""
-    # 預設：learning_enabled=False, shadow_mode=True, canary_pct=0
+    # 預設：learning_enabled=False, shadow_mode=False（v101.1 修 segfault 後改）, canary_pct=0
     assert settings.imitation_learning_enabled is False
-    assert settings.imitation_shadow_mode is True
+    assert settings.imitation_shadow_mode is False
     assert settings.imitation_canary_pct == 0
 
     for _ in range(100):  # 多次採樣確保不是 random hit
@@ -80,7 +80,7 @@ def test_get_canary_status_returns_correct_active_for_users():
     # 預設：應該不啟用
     s = get_canary_status()
     assert s["active_for_users"] is False
-    assert s["shadow_mode"] is True
+    assert s["shadow_mode"] is False  # v101.1 修 segfault 後改
 
     # 全開但 quality gate 沒過 → 仍不啟用
     settings.imitation_learning_enabled = True
