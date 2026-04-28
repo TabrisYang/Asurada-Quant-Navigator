@@ -692,17 +692,44 @@ def _build_messages(
                 # ★ v102: 用 ml_client 而非直接 import imitation_predictor
                 #   → 主進程不載 lightgbm/shap
                 from app.core.ml_client import predict_via_subprocess
+                # ★ v102.1: 用 feature_extractor 抓全 39 特徵（不只 4 個）
+                #   → SHAP 顯示真實值；KNN similar_paths 找到真正相似的歷史
+                from app.core.feature_extractor import extract_features_at
+                from app.data.fetchers.crypto_engine import crypto_engine
 
-                # 收集當前特徵（給 subprocess）
-                _ra = (request.chart_state or {}).get("recent_accuracy")
-                _current_features = {
-                    "direction_long": 1,
-                    "confidence_score": 1,
-                    "regime_confidence": float(
-                        ((request.chart_state or {}).get("currentRegime") or {}).get("confidence", 0)
-                    ),
-                    "recent_30d_winrate": (_ra or {}).get("win_rate_30d") if isinstance(_ra, dict) else None,
-                }
+                _chart_tf = (request.chart_state or {}).get("timeframe") or "4h"
+                _df_for_features = crypto_engine.load_local_data(chart_symbol, _chart_tf)
+
+                if _df_for_features is not None and not _df_for_features.empty:
+                    # Placeholder prediction（LLM 還沒生 entry/target/stop）
+                    # 用 current price + 預設 target/stop 作 RR 估算
+                    _current_price = float(_df_for_features["close"].iloc[-1])
+                    _placeholder_pred = {
+                        "symbol": chart_symbol,
+                        "direction": "long",
+                        "entry_price": _current_price,
+                        "target_price": _current_price * 1.05,  # +5% target placeholder
+                        "stop_price": _current_price * 0.97,    # -3% stop placeholder
+                        "timeframe_hours": 48,
+                        "confidence": "medium",
+                        "regime": (
+                            ((request.chart_state or {}).get("currentRegime") or {}).get("regime", "unknown")
+                        ),
+                    }
+                    _current_features = extract_features_at(
+                        _df_for_features, request.chart_state, _placeholder_pred
+                    )
+                else:
+                    # OHLCV 載入失敗 fallback：只送 4 個必要特徵（其餘 35 個會被填 0）
+                    _ra = (request.chart_state or {}).get("recent_accuracy")
+                    _current_features = {
+                        "direction_long": 1,
+                        "confidence_score": 1,
+                        "regime_confidence": float(
+                            ((request.chart_state or {}).get("currentRegime") or {}).get("confidence", 0)
+                        ),
+                        "recent_30d_winrate": (_ra or {}).get("win_rate_30d") if isinstance(_ra, dict) else None,
+                    }
 
                 if use_v101(chart_symbol):
                     # 通過所有守衛 → subprocess 推論 + 注入給 user
