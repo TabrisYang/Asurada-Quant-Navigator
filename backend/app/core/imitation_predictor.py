@@ -325,9 +325,11 @@ class ImitationPredictor:
     def _knn_similar(self, current_features: dict, k: int = 3) -> list[dict]:
         """K-NN 找歷史最相似 k 筆 verified prediction（給 prompt 路徑類比用）。
 
-        簡化版：用 L2 距離（特徵已 fillna(0)），取最相似 k 筆。
+        v103 1C：用 StandardScaler 正規化所有特徵後才算 L2 距離。
+        原本 RSI(0-100) 跟 atr_pct(0-0.1) 直接算距離 → 大尺度特徵主導 → similarity 全 0。
         """
         from app.core.prediction_tracker import prediction_tracker
+        from sklearn.preprocessing import StandardScaler
 
         if not prediction_tracker._conn:
             return []
@@ -349,10 +351,17 @@ class ImitationPredictor:
             for col in FEATURE_COLUMNS:
                 if col in df.columns:
                     df[col] = pd.to_numeric(df[col], errors="coerce")
-            df_features = df[FEATURE_COLUMNS].fillna(0).astype(float)
+            df_features = df[FEATURE_COLUMNS].fillna(0).astype(float).values
 
-            current_vec = self._features_to_array(current_features)[0]
-            distances = np.linalg.norm(df_features.values - current_vec, axis=1)
+            current_vec = self._features_to_array(current_features)
+            # ★ v103 1C：合併 fit_transform 確保 scaler 用一致統計
+            combined = np.vstack([df_features, current_vec])
+            scaler = StandardScaler()
+            scaled = scaler.fit_transform(combined)
+            df_scaled = scaled[:-1]
+            current_scaled = scaled[-1:]
+
+            distances = np.linalg.norm(df_scaled - current_scaled, axis=1)
             # 取最近 k 筆
             top_k_idx = distances.argsort()[:k]
             return [

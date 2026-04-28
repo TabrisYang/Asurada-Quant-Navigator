@@ -1322,9 +1322,10 @@ def _sse_event(event_type: str, data: dict) -> str:
     return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-# ─── v100：結論卡「📈 系統參考」自動注入歷史命中率 ────────
+# ─── v100/v103 1B：結論卡「📈 系統參考」自動注入歷史命中率 ────────
+# v103 1B 寬鬆化：容忍 LLM 寫不同字眼（將/由/會/即將...）
 _PLACEHOLDER_PATTERN = re.compile(
-    r"📈\s*系統參考：[^\n]*",
+    r"📈\s*系統參考[：:][^\n]*",
 )
 
 
@@ -1334,8 +1335,11 @@ def _inject_recent_accuracy(final_text: str, symbol: str, regime: str) -> str:
     若 final_text 不含此佔位行（不是結論卡格式），原樣返回。
     若樣本不足（< 3 筆驗證），顯示「樣本不足」訊息。
     """
-    if not _PLACEHOLDER_PATTERN.search(final_text):
+    matched = _PLACEHOLDER_PATTERN.search(final_text)
+    if not matched:
+        logger.debug("[v103 1B] _inject_recent_accuracy: 沒找到 placeholder，可能 LLM 沒產出結論卡")
         return final_text
+    logger.info(f"[v103 1B] 命中 placeholder: '{matched.group(0)[:80]}'")
     try:
         stats = prediction_tracker.get_stats(symbol=symbol, regime=regime, days=30)
     except Exception as e:

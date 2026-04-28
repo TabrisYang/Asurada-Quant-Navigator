@@ -43,10 +43,29 @@ _VISIBLE_CARD_PATTERN = re.compile(
     r"📊\s*本次分析總結.*?(?=═══|\Z)",
     re.DOTALL,
 )
-# 「建議觀望」格式 — 不產生 prediction，但要識別出來避免誤抓上面的 placeholder
+# 「建議觀望」格式 — 不產生 prediction
 _OBSERVE_CARD_PATTERN = re.compile(
     r"⚠️\s*本次分析無法產生具體預測",
 )
+# v103 1A：雙向計劃格式 — 產生 2 筆 predictions（多空各 1）
+_BILATERAL_CARD_PATTERN = re.compile(
+    r"🔀\s*雙向計劃.*?(?=═══|\Z)",
+    re.DOTALL,
+)
+# 雙向計劃內的子段（多空兩段）
+_BILATERAL_LONG_BLOCK = re.compile(
+    r"🟢\s*做多計劃.*?(?=🔴|⏱|$)",
+    re.DOTALL,
+)
+_BILATERAL_SHORT_BLOCK = re.compile(
+    r"🔴\s*做空計劃.*?(?=⏱|═══|$)",
+    re.DOTALL,
+)
+# 雙向子段內的欄位 regex（趨向比較鬆，可能寫成「進場：$X1/$X2 分批」）
+_BILAT_ENTRIES = re.compile(r"進場[：:].*?\$?([\d.,]+)(?:[/、]\$?([\d.,]+))?")
+_BILAT_SL = re.compile(r"SL[：:]?\s*\$?([\d.,]+)")
+_BILAT_TP = re.compile(r"TP[：:]?\s*\$?([\d.,]+)")
+_BILAT_RR = re.compile(r"RR[\s：:]*([\d.]+)")
 
 _CARD_DIRECTION = re.compile(r"🎯\s*方向：\s*(做多|做空)\s*([\S]+)?")
 _CARD_ENTRY = re.compile(r"📍\s*進場：\s*\$?([\d.,]+)")
@@ -115,6 +134,94 @@ def _parse_visible_card(text: str) -> Optional[dict]:
     }
 
 
+def _parse_bilateral_card(text: str) -> list[dict]:
+    """v103 1A：從雙向計劃卡解析 2 筆 predictions（多 + 空）。
+
+    Returns:
+        list[dict]：[long_pred, short_pred] / 失敗回 []
+    """
+    card = _BILATERAL_CARD_PATTERN.search(text)
+    if not card:
+        return []
+    block = re.sub(r"(\d),(\d)", r"\1\2", card.group(0))
+
+    # 共用欄位（兩個子預測共用）
+    tf_m = _CARD_TIMEFRAME.search(block)
+    conf_m = _CARD_CONFIDENCE.search(block)
+    ind_m = _CARD_INDICATORS.search(block)
+    regime_m = _CARD_REGIME.search(block)
+    inv_m = _CARD_INVALIDATION.search(block)
+
+    if not tf_m or not conf_m:
+        return []
+
+    tf_str = tf_m.group(1)
+    confidence = _CONFIDENCE_MAP.get(conf_m.group(1), conf_m.group(1).lower())
+    common = {
+        "timeframe_str": tf_str,
+        "timeframe_hours": _parse_timeframe_hours(tf_str),
+        "confidence": confidence,
+        "regime": regime_m.group(1) if regime_m else "ranging",
+        "indicators": ind_m.group(1).strip().replace(" ", "") if ind_m else "",
+        "invalidation": inv_m.group(1).strip() if inv_m else "",
+        "is_bilateral": 1,
+    }
+
+    # 共用 pair_id 將 2 筆預測關聯起來
+    import time
+    pair_id = int(time.time() * 1000)  # ms timestamp 當 pair_id
+
+    results = []
+
+    # 解 long 子段
+    long_block = _BILATERAL_LONG_BLOCK.search(block)
+    if long_block:
+        long_text = long_block.group(0)
+        entries_m = _BILAT_ENTRIES.search(long_text)
+        sl_m = _BILAT_SL.search(long_text)
+        tp_m = _BILAT_TP.search(long_text)
+        if entries_m and sl_m and tp_m:
+            try:
+                entry = float(entries_m.group(1))
+                stop = float(sl_m.group(1))
+                target = float(tp_m.group(1))
+                results.append({
+                    **common,
+                    "direction": "long",
+                    "entry_price": entry,
+                    "target_price": target,
+                    "stop_price": stop,
+                    "bilateral_pair_id": pair_id,
+                })
+            except (ValueError, IndexError):
+                pass
+
+    # 解 short 子段
+    short_block = _BILATERAL_SHORT_BLOCK.search(block)
+    if short_block:
+        short_text = short_block.group(0)
+        entries_m = _BILAT_ENTRIES.search(short_text)
+        sl_m = _BILAT_SL.search(short_text)
+        tp_m = _BILAT_TP.search(short_text)
+        if entries_m and sl_m and tp_m:
+            try:
+                entry = float(entries_m.group(1))
+                stop = float(sl_m.group(1))
+                target = float(tp_m.group(1))
+                results.append({
+                    **common,
+                    "direction": "short",
+                    "entry_price": entry,
+                    "target_price": target,
+                    "stop_price": stop,
+                    "bilateral_pair_id": pair_id,
+                })
+            except (ValueError, IndexError):
+                pass
+
+    return results  # 0 / 1 / 2 筆都可能
+
+
 def _sanitize_prediction_block(block: str) -> str:
     """預處理預測區塊，提高正則匹配容錯性。"""
     # 移除數字中的逗號：83,500 → 83500
@@ -133,11 +240,17 @@ def _sanitize_prediction_block(block: str) -> str:
 
 
 def parse_predictions(llm_response: str) -> list[dict]:
-    """從 LLM 回答中解析預測（v100：優先解析可見結論卡，舊隱藏 block 做向下相容）。"""
-    # v100：優先嘗試新可見結論卡
+    """從 LLM 回答中解析預測（v103：雙向計劃 → 2 筆 / 單向 → 1 筆 / 觀望 → 0 筆）。"""
+    # 觀望卡：不產生 prediction
     if _OBSERVE_CARD_PATTERN.search(llm_response):
-        # 「建議觀望」卡 — 不產生 prediction
         return []
+
+    # v103 1A：雙向計劃優先（產出 2 筆 predictions）
+    bilateral_preds = _parse_bilateral_card(llm_response)
+    if bilateral_preds:
+        return bilateral_preds
+
+    # 單向結論卡（v100 既有）
     visible_pred = _parse_visible_card(llm_response)
     if visible_pred:
         return [visible_pred]
@@ -270,6 +383,20 @@ class PredictionTracker:
             )
         except sqlite3.OperationalError:
             pass  # 欄位已存在
+
+        # ★ v103 1A：雙向計劃支援欄位（純加法）
+        try:
+            self._conn.execute(
+                "ALTER TABLE predictions ADD COLUMN is_bilateral INTEGER DEFAULT 0"
+            )
+        except sqlite3.OperationalError:
+            pass
+        try:
+            self._conn.execute(
+                "ALTER TABLE predictions ADD COLUMN bilateral_pair_id INTEGER DEFAULT NULL"
+            )
+        except sqlite3.OperationalError:
+            pass
 
         # 遷移：加入 milestones 欄位（若不存在）
         try:
@@ -439,8 +566,9 @@ class PredictionTracker:
                 """INSERT INTO predictions
                    (symbol, timeframe, direction, entry_price, target_price, stop_price,
                     timeframe_hours, confidence, regime, indicators, invalidation,
-                    source_question, created_at, expires_at, status)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')""",
+                    source_question, created_at, expires_at, status,
+                    is_bilateral, bilateral_pair_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)""",
                 (
                     symbol, timeframe,
                     prediction["direction"],
@@ -455,6 +583,8 @@ class PredictionTracker:
                     source_question,
                     now.isoformat(),
                     expires.isoformat(),
+                    prediction.get("is_bilateral", 0),
+                    prediction.get("bilateral_pair_id"),
                 ),
             )
             self._conn.commit()
