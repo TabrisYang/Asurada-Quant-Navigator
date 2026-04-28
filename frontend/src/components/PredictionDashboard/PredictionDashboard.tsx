@@ -49,7 +49,7 @@ export default function PredictionDashboard() {
   const [activePreds, setActivePreds] = useState<PredictionItem[]>([]);
   const [historyPreds, setHistoryPreds] = useState<PredictionItem[]>([]);
   const [loading, setLoading] = useState(true);
-  const [viewTab, setViewTab] = useState<'scenarios' | 'active' | 'history' | 'indicators' | 'adjustments' | 'reviews' | 'calibration' | 'imitation'>('scenarios');
+  const [viewTab, setViewTab] = useState<'scenarios' | 'active' | 'history' | 'indicators' | 'adjustments' | 'reviews' | 'calibration' | 'imitation' | 'strategy'>('scenarios');
   // ★ v100：Calibration 數據
   const [calibrationData, setCalibrationData] = useState<any>(null);
   const [calibrationLoading, setCalibrationLoading] = useState(false);
@@ -61,6 +61,11 @@ export default function PredictionDashboard() {
   const [aucHistory, setAucHistory] = useState<any[]>([]);
   const [shapTopFeatures, setShapTopFeatures] = useState<{ items: { name: string; count: number }[]; total_logs: number; days: number } | null>(null);
   const [divergenceStats, setDivergenceStats] = useState<any>(null);
+
+  // ★ v103 5：策略績效 + 跨 symbol RS
+  const [strategyPerf, setStrategyPerf] = useState<any>(null);
+  const [crossSymbolRS, setCrossSymbolRS] = useState<any>(null);
+  const [strategyLoading, setStrategyLoading] = useState(false);
 
   // 情境預測
   const [scenarioData, setScenarioData] = useState<any>(null);
@@ -178,6 +183,24 @@ export default function PredictionDashboard() {
     finally { setImitationLoading(false); }
   }, []);
 
+  // ★ v103 5：策略績效 + 跨 symbol RS
+  const loadStrategyView = useCallback(async () => {
+    setStrategyLoading(true);
+    try {
+      const [perfRes, rsRes] = await Promise.all([
+        fetch('/api/predictions/strategy_performance?days=90'),
+        fetch('/api/predictions/cross_symbol_rs?timeframe=4h&days=30'),
+      ]);
+      setStrategyPerf(await perfRes.json());
+      setCrossSymbolRS(await rsRes.json());
+    } catch {
+      setStrategyPerf(null);
+      setCrossSymbolRS(null);
+    } finally {
+      setStrategyLoading(false);
+    }
+  }, []);
+
   // ★ v103 4：Dashboard 觀察工具（AUC 趨勢 / SHAP 統計 / 分歧）
   const loadImitationObservatory = useCallback(async () => {
     try {
@@ -208,6 +231,7 @@ export default function PredictionDashboard() {
       loadImitationObservatory();
     }
   }, [viewTab, loadImitation, loadImitationObservatory]);
+  useEffect(() => { if (viewTab === 'strategy') loadStrategyView(); }, [viewTab, loadStrategyView]);
 
   const handleSaveNote = async (predId: number) => {
     setSavingNote(true);
@@ -325,13 +349,14 @@ export default function PredictionDashboard() {
 
       {/* ===== Sub-tabs ===== */}
       <div className="flex gap-2 border-b overflow-x-auto" style={{ borderColor: 'var(--border-primary)' }}>
-        {(['scenarios', 'active', 'history', 'calibration', 'imitation', 'reviews', 'indicators', 'adjustments'] as const).map((tab) => {
+        {(['scenarios', 'active', 'history', 'calibration', 'imitation', 'strategy', 'reviews', 'indicators', 'adjustments'] as const).map((tab) => {
           const labels: Record<string, string> = {
             scenarios: '情境預測',
             active: `進行中 (${activePreds.length})`,
             history: `歷史記錄 (${historyPreds.length})`,
             calibration: '📊 命中率',
             imitation: '🤖 模型狀態',
+            strategy: '📊 策略績效',
             reviews: '覆盤報告',
             indicators: '指標勝率',
             adjustments: '自動調整',
@@ -971,6 +996,115 @@ export default function PredictionDashboard() {
                   </div>
                 </div>
               )}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ===== v103 5：策略績效 + 跨 symbol RS ===== */}
+      {viewTab === 'strategy' && (
+        <div className="space-y-4">
+          {strategyLoading ? (
+            <div className="text-xs" style={{ color: 'var(--text-secondary)' }}>載入中…</div>
+          ) : (
+            <>
+              {/* 5A：策略類型勝率 */}
+              <div>
+                <div className="text-xs mb-2 font-medium" style={{ color: 'var(--accent-blue)' }}>
+                  📊 策略類型勝率（過去 90 天）
+                </div>
+                {!strategyPerf || !strategyPerf.strategies ? (
+                  <div className="text-xs" style={{ color: 'var(--text-secondary)' }}>無資料</div>
+                ) : (
+                  <div className="space-y-2">
+                    {Object.entries(strategyPerf.strategies as Record<string, any>).map(([name, d]) => {
+                      const decided = d.wins + d.losses;
+                      const winPct = decided > 0 ? d.win_rate : 0;
+                      const isStrongest = strategyPerf.strongest === name;
+                      const isWeakest = strategyPerf.weakest === name;
+                      return (
+                        <div key={name} className="p-2 rounded text-xs" style={{ background: 'var(--bg-tertiary)' }}>
+                          <div className="flex justify-between items-center mb-1">
+                            <span className="font-medium">
+                              {isStrongest && <span style={{ color: '#3fb950' }}>👑 </span>}
+                              {isWeakest && <span style={{ color: '#f85149' }}>⚠️ </span>}
+                              {name}
+                            </span>
+                            <span className="font-mono">
+                              <span style={{ color: winPct >= 50 ? '#3fb950' : '#f85149' }}>{winPct.toFixed(1)}%</span>
+                              <span style={{ color: 'var(--text-secondary)' }}> ({d.wins}W / {d.losses}L)</span>
+                            </span>
+                          </div>
+                          <div style={{ height: 6, background: 'var(--bg-secondary)', borderRadius: 2, overflow: 'hidden' }}>
+                            <div style={{
+                              width: `${Math.min(100, winPct)}%`,
+                              height: '100%',
+                              background: winPct >= 50 ? '#3fb950' : '#f85149',
+                            }} />
+                          </div>
+                          <div className="mt-1" style={{ color: 'var(--text-secondary)' }}>
+                            涵蓋 regime：{(d.regimes_included || []).join(', ') || '—'}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                {strategyPerf?.strongest && (
+                  <div className="mt-2 text-xs p-2 rounded" style={{ background: 'rgba(63,185,80,0.1)', color: 'var(--text-primary)' }}>
+                    💡 你最強策略：<b>{strategyPerf.strongest}</b>
+                    {strategyPerf.weakest && <>　|　最弱（建議避免）：<b style={{ color: '#f85149' }}>{strategyPerf.weakest}</b></>}
+                  </div>
+                )}
+              </div>
+
+              {/* 5B：跨 symbol RS（過去 30 天 4h） */}
+              <div>
+                <div className="text-xs mb-2 font-medium" style={{ color: 'var(--accent-blue)' }}>
+                  🔥 跨 symbol 相對強弱（vs {crossSymbolRS?.base ?? 'BTC/USDT'}，過去 {crossSymbolRS?.days ?? 30} 天）
+                </div>
+                {!crossSymbolRS || !crossSymbolRS.items || crossSymbolRS.items.length === 0 ? (
+                  <div className="text-xs" style={{ color: 'var(--text-secondary)' }}>
+                    {crossSymbolRS?.error ?? '無資料'}
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    {crossSymbolRS.items.map((it: any) => {
+                      const maxAbs = Math.max(...crossSymbolRS.items.map((x: any) => Math.abs(x.rs_score)), 1);
+                      const pct = (Math.abs(it.rs_score) / maxAbs) * 100;
+                      const positive = it.rs_score >= 0;
+                      return (
+                        <div key={it.symbol} className="flex items-center gap-2 text-xs">
+                          <span className="font-mono" style={{ width: 90 }}>{it.symbol}</span>
+                          <div style={{ flex: 1, position: 'relative', height: 8, background: 'var(--bg-tertiary)', borderRadius: 2 }}>
+                            <div style={{
+                              position: 'absolute',
+                              left: positive ? '50%' : `${50 - pct / 2}%`,
+                              width: `${pct / 2}%`,
+                              height: '100%',
+                              background: positive ? '#3fb950' : '#f85149',
+                              borderRadius: 2,
+                            }} />
+                            <div style={{
+                              position: 'absolute', left: '50%', top: 0, bottom: 0,
+                              width: 1, background: 'var(--text-secondary)', opacity: 0.3,
+                            }} />
+                          </div>
+                          <span className="font-mono" style={{
+                            width: 70, textAlign: 'right',
+                            color: positive ? '#3fb950' : '#f85149',
+                          }}>
+                            {positive ? '+' : ''}{it.rs_score.toFixed(2)}%
+                          </span>
+                          <span className="font-mono" style={{ width: 60, textAlign: 'right', color: 'var(--text-secondary)' }}>
+                            ({it.return_pct >= 0 ? '+' : ''}{it.return_pct.toFixed(1)}%)
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
             </>
           )}
         </div>

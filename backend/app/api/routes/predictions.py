@@ -250,6 +250,139 @@ async def get_divergence_stats():
     return out
 
 
+@router.get("/strategy_performance")
+async def get_strategy_performance(days: int = Query(90, ge=7, le=365)):
+    """v103 5A：依 regime 推算「策略類型」勝率。
+
+    映射：
+      - trending_up / trending_down → 「趨勢策略」
+      - ranging / low_vol → 「均值回歸策略」
+      - high_vol → 「動量突破策略」
+      - 其他 → 未分類
+    回傳每個策略的 wins / losses / win_rate / total。
+    """
+    regime_stats = prediction_tracker.get_regime_stats(days=days)
+    regimes = regime_stats.get("regimes", {})
+
+    strategy_map = {
+        "趨勢策略": ["trending_up", "trending_down"],
+        "均值回歸策略": ["ranging", "low_vol"],
+        "動量突破策略": ["high_vol"],
+    }
+
+    out: dict[str, dict] = {}
+    for strategy, regime_list in strategy_map.items():
+        wins = losses = expired = total = 0
+        included = []
+        for r in regime_list:
+            d = regimes.get(r)
+            if not d:
+                continue
+            wins += d.get("wins", 0)
+            losses += d.get("losses", 0)
+            expired += d.get("expired", 0)
+            total += d.get("total", 0)
+            included.append(r)
+        decided = wins + losses
+        out[strategy] = {
+            "win_rate": round(wins / decided * 100, 1) if decided > 0 else 0,
+            "wins": wins,
+            "losses": losses,
+            "expired": expired,
+            "total": total,
+            "regimes_included": included,
+        }
+
+    # 強弱排序：依勝率（樣本 >= 5 才排名）
+    ranked = sorted(
+        [(name, d) for name, d in out.items() if d["wins"] + d["losses"] >= 5],
+        key=lambda kv: kv[1]["win_rate"],
+        reverse=True,
+    )
+    strongest = ranked[0][0] if ranked else None
+    weakest = ranked[-1][0] if len(ranked) > 1 else None
+
+    return {
+        "strategies": out,
+        "strongest": strongest,
+        "weakest": weakest,
+        "days": days,
+    }
+
+
+@router.get("/cross_symbol_rs")
+async def get_cross_symbol_rs(
+    timeframe: str = Query("4h"),
+    days: int = Query(30, ge=7, le=180),
+    base: str = Query("BTC/USDT", description="相對基準（預設 BTC/USDT）"),
+):
+    """v103 5B：跨 symbol 相對強弱（RS）— 用本地同 timeframe OHLCV 算過去 N 天 BTC-relative return。
+
+    回傳 list 由強到弱排序。每筆含 symbol / return_pct / rs_score（vs base）。
+    """
+    from pathlib import Path
+    from datetime import datetime, timedelta
+    import pandas as pd
+    from app.data.fetchers.crypto_engine import crypto_engine
+
+    data_dir = Path(crypto_engine.data_dir)
+    if not data_dir.exists():
+        return {"items": [], "error": "OHLCV 資料夾不存在"}
+
+    # 找出該 timeframe 所有 *_USDT_<tf>.csv（排除 derivatives 衍生資料）
+    tf_files = list(data_dir.glob(f"*_USDT_{timeframe}.csv"))
+    tf_files = [f for f in tf_files if "derivatives" not in f.name]
+
+    end = datetime.now()
+    start = end - timedelta(days=days)
+
+    def _return_pct(symbol: str) -> Optional[float]:
+        try:
+            df = crypto_engine.load_local_data(
+                symbol, timeframe,
+                start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"),
+            )
+            if df.empty or len(df) < 2:
+                return None
+            first = float(df.iloc[0]["close"])
+            last = float(df.iloc[-1]["close"])
+            if first <= 0:
+                return None
+            return (last - first) / first * 100.0
+        except Exception:
+            return None
+
+    # base symbol return
+    base_ret = _return_pct(base)
+    if base_ret is None:
+        return {"items": [], "error": f"無法計算 {base} 報酬"}
+
+    items = []
+    for f in tf_files:
+        # filename → symbol（例：ADA_USDT_4h.csv → ADA/USDT）
+        stem = f.stem.replace(f"_{timeframe}", "")
+        if "_USDT" not in stem:
+            continue
+        sym = stem.replace("_USDT", "/USDT").replace("_", "/")
+        ret = _return_pct(sym)
+        if ret is None:
+            continue
+        items.append({
+            "symbol": sym,
+            "return_pct": round(ret, 2),
+            "rs_score": round(ret - base_ret, 2),  # 相對強弱：超過 base 的部分
+        })
+
+    items.sort(key=lambda x: x["rs_score"], reverse=True)
+    return {
+        "items": items,
+        "base": base,
+        "base_return_pct": round(base_ret, 2),
+        "timeframe": timeframe,
+        "days": days,
+    }
+
+
 @router.get("/imitation/last_run")
 async def get_last_run_status():
     """讀最近一次 launchd 重訓的執行紀錄（給前端顯示「上次自動重訓何時、結果如何」）。"""
