@@ -97,6 +97,10 @@ class Settings(BaseSettings):
     # 預設 True；若實測新倍數比舊差，設 False 即一鍵回退到 1.5/2.0 固定值
     adaptive_atr_mults_enabled: bool = True
 
+    # v104.1：bias_score 擴展訊號維度（5 分量 → 9 分量）
+    # 預設 True；False 時走原 5 分量行為（緊急回滾用）
+    bias_score_extended_dimensions: bool = True
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",

@@ -445,7 +445,7 @@ def _auto_calc_indicator_values(
             _ri = chart_state.get("currentRegime") or {}
             if _ri.get("regime") in ("ranging", "unknown"):
                 from app.core.regime_subtype import classify_ranging_subtype
-                _sub = classify_ranging_subtype(df, _ri, chart_state)
+                _sub = classify_ranging_subtype(df, _ri, chart_state, symbol=chart_symbol)
                 if _sub and _sub.get("subtype"):
                     chart_state["regime_subtype"] = _sub
                     logger.info(

@@ -28,10 +28,11 @@ _ADX_LOW = 15           # ADX < 15 → 趨勢非常弱
 _BB_WIDTH_PCTL_LOW = 30 # BB 寬度 30 百分位以下 → 窄
 _ATR_PCT_PCTL_LOW = 30  # ATR% 30 百分位以下 → 低波動
 _OVERLAP_HIGH = 0.7     # 高低點重疊比例 > 0.7 → 真震盪（窄區間反覆）
-# 注意：bias_score 範圍 [-1, +1]。EMA60(0.3) + RSI(0.2) 兩條件加總 0.5 是「常態偏向」訊號；
-# 設 0.3 讓「中度偏向」也能觸發 lean，避免 neutral_ranging 吃掉太多應該偏向的情境。
-# external_signals 缺失時（如 batch eval）這個閾值更關鍵。
-_BIAS_THRESHOLD = 0.3
+# v104.1：bias_score 從 5 分量擴成 9 分量後，更容易跨 0.3 →
+# 升到 0.4 對應「至少 2-3 個中等訊號同向」才觸發 lean，避免雜訊放大誤觸。
+# settings.bias_score_extended_dimensions=False 時（5 分量），會自動降回 0.3 baseline。
+_BIAS_THRESHOLD_BASELINE = 0.3
+_BIAS_THRESHOLD_EXTENDED = 0.4
 
 
 def _percentile_of_last(series: pd.Series, lookback: int = 100) -> Optional[float]:
@@ -72,21 +73,46 @@ def _compute_overlap_ratio(df: pd.DataFrame, lookback: int = 20) -> Optional[flo
     return float(middle_range / total_range) if total_range > 0 else None
 
 
-def _compute_bias_score(df: pd.DataFrame, chart_state: Optional[dict]) -> tuple[float, list[str]]:
-    """偏多 / 偏空 score，回傳 (score, reasons)。
+def _compute_bias_score(
+    df: pd.DataFrame,
+    chart_state: Optional[dict],
+    symbol: Optional[str] = None,
+) -> tuple[float, list[str], dict]:
+    """偏多 / 偏空 score，回傳 (score, top_reasons, full_metrics)。
 
     score 範圍 [-1, +1]，正值偏多、負值偏空。
-    各分量加權：
-      - 大型結構（EMA60 趨勢）：±0.3
-      - 短期 RSI：±0.2
-      - 跨股 breadth：±0.2
-      - funding rate（多空擠壓潛力）：±0.15
-      - 多空持倉比極端：±0.15
-    """
-    score = 0.0
-    reasons: list[str] = []
 
-    # 1. 大型結構 — EMA60 斜率
+    分量總覽（settings.bias_score_extended_dimensions=True 時 9 個；False 時前 5 個）：
+      原 5 分量（v104 baseline）：
+        - 大型結構（EMA60 趨勢）：±0.3
+        - 短期 RSI 數值：±0.2
+        - 跨股 breadth：±0.2（v104.1 改線性 ±0.10-0.20）
+        - funding rate 極端：±0.15
+        - 多空持倉比極端：±0.15
+      新增 4 分量（v104.1 階段 1+2）：
+        - 個股 RS（vs basket）：±0.10
+        - market_regime × symbol_type：±0.15
+        - RSI 雙背離 + MACD 雙背離：±0.20（合計）
+        - （breadth 已升級成軟加，不算新分量）
+
+    回傳格式變更：tuple[score, top_reasons (≤3), full_metrics (9 dims)]
+    full_metrics 給 debugging 用，top_reasons 給 LLM prompt 用（避免超字）。
+
+    TODO: 權重為經驗值 — 等 verified predictions 累積到 100+ 後 walk-forward 量化最優組合。
+    """
+    # contributions: list of (label_short, value, abs_value) — 排序後取 top 3
+    contributions: list[tuple[str, float]] = []
+    full_metrics: dict = {}
+
+    # ─── v104.1 settings flag：False 時走原 5 分量行為 ───
+    try:
+        from app.core.config.settings import settings as _s
+        extended = getattr(_s, "bias_score_extended_dimensions", True)
+    except Exception:
+        extended = True
+    full_metrics["extended_dimensions"] = extended
+
+    # ─── 分量 1：EMA60 斜率 ───
     try:
         ema_calc = registry.calculate("ema", df, {"period": 60})
         if ema_calc:
@@ -94,16 +120,15 @@ def _compute_bias_score(df: pd.DataFrame, chart_state: Optional[dict]) -> tuple[
             valid = [v for v in ema_series if v is not None]
             if len(valid) >= 10:
                 slope = (valid[-1] - valid[-10]) / valid[-10]
-                if slope > 0.01:  # +1% over 10 bars
-                    score += 0.3
-                    reasons.append(f"EMA60 斜率 +{slope*100:.1f}%（多）")
+                full_metrics["ema60_slope_pct"] = round(slope * 100, 3)
+                if slope > 0.01:
+                    contributions.append((f"EMA60斜率 +{slope*100:.1f}%（多）", 0.30))
                 elif slope < -0.01:
-                    score -= 0.3
-                    reasons.append(f"EMA60 斜率 {slope*100:.1f}%（空）")
+                    contributions.append((f"EMA60斜率 {slope*100:.1f}%（空）", -0.30))
     except Exception:
         pass
 
-    # 2. 短期 RSI
+    # ─── 分量 2：短期 RSI 數值 ───
     try:
         rsi_calc = registry.calculate("rsi", df, {"period": 14})
         if rsi_calc:
@@ -111,63 +136,188 @@ def _compute_bias_score(df: pd.DataFrame, chart_state: Optional[dict]) -> tuple[
             valid = [v for v in rsi_series if v is not None]
             if valid:
                 rsi = float(valid[-1])
+                full_metrics["rsi_14"] = round(rsi, 2)
                 if rsi >= 60:
-                    score += 0.2
-                    reasons.append(f"RSI={rsi:.0f}（強）")
+                    contributions.append((f"RSI={rsi:.0f}（強）", 0.20))
                 elif rsi <= 40:
-                    score -= 0.2
-                    reasons.append(f"RSI={rsi:.0f}（弱）")
+                    contributions.append((f"RSI={rsi:.0f}（弱）", -0.20))
     except Exception:
         pass
 
-    # 3. 跨股 breadth（chart_state 已有）
-    if chart_state:
-        css = chart_state.get("crossStockSignals") or {}
-        breadth = css.get("breadth_pct_advancing")
-        if breadth is not None:
-            try:
-                b = float(breadth)
+    # ─── 分量 3：跨股 breadth（v104.1 階段 1：軟加分尺度）───
+    css = (chart_state or {}).get("crossStockSignals") or {}
+    breadth = css.get("breadth_pct_advancing")
+    if breadth is not None:
+        try:
+            b = float(breadth)
+            full_metrics["breadth_pct"] = round(b, 1)
+            if extended:
+                # 軟加：65/55/45/35 四檔線性
+                if b >= 65:
+                    contributions.append((f"breadth {b:.0f}%（強多）", 0.20))
+                elif b >= 55:
+                    val = 0.10 + (b - 55) / 10 * 0.10  # 55→0.10, 65→0.20
+                    contributions.append((f"breadth {b:.0f}%（偏多）", round(val, 3)))
+                elif b <= 35:
+                    contributions.append((f"breadth {b:.0f}%（強空）", -0.20))
+                elif b <= 45:
+                    val = -0.10 - (45 - b) / 10 * 0.10
+                    contributions.append((f"breadth {b:.0f}%（偏空）", round(val, 3)))
+            else:
+                # 舊 5 分量行為
                 if b > 60:
-                    score += 0.2
-                    reasons.append(f"breadth {b:.0f}%（多）")
+                    contributions.append((f"breadth {b:.0f}%（多）", 0.20))
                 elif b < 40:
-                    score -= 0.2
-                    reasons.append(f"breadth {b:.0f}%（空）")
+                    contributions.append((f"breadth {b:.0f}%（空）", -0.20))
+        except Exception:
+            pass
+
+    # ─── 分量 4-5：external_signals（funding + LS）───
+    ext = (chart_state or {}).get("external_signals") or {}
+    deriv = ext.get("derivatives") or {}
+    if "funding_rate_pct" in deriv:
+        try:
+            fr = float(deriv["funding_rate_pct"])
+            full_metrics["funding_rate_pct"] = fr
+            if fr < -0.05:
+                contributions.append((f"funding={fr:.3f}%（空頭擠壓→多）", 0.15))
+            elif fr > 0.05:
+                contributions.append((f"funding={fr:.3f}%（多頭擠壓→空）", -0.15))
+        except Exception:
+            pass
+    if "global_long_short_ratio" in deriv:
+        try:
+            r = float(deriv["global_long_short_ratio"])
+            full_metrics["ls_ratio"] = round(r, 2)
+            if r < 0.5:
+                contributions.append((f"LS比={r:.2f}（散戶極空→多）", 0.15))
+            elif r > 2.5:
+                contributions.append((f"LS比={r:.2f}（散戶極多→空）", -0.15))
+        except Exception:
+            pass
+
+    # ─── 階段 1 新分量 6：個股 RS（vs basket）───
+    if extended:
+        rs = css.get("relative_strength_vs_basket") or css.get("relative_strength_5d") or css.get("relative_strength")
+        if rs is not None:
+            try:
+                rs_val = float(rs)
+                full_metrics["rs_vs_basket"] = round(rs_val, 2)
+                if rs_val > 1.2:
+                    contributions.append((f"RS={rs_val:.2f}（強於 basket）", 0.10))
+                elif rs_val < 0.8:
+                    contributions.append((f"RS={rs_val:.2f}（弱於 basket）", -0.10))
             except Exception:
                 pass
 
-    # 4. funding rate（極端偏空 → 空頭擠壓潛力 → 偏多）
-    if chart_state:
-        ext = chart_state.get("external_signals") or {}
-        deriv = ext.get("derivatives") or {}
-        if "funding_rate_pct" in deriv:
-            fr = deriv["funding_rate_pct"]
-            if fr < -0.05:  # < -0.05%（空方付錢）→ 空頭擠壓潛力 → 偏多
-                score += 0.15
-                reasons.append(f"funding={fr:.3f}%（空頭擠壓→偏多）")
-            elif fr > 0.05:
-                score -= 0.15
-                reasons.append(f"funding={fr:.3f}%（多頭擠壓→偏空）")
+    # ─── 階段 2 分量 7：market_regime × symbol_type 矩陣 ───
+    if extended and symbol:
+        market_regime = css.get("market_regime")
+        if market_regime:
+            try:
+                from app.utils.symbol import is_btc_pair, is_alt_pair
+                is_btc = is_btc_pair(symbol)
+                is_alt = is_alt_pair(symbol)
+                full_metrics["market_regime"] = market_regime
+                full_metrics["is_btc"] = is_btc
+                full_metrics["is_alt"] = is_alt
 
-        # 5. 多空持倉比極端
-        if "global_long_short_ratio" in deriv:
-            r = deriv["global_long_short_ratio"]
-            if r < 0.5:  # 散戶極端空 → 反向偏多
-                score += 0.15
-                reasons.append(f"LS比={r:.2f}（散戶極空→反向偏多）")
-            elif r > 2.5:
-                score -= 0.15
-                reasons.append(f"LS比={r:.2f}（散戶極多→反向偏空）")
+                # 6-cell 矩陣
+                contrib = 0.0
+                label = ""
+                if market_regime == "alt_season":
+                    if is_btc:
+                        contrib, label = -0.15, "alt_season×BTC（資金外流→空）"
+                    elif is_alt:
+                        contrib, label = 0.15, "alt_season×alt（資金流入→多）"
+                elif market_regime == "btc_led":
+                    if is_btc:
+                        contrib, label = 0.15, "btc_led×BTC（領漲→多）"
+                    elif is_alt:
+                        contrib, label = -0.15, "btc_led×alt（落後→空）"
+                elif market_regime == "bearish":
+                    contrib, label = -0.15, "bearish 整體偏空"
+                # mixed → 0
 
-    # clip 到 [-1, 1]
+                if contrib != 0:
+                    contributions.append((label, contrib))
+            except Exception:
+                pass
+
+    # ─── 階段 2 分量 8-9：RSI/MACD 雙背離 ───
+    if extended:
+        rsi_div = _get_divergence_value(df, chart_state, "RSI_Div", "rsi", {"period": 14})
+        macd_div = _get_divergence_value(df, chart_state, "MACD_Div", "macd", None)
+        full_metrics["rsi_divergence"] = rsi_div
+        full_metrics["macd_divergence"] = macd_div
+
+        if rsi_div is not None and macd_div is not None:
+            if rsi_div > 0 and macd_div > 0:
+                contributions.append(("RSI+MACD 雙背離↑", 0.20))
+            elif rsi_div < 0 and macd_div < 0:
+                contributions.append(("RSI+MACD 雙背離↓", -0.20))
+            elif rsi_div > 0 and macd_div == 0:
+                contributions.append(("RSI 背離↑", 0.10))
+            elif rsi_div == 0 and macd_div > 0:
+                contributions.append(("MACD 背離↑", 0.10))
+            elif rsi_div < 0 and macd_div == 0:
+                contributions.append(("RSI 背離↓", -0.10))
+            elif rsi_div == 0 and macd_div < 0:
+                contributions.append(("MACD 背離↓", -0.10))
+            # 不一致（一正一負）→ 抵銷不加分
+
+    # ─── 加總 + 排序 ───
+    score = sum(c[1] for c in contributions)
     score = max(-1.0, min(1.0, score))
-    return score, reasons
+
+    # top 3 by absolute contribution
+    contributions.sort(key=lambda c: abs(c[1]), reverse=True)
+    top_reasons = [c[0] for c in contributions[:3]]
+
+    full_metrics["all_contributions"] = [{"label": c[0], "value": c[1]} for c in contributions]
+    full_metrics["score"] = round(score, 3)
+
+    return score, top_reasons, full_metrics
+
+
+def _get_divergence_value(
+    df: pd.DataFrame,
+    chart_state: Optional[dict],
+    field_name: str,
+    indicator_id: str,
+    params: Optional[dict] = None,
+) -> Optional[float]:
+    """背離訊號取得：先讀 chart_state.indicatorValues，找不到 fallback 直接計算。
+
+    回傳 +1 / -1 / 0，或 None（兩條都失敗）。
+    """
+    # 首選：chart_state.indicatorValues 已注入
+    iv = (chart_state or {}).get("indicatorValues") or {}
+    if field_name in iv:
+        try:
+            return float(iv[field_name])
+        except Exception:
+            pass
+
+    # 備援：直接呼叫 registry 計算
+    try:
+        result = registry.calculate(indicator_id, df, params)
+        if result and field_name in result:
+            series = result[field_name] or []
+            valid = [v for v in series if v is not None]
+            if valid:
+                return float(valid[-1])
+    except Exception:
+        pass
+
+    return None
 
 
 def classify_ranging_subtype(
     df: pd.DataFrame,
     regime_info: dict,
     chart_state: Optional[dict] = None,
+    symbol: Optional[str] = None,
 ) -> dict:
     """v104 Fix B：ranging 子類型分類。
 
@@ -237,10 +387,11 @@ def classify_ranging_subtype(
     overlap = _compute_overlap_ratio(df, 20)
     metrics["overlap_ratio"] = overlap
 
-    # 5. 偏向 score（給 lean_long/short 判定用）
-    bias_score, bias_reasons = _compute_bias_score(df, chart_state)
+    # 5. 偏向 score（給 lean_long/short 判定用 — v104.1：9 分量含 symbol-aware）
+    bias_score, bias_reasons, bias_full = _compute_bias_score(df, chart_state, symbol=symbol)
     metrics["bias_score"] = round(bias_score, 3)
-    metrics["bias_reasons"] = bias_reasons
+    metrics["bias_reasons"] = bias_reasons  # top 3，給 LLM prompt 用
+    metrics["bias_full_metrics"] = bias_full  # 完整 9 分量，給除錯 / UI 展開用
 
     # ─── 判定（先檢真震盪 → 突破待發 → 偏向 → 中性）───
 
@@ -263,10 +414,13 @@ def classify_ranging_subtype(
             "metrics": metrics,
         }
 
+    # v104.1：依 extended flag 動態切 threshold（baseline 0.3 / extended 0.4）
+    bias_threshold = _BIAS_THRESHOLD_EXTENDED if bias_full.get("extended_dimensions") else _BIAS_THRESHOLD_BASELINE
+
     # 突破待發：BB 收窄到極致（pctl < 20）但 ADX 未起，方向不明
     if (bb_width_pctl is not None and bb_width_pctl < 20
             and (adx_value is None or adx_value < 20)
-            and abs(bias_score) < _BIAS_THRESHOLD):
+            and abs(bias_score) < bias_threshold):
         return {
             "subtype": "breakout_pending",
             "confidence": 0.65,
@@ -275,14 +429,14 @@ def classify_ranging_subtype(
         }
 
     # 偏多 / 偏空
-    if bias_score >= _BIAS_THRESHOLD:
+    if bias_score >= bias_threshold:
         return {
             "subtype": "lean_long",
             "confidence": min(0.85, 0.5 + abs(bias_score) * 0.5),
             "reason": f"bias={bias_score:+.2f}：" + "、".join(bias_reasons[:3]),
             "metrics": metrics,
         }
-    if bias_score <= -_BIAS_THRESHOLD:
+    if bias_score <= -bias_threshold:
         return {
             "subtype": "lean_short",
             "confidence": min(0.85, 0.5 + abs(bias_score) * 0.5),

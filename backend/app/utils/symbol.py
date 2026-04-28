@@ -100,6 +100,41 @@ def is_tw_stock(symbol: str) -> bool:
     return normalize_symbol(symbol).endswith("/TWD")
 
 
+# v104.1 階段 2：BTC / alt 分類（給 regime_subtype.market_regime × symbol_type 矩陣用）
+_STABLECOINS = {"USDT", "USDC", "BUSD", "DAI", "TUSD", "USDP", "FDUSD", "PYUSD"}
+
+
+def is_btc_pair(symbol: str) -> bool:
+    """是否為 BTC 對（BTC/USDT、BTC/USD、BTC/USDC 等）。"""
+    norm = normalize_symbol(symbol)
+    if "/" not in norm:
+        return False
+    base = norm.split("/")[0].upper()
+    return base == "BTC"
+
+
+def is_alt_pair(symbol: str) -> bool:
+    """是否為 alt 對（非台股、非 BTC、非穩定幣對穩定幣）。
+
+    判定：必須是 crypto 對（含 /），base 不是 BTC，
+    且 base 不在穩定幣集合（避免 USDC/USDT 這種被誤判）。
+    """
+    if is_tw_stock(symbol):
+        return False
+    norm = normalize_symbol(symbol)
+    if "/" not in norm:
+        return False
+    base, quote = norm.split("/", 1)
+    base = base.upper()
+    quote = quote.upper()
+    if base == "BTC":
+        return False
+    # 穩定幣對穩定幣（USDC/USDT 等）→ 不算 alt
+    if base in _STABLECOINS and quote in _STABLECOINS:
+        return False
+    return True
+
+
 # 常見上櫃股票代碼前綴（6 開頭多為上櫃）
 # 簡化判斷：4 碼且 6 開頭視為上櫃，其餘為上市
 # 快取：記住嘗試過的結果（從 TWSE/TPEx API 自動判斷）
