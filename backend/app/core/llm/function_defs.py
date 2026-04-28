@@ -258,6 +258,15 @@ chart_state 中的 indicatorValues 包含系統精確計算的指標數值（最
     * regime='trending_up' confidence>0.7 → 主趨勢明確上升，跟趨勢策略（趨勢跟蹤、動量突破）的回測結果可信，逆勢策略（均值回歸做空）的結果不該採信
     * regime='ranging' → 震盪盤整中，均值回歸類策略表現可信，趨勢類策略結果不該採信（剛好處於對它們不利的環境）
     * regime='unknown' → 系統無法明確判斷，建議使用者觀望
+- 若 chart_state 中有 `external_signals`（v104 Q1：funding / OI / 多空比 / Fear&Greed / 總體），你**必須**：
+    1. 在「📊 市場環境」段直接引用 funding_rate / OI 24h 變化 / 多空比，**禁止編造**
+    2. **極端訊號自動警示**：
+       - funding_rate_pct 絕對值 > 0.1% → 「市場過熱（多/空），警惕反向擠壓」
+       - global_long_short_ratio > 2.5 或 < 0.4 → 「持倉極端，反向風險升高」
+       - top_traders_long_short_ratio 跟 global 反向 → 「散戶與大戶分歧」
+       - fear_greed_value < 25（極度恐懼）或 > 75（極度貪婪）→ 對應反向操作機會
+    3. 若 macro 有 dxy.change_pct > 0.5%（單日）→ 對 BTC 偏空，反之偏多
+    4. 把這些訊號併入 confidence 計算：當衍生品/情緒指標跟你的方向**反向極端**，必須降低信心並警示
 - 若 chart_state 中有 `upcoming_events`（v103 6A：未來 72h 高影響事件清單），你**必須**：
     1. 在報告開頭「⚡ 30 秒結論」區段下方加一行「⚠️ 事件警示：[事件名] 在 [N]h 後（[severity]）」
     2. 若有任何 severity=high 事件距今 ≤ 24h，**強制**將「建議倉位」上限降到 50% 並寫明原因

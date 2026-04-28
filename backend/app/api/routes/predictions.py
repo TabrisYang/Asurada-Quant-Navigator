@@ -383,6 +383,36 @@ async def get_cross_symbol_rs(
     }
 
 
+@router.get("/batch_signals")
+async def get_batch_signals(
+    symbols: str = Query(..., description="逗號分隔的 symbol，例：BTC/USDT,ETH/USDT,SOL/USDT"),
+):
+    """v104 Q1+Q2：批次抓多 symbol 的 external_signals 快照。
+
+    用途：使用者一次掃多標的找機會，快速累積 verified predictions 樣本。
+    每個 symbol 一個 snapshot dict，30 分鐘 cache 共用 → 多次呼叫零成本。
+    """
+    from app.core.external_signals import get_signals_snapshot, format_signals_summary
+
+    sym_list = [s.strip() for s in symbols.split(",") if s.strip()]
+    if len(sym_list) > 20:
+        return {"error": "最多 20 個 symbol", "items": []}
+
+    items = []
+    for sym in sym_list:
+        try:
+            snap = get_signals_snapshot(sym)
+            items.append({
+                "symbol": sym,
+                "snapshot": snap,
+                "summary": format_signals_summary(snap),
+            })
+        except Exception as e:
+            items.append({"symbol": sym, "error": str(e)})
+
+    return {"items": items, "count": len(items)}
+
+
 @router.get("/imitation/last_run")
 async def get_last_run_status():
     """讀最近一次 launchd 重訓的執行紀錄（給前端顯示「上次自動重訓何時、結果如何」）。"""

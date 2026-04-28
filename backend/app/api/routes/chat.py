@@ -395,6 +395,24 @@ def _auto_calc_indicator_values(
         except Exception as _rg_err:
             logger.debug(f"regime 分類失敗（不影響主流程）: {_rg_err}")
 
+        # v104 Q1：注入外部訊號快照（funding / OI / 多空比 / Fear&Greed / FRED 總體）
+        try:
+            from app.core.external_signals import get_signals_snapshot, format_signals_summary
+            from app.utils.symbol import is_tw_stock as _is_tw_q1
+            # 只對加密 symbol 抓衍生品；情緒 / 總體對所有資產都適用
+            _signals = get_signals_snapshot(chart_symbol)
+            if _signals and (_signals.get("derivatives") or _signals.get("sentiment") or _signals.get("macro")):
+                chart_state["external_signals"] = _signals
+                chart_state["external_signals_summary"] = format_signals_summary(_signals)
+                logger.info(
+                    f"[external_signals] {chart_symbol} "
+                    f"deriv={len(_signals.get('derivatives') or {})} "
+                    f"sentiment={len(_signals.get('sentiment') or {})} "
+                    f"macro={len(_signals.get('macro') or {})}"
+                )
+        except Exception as _ex_err:
+            logger.debug(f"external_signals 失敗（不影響主流程）: {_ex_err}")
+
         # v103 6A：注入未來 72h 高影響事件（FOMC / CPI / NFP 等）
         try:
             from app.core.event_injector import get_upcoming_events
