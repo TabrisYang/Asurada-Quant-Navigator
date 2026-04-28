@@ -500,6 +500,25 @@ class PredictionTracker:
             )
         """)
 
+        # v103 3A：per-regime 模型支援 — regime 欄位 NULL = all-in-one champion
+        try:
+            self._conn.execute(
+                "ALTER TABLE imitation_model_metrics ADD COLUMN regime TEXT DEFAULT NULL"
+            )
+        except sqlite3.OperationalError:
+            pass
+
+        # v103 4B：SHAP 統計用，每次推論記錄 top features
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS shap_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                logged_at TEXT NOT NULL,
+                model_version INTEGER,
+                regime TEXT,
+                top_features_json TEXT
+            )
+        """)
+
         # quality_gate_log：每週評估的紀錄（Phase 0.9 用）
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS quality_gate_log (

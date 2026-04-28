@@ -37,28 +37,47 @@ def _alpha(n: int) -> float:
 class ImitationPredictor:
     """單例 — 在 module level 載入模型，省每次推論的 IO。"""
 
+    _VALID_REGIMES = ("trending_up", "trending_down", "ranging", "high_vol")
+
     def __init__(self):
         self._loaded_version: Optional[int] = None
+        self._loaded_regime: Optional[str] = None  # v103 3A：標示當前載入的 regime
         self._model = None
         self._plain_model = None
         self._shap_explainer = None
         self._metrics: dict = {}
-        self._reload()
+        self._reload(regime=None)
 
-    def _reload(self) -> None:
-        active = get_active_model()
+    @staticmethod
+    def _extract_regime(chart_state: Optional[dict]) -> Optional[str]:
+        """從 chart_state 萃取 regime label（v103 3A）。"""
+        if not chart_state:
+            return None
+        info = chart_state.get("currentRegime") or {}
+        regime = info.get("type") or info.get("name")
+        if isinstance(regime, str) and regime in ImitationPredictor._VALID_REGIMES:
+            return regime
+        return None
+
+    def _reload(self, regime: Optional[str] = None) -> None:
+        """v103 3A：依 regime 載入對應子模型；找不到則 fallback all-in-one。"""
+        active = get_active_model(regime=regime)
         if not active:
             self._loaded_version = None
+            self._loaded_regime = None
             self._model = None
             return
 
         version = active.get("version")
-        if version == self._loaded_version:
+        used_regime = active.get("regime")  # 實際載入的 regime（fallback 後可能 None）
+
+        if version == self._loaded_version and used_regime == self._loaded_regime:
             return
 
         self._model = active.get("model")
         self._metrics = active.get("metrics") or {}
         self._loaded_version = version
+        self._loaded_regime = used_regime
         # ★ Lazy load SHAP — 不在 _reload 觸發，避免 native lib 同時 init 觸發 segfault
         self._plain_model = None
         self._shap_explainer = None
@@ -68,7 +87,7 @@ class ImitationPredictor:
         if self._shap_explainer is not None or self._loaded_version is None:
             return
         try:
-            self._plain_model = get_plain_model_for_shap(self._loaded_version)
+            self._plain_model = get_plain_model_for_shap(self._loaded_version, regime=self._loaded_regime)
             if self._plain_model is not None:
                 import shap
                 self._shap_explainer = shap.TreeExplainer(self._plain_model)
@@ -79,9 +98,10 @@ class ImitationPredictor:
 
     def predict(self, current_features: dict, chart_state: Optional[dict] = None) -> dict:
         """推論 P(hit_target) + policy + Q-value + SHAP + 衝突。"""
-        # 每次推論前檢查模型有沒有更新（可能剛 retrain 過）
+        # v103 3A：依 chart_state regime 切換對應子模型（找不到自動 fallback all-in-one）
+        target_regime = self._extract_regime(chart_state)
         try:
-            self._reload()
+            self._reload(regime=target_regime)
         except Exception:
             pass
 
@@ -166,6 +186,13 @@ class ImitationPredictor:
         top_features = self._top_shap(current_features) if p_ml is not None else []
         similar_paths = self._knn_similar(current_features) if p_ml is not None else []
 
+        # v103 4B：把 SHAP top features 寫入 shap_log，給 Dashboard 統計用
+        if top_features:
+            try:
+                self._log_shap(top_features, target_regime)
+            except Exception as e:
+                logger.debug(f"SHAP log 寫入失敗（不影響推論）: {e}")
+
         return {
             "policy_distribution": {
                 "buy": round(p_buy, 3),
@@ -180,6 +207,8 @@ class ImitationPredictor:
             "position_multiplier": position_multiplier,
             "mode": mode,
             "model_version": self._loaded_version,
+            "model_regime": self._loaded_regime,  # v103 3A：實際使用的 regime model
+            "regime_requested": target_regime,
             "model_metrics": {
                 "trainset_n": n,
                 "auc": self._metrics.get("auc"),
@@ -193,6 +222,26 @@ class ImitationPredictor:
             "veto_active": veto_active,
             "is_cold_start": mode == "cold_start",
         }
+
+    def _log_shap(self, top_features: list[dict], regime: Optional[str]) -> None:
+        """v103 4B：把每次推論的 SHAP top features 寫入 shap_log（給 Dashboard 統計用）。"""
+        import json
+        from datetime import datetime
+        from app.core.prediction_tracker import prediction_tracker
+
+        prediction_tracker._ensure_db()
+        if not prediction_tracker._conn:
+            return
+        prediction_tracker._conn.execute(
+            "INSERT INTO shap_log (logged_at, model_version, regime, top_features_json) VALUES (?, ?, ?, ?)",
+            (
+                datetime.now().isoformat(),
+                self._loaded_version,
+                regime or self._loaded_regime,
+                json.dumps(top_features, ensure_ascii=False),
+            ),
+        )
+        prediction_tracker._conn.commit()
 
     # ─── 內部 helper ─────────────────────────────────
 
