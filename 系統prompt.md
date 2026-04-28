@@ -1090,6 +1090,41 @@ GET    /api/health                   # 系統健康狀態
     端到端驗證：v4 model trained, lockbox AUC 0.81; Quality Gate 6/7 通過（剩 shadow_4w_hit_rate 等累積 4 週 shadow 數據）；37 個測試全通過（29 既有 + 8 新 v100 regression）；frontend TS clean
     **「永不變壞」量化保證**：使用者目前看到 100% v100 體驗（Quality Gate 嚴格守衛）；累積 4 週 shadow + 第二次重訓後若所有 gate 通過 → 自動啟動 Canary 1%；任何時候 5 分鐘可手動回退到 v100.0 git tag
 
+102. ✅ v102 Subprocess 隔離 — 真正解決 macOS native lib 衝突 segfault（保留 ML 推論能力）：
+    **問題**：v101 一啟用，主 process 同時 import lightgbm + shap + statsmodels + pandas/numpy，macOS 原生 OMP/BLAS lib 衝突導致 chat 期間整個 backend segfault crash。原本以為要回退到 v100 純穩定狀態（喪失 ML 價值）
+    **解法**：[ml_worker.py](backend/app/core/ml_worker.py) + [ml_client.py](backend/app/core/ml_client.py) — 主 process 完全不 import lightgbm/shap，改透過 `subprocess.run` spawn 隔離 worker 跑推論；JSON stdin/stdout 溝通；OMP_NUM_THREADS=1 強制單線程避免內部並發衝突；timeout 30s 保護
+    **v102.1 修正**：subprocess 收到的 features 只有 4 個（其他 35 個被填 0），SHAP 解釋全是「當前 0.0」。改用 [feature_extractor.py](backend/app/core/feature_extractor.py) `extract_features_at` 抽全 39 特徵；prediction-related 欄位用合理 placeholder（entry +5%、stop -3%）給推論
+    主 process 永遠純穩定（不 segfault），ML 推論能力保留 100%；額外成本只有 spawn subprocess 的 ~50ms
+
+103. ✅ v103 完整優化（不付費版，13 項全做）：
+    **動機**：v102 後仍存在多個 user-visible bugs（雙向計劃缺、KNN similarity 全 0、SHAP 跟 LLM 決策脫節）+ 模型品質根本問題（8 策略全 0 trades 訓練資料貧乏）。User 要求「不付費前提下完成全部優化」
+    **Phase 1 報告品質修復（commit 59d1e36）**：
+      - 雙向計劃格式（[function_defs.py](backend/app/core/llm/function_defs.py) CORE 4 種結論卡選擇規則 + [prediction_tracker.py](backend/app/core/prediction_tracker.py) `_BILATERAL_CARD_PATTERN`）：ranging 環境吃掉 90% 觀望場景；schema 加 `is_bilateral` / `bilateral_pair_id`（純加法）；`parse_predictions` 改回傳 list（雙向 = 2 筆）
+      - 「📈 系統參考」placeholder regex 寬鬆化 + accuracy_inject SSE 補打 fallback（[chat.py](backend/app/api/routes/chat.py) + [api.ts](frontend/src/services/api.ts)）
+      - KNN 特徵 StandardScaler 正規化（[imitation_predictor.py](backend/app/core/imitation_predictor.py) `_knn_similar`）：similarity 從全 0 → 0.24-0.30 合理範圍
+      - 30 秒結論段強制第一行（comprehensive_analysis prompt #6.5）
+    **Phase 2 模型品質根本解（commit 23bca68）**：
+      - 8 策略改 dict 格式 + cross_above/cross_below operators + 小數百分比（原本 stop_loss_pct=8.0 被當 800%）→ 每 symbol 86-228 trades（原本全 0），ML 訓練資料品質回穩
+      - bilateral validator（[prediction_validator.py](backend/app/core/prediction_validator.py) `_validate_bilateral`）：先觸碰 entry 的方向走正常 target/stop 驗證；對向標 cancelled_by_pair；兩邊都未觸碰 → 過期一起 expire；race condition + pair 不完整 fallback 防護
+    **Phase 3 模型架構升級（commit ee36c30）**：
+      - per-regime 子模型（[imitation_trainer.py](backend/app/core/imitation_trainer.py) `train_per_regime_models`）：分別訓 trending_up / trending_down / ranging / high_vol；模型存檔加 `_<regime>` suffix；Champion-Challenger 只跟同 regime 比較；imitation_model_metrics 加 `regime` 欄位（NULL = all-in-one）
+      - predictor 依 chart_state.currentRegime 自動切子模型，找不到 fallback all-in-one
+      - 每日 quick drift check（[daily_drift_check.py](backend/scripts/daily_drift_check.py) + launchd 每天 03:00）：短窗 PSI（5d vs 30d），max PSI > 0.20 立刻 force=True retrain，regime shift 反應從 7 天縮到 24h
+      - 新增 shap_log 表（給 Phase 4 用）
+    **Phase 4 Dashboard 增強（commit e7b9bbd）**：
+      - 3 個新 endpoint（`/imitation/auc_history` / `/shap_top_features` / `/divergence_stats`）
+      - PredictionDashboard「🤖 模型狀態」tab 加「📊 模型觀察」區塊：純 SVG sparkline AUC 趨勢（不引 recharts）+ SHAP top features bar + 分歧次數 7d/30d/全期三格卡
+    **Phase 5 策略 + 跨 symbol 視圖（commit f70bc90）**：
+      - `/strategy_performance` 從 regime_stats 推算策略類型勝率（趨勢 / 均值回歸 / 動量突破），標記最強 / 最弱
+      - `/cross_symbol_rs` 用本地 OHLCV 算 BTC-relative return（預設 4h × 30d）
+      - 新 tab「📊 策略績效」雙向 RS bar（中線分多空）
+    **Phase 6 事件 + 資料品質（commit dfc83ff）**：
+      - 經濟日曆（不付費）：[backend/data/calendar/events.json](backend/data/calendar/events.json) 手動維護 + [event_injector.py](backend/app/core/event_injector.py) 注入 chart_state.upcoming_events（72h 內 ≥ medium）；CORE prompt 加事件警示規則（severity=high 在 24h 內 → 強制倉位上限 50%）
+      - OHLCV 資料品質監控（[data_quality_monitor.py](backend/app/core/data_quality_monitor.py)）：5σ outlier 偵測 + 自動去重，寫 data_quality.log；每日跟 drift check 一起跑
+    **Phase 7 收尾（this commit）**：系統prompt.md 加第 102/103 項；37 pytest 全綠；frontend tsc 零錯
+    **設計鐵律**：每個 Phase 獨立 Stop-Safe / schema 純加法 / 不付費（無 Bloomberg / 無 cloud / 無 GPU）/ v100 結論卡格式不變
+    **完成後系統能力**：每份「全部分析」具備真實 SHAP + 真相似路徑 + 雙向計劃 + 30 秒結論 + 事件警示 + per-regime 模型 + Dashboard 完整觀察工具
+
 ### 待開發功能
 
 - ⬜ CI/CD 流程建立
