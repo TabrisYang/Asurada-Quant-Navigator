@@ -101,6 +101,35 @@ async def disable_imitation_endpoint():
     return disable_v101()
 
 
+@router.post("/imitation/force_enable")
+async def force_enable_imitation_endpoint():
+    """強制啟用 v101（跳過 Quality Gate）— 給使用者測試 / 手動啟動 v101 推論用。
+
+    後果：
+    - imitation_learning_enabled = True
+    - imitation_shadow_mode = False
+    - imitation_canary_pct = 100
+    - quality_gate_enabled = False（跳過 7 閾值檢查）
+    使用者「全部分析」會看到 RL 戰略結論段。
+    若要回退：呼叫 /imitation/disable 或在 PredictionDashboard 按「停用 v101」
+    """
+    from app.core.config.settings import settings as _s
+    _s.imitation_learning_enabled = True
+    _s.imitation_shadow_mode = False
+    _s.imitation_canary_pct = 100
+    _s.quality_gate_enabled = False
+    logger.warning("⚠️ v101 強制啟用（跳過 Quality Gate）— 使用者開始看到 RL 戰略結論段")
+    return {
+        "status": "ok",
+        "action": "force_enabled",
+        "learning_enabled": True,
+        "shadow_mode": False,
+        "canary_pct": 100,
+        "quality_gate_enabled": False,
+        "message": "v101 已強制啟用。使用者「全部分析」會看到 🤖 RL 戰略結論段。",
+    }
+
+
 @router.post("/imitation/rollback")
 async def rollback_imitation_endpoint():
     """1-click 回退到 stable_fallback 模型。"""

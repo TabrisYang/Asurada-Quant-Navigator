@@ -779,6 +779,25 @@ export default function PredictionDashboard() {
                 </div>
               )}
 
+              {/* ★ v102：強制啟用 v101（跳過 Quality Gate）*/}
+              <button
+                onClick={async () => {
+                  if (!confirm(
+                    '強制啟用 v101？\n\n' +
+                    '✓ 使用者「全部分析」會看到 🤖 RL 戰略結論段（含 SHAP 解釋 + 路徑類比）\n' +
+                    '✓ 透過 subprocess 隔離（主進程不會 segfault）\n' +
+                    '⚠️ 跳過 Quality Gate 檢查（樣本量 / AUC / Brier 不再強制）\n\n' +
+                    '若要退出：按下方「停用 v101」即可'
+                  )) return;
+                  const res = await fetch('/api/predictions/imitation/force_enable', { method: 'POST' });
+                  const data = await res.json();
+                  alert(`✅ ${data.message}`);
+                  loadImitation();
+                }}
+                className="w-full py-2 rounded text-xs font-medium cursor-pointer mb-2"
+                style={{ background: 'rgba(63,185,80,0.2)', color: '#3fb950', border: '1px solid #3fb950' }}
+              >🚀 強制啟用 v101（讓使用者看到 RL 戰略結論段）</button>
+
               {/* 控制按鈕 */}
               <div className="flex gap-2">
                 <button

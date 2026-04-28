@@ -81,12 +81,11 @@ class Settings(BaseSettings):
     # ═══════════════════════════════════════════════════════════
     imitation_learning_enabled: bool = False     # 主開關（user 端注入）
     imitation_blend_enabled: bool = False         # 動態 blend（rule × ML 權重）
-    # ★ v101 修復：預設 SHADOW=False — chat 流程完全不呼叫 lightgbm/shap，
-    #   避免 native lib（numpy/pandas_ta/statsmodels/sklearn × lightgbm/shap）
-    #   在 macOS Python 3.12 上競爭資源造成 segfault
-    #   → 保留訓練（launchd 獨立進程）+ 特徵記錄（純 SQL，無 native）
-    #   → 未來 v102 加 subprocess 隔離後可再啟用 SHADOW
-    imitation_shadow_mode: bool = False           # 預設 OFF（避免 chat 流程觸發 native 衝突）
+    # ★ v102：subprocess 隔離 — chat 流程透過 ml_client.predict_via_subprocess()
+    #   呼叫獨立 Python process 跑 lightgbm/shap，主進程永不載 ML lib
+    #   → 不再 segfault，可放心開 SHADOW 模式（驗證 subprocess 流程穩定）
+    #   → user 仍看 v100 體驗（imitation_learning_enabled 預設 False）
+    imitation_shadow_mode: bool = True            # subprocess 安全，恢復預設 True
     imitation_canary_pct: int = 0                 # Canary 流量 %（0/1/10/25/50/100）
     quality_gate_enabled: bool = True             # Quality Gate 7 硬閾值（永遠開）
     adversarial_val_enabled: bool = False         # Drift 偵測
