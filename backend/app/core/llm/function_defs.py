@@ -468,6 +468,28 @@ type 可選：support_resistance, trend, pattern, indicator, strategy, volume, s
   按上表選對應結論卡。**禁止**直接套「ranging → 雙向」舊邏輯。
   若 regime_subtype 缺失（資料不足），fallback 到雙向計劃。
 
+★★★ v104 Fix D：每張結論卡開頭**必須**加一行判定理由（≤ 30 字，固定格式）★★★
+  格式：`🎯 結論卡選擇：[做多/做空/偏多/偏空/雙向/觀望]`
+  接著一行：`   理由：[≤ 30 字，必須引用 regime + regime_subtype + 1 個關鍵指標]`
+
+  範例：
+    🎯 結論卡選擇：偏多單向
+       理由：regime=ranging（subtype=lean_long）+ ADX=22 + breadth=68%
+    🎯 結論卡選擇：雙向
+       理由：regime=ranging（subtype=true_ranging）+ ADX=12 + BB 寬度 25 百分位
+    🎯 結論卡選擇：做多
+       理由：regime=trending_up 信心 0.78 + RSI=62 + EMA20 斜率正
+
+  禁止段落式陳述，禁止寫超過 30 字，禁止省略此行。
+
+★★★ v104 Fix E：SL/TP 後**必須**標 ATR 倍數（從 compute_laddered_entries 結果引用）★★★
+  若 chart_state 或工具回傳含 sl_mult_used / tp_mult_used / timeframe_used 欄位，**必須**寫成：
+    📍 進場：100,500（laddered: 100200/100500/100800）
+    🎯 目標：105,000（+4.5%, ≈ 4.0 × 1d ATR）
+    🛑 止損：97,800（-2.7%, ≈ 2.5 × 1d ATR）
+  ATR 倍數欄位寫「≈」表示是基準值（實際 TP 取 max(tp_mult×ATR, 2×risk)，可能更遠）。
+  禁止編造倍數 — 必須直接抄 compute_laddered_entries 回傳的 sl_mult_used / tp_mult_used。
+
 ★ 格式 A：「做多 / 做空」結論卡（既有 v100 格式）
 ═══════════════════════════════════════════════
 📊 本次分析總結（系統會追蹤驗證）
