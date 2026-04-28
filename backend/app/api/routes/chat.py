@@ -2567,6 +2567,25 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
         except Exception as e:
             logger.warning(f"accuracy 注入失敗（不影響主流程）：{e}")
 
+        # 4c-2. v104 Q3：LLM 數值編造偵測（fact-checker）
+        try:
+            if final_text and request.chart_state:
+                from app.core.fact_checker import check_text_against_chart_state
+                fc = check_text_against_chart_state(final_text, request.chart_state)
+                if fc.get("checked_count", 0) > 0:
+                    yield _sse_event("fact_check", {
+                        "checked_count": fc["checked_count"],
+                        "mismatches": fc["mismatches"],
+                        "summary": fc["summary"],
+                    })
+                    if fc["mismatches"]:
+                        logger.warning(
+                            f"[fact_check] {len(fc['mismatches'])} mismatches in final_text "
+                            f"(checked {fc['checked_count']})"
+                        )
+        except Exception as _fc_err:
+            logger.debug(f"fact_check 失敗（不影響主流程）: {_fc_err}")
+
         # 4d. v103 Phase 2B：用 LLM 產出的真實 entry/target/stop 重做 ML 推論
         # 初始推論用 placeholder（current+5%/-3%），這裡用真實值算 refined SHAP，前端 append 一行
         try:

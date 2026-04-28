@@ -708,6 +708,20 @@ export default function ChatInterface() {
           );
           updateMessage(assistantMsgId, { content: replaced });
         },
+        // v104 Q3：LLM 數值編造偵測 — 有 mismatch 時附加紅色警示區塊到訊息底部
+        onFactCheck: (data) => {
+          if (!data.mismatches || data.mismatches.length === 0) return;
+          const currentMsg = useChartStore.getState().messages.find(m => m.id === assistantMsgId);
+          if (!currentMsg) return;
+          if (String(currentMsg.content || '').includes('🚨 **系統數值核對**')) return;
+
+          const lines = data.mismatches.slice(0, 5).map((m) => {
+            const label = m.name ? `${m.type}/${m.name}` : m.type;
+            return `  - **${label}**：報告寫 \`${m.claimed}\`，實際值 \`${m.actual}\`\n    片段：${m.snippet}`;
+          });
+          const note = `\n\n---\n🚨 **系統數值核對**：報告中 ${data.mismatches.length} 處數字跟即時資料不一致，請以下列實際值為準：\n${lines.join('\n')}`;
+          updateMessage(assistantMsgId, { content: String(currentMsg.content || '') + note });
+        },
         // v103 Phase 2B：refined SHAP（基於真實 entry/target/stop）
         onShapRefine: (data) => {
           if (!data.top_features?.length) return;

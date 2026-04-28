@@ -258,6 +258,24 @@ chart_state 中的 indicatorValues 包含系統精確計算的指標數值（最
     * regime='trending_up' confidence>0.7 → 主趨勢明確上升，跟趨勢策略（趨勢跟蹤、動量突破）的回測結果可信，逆勢策略（均值回歸做空）的結果不該採信
     * regime='ranging' → 震盪盤整中，均值回歸類策略表現可信，趨勢類策略結果不該採信（剛好處於對它們不利的環境）
     * regime='unknown' → 系統無法明確判斷，建議使用者觀望
+【★★★ v104 Q3：數值引用鐵律（系統會 fact-check） ★★★】
+寫到報告裡的所有「具體數字」（RSI 65、funding -0.005%、命中率 60%、多空比 1.2、F&G 33 等）**必須**滿足下列其中之一：
+1. **直接引用 chart_state 中的欄位**：indicatorValues / external_signals / recent_accuracy / currentRegime / rl_strategic_insight
+2. **來自工具回傳結果**：run_backtest / compare_strategies / get_indicator_value / get_advanced_indicator
+3. **基於上述兩類進行的明確算式**（且必須說明算式，例：「RSI 65 比 30 天均值 50 高 30%」可保留，但 30% 必須是計算出來不是猜的）
+
+若你寫了具體數字但 chart_state 沒有對應值且沒有工具來源 → 該數字會被系統標為「編造」並警示使用者。
+**寧願寫文字描述（「動量強勁」「波動率偏低」）也不要編造具體數字**。
+範圍敘述（「RSI 在 60-70 區」）若 chart_state 有對應值且實際值落在區間內，OK；若沒有、或實際值不在區間內 → 系統會標 mismatch。
+
+容忍度（系統檢查時會放寬）：
+- 指標值 ±10% 相對誤差
+- funding 絕對 ±0.05%
+- 多空比 ±0.2
+- Fear&Greed ±5
+- 命中率 ±5%
+超出容忍度 → fact_check 警示。
+
 - 若 chart_state 中有 `external_signals`（v104 Q1：funding / OI / 多空比 / Fear&Greed / 總體），你**必須**：
     1. 在「📊 市場環境」段直接引用 funding_rate / OI 24h 變化 / 多空比，**禁止編造**
     2. **極端訊號自動警示**：

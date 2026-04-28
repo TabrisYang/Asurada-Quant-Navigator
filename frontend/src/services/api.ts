@@ -139,6 +139,18 @@ export interface StreamCallbacks {
   onDone?: (conversationId?: string, hints?: Record<string, unknown>) => void;
   // v100：結論卡「📈 系統參考」由系統替換為實際命中率
   onAccuracyInject?: (data: { old_pattern: string; new_text: string }) => void;
+  // v104 Q3：LLM 數值編造偵測結果
+  onFactCheck?: (data: {
+    checked_count: number;
+    mismatches: Array<{
+      type: string;
+      name?: string;
+      claimed: number;
+      actual: number;
+      snippet: string;
+    }>;
+    summary: string;
+  }) => void;
   // v103 Phase 2B：用真實 entry/target/stop 重做 ML 推論的 refined SHAP
   onShapRefine?: (data: {
     top_features: Array<{ name: string; shap: number; value: number; direction: string }>;
@@ -384,6 +396,9 @@ function _handleSSEEvent(
       break;
     case 'shap_refine':
       callbacks.onShapRefine?.(data as unknown as Parameters<NonNullable<StreamCallbacks['onShapRefine']>>[0]);
+      break;
+    case 'fact_check':
+      callbacks.onFactCheck?.(data as unknown as Parameters<NonNullable<StreamCallbacks['onFactCheck']>>[0]);
       break;
     default:
       break;
