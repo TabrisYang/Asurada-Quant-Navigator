@@ -1,0 +1,52 @@
+{
+  "_meta": {
+    "version": 1,
+    "last_updated": "2026-04-28",
+    "maintainer": "manual (no paid subscription)",
+    "instructions": "Add upcoming high-impact events here. Severity: high (always warn) / medium (warn ≤24h) / low (info only)."
+  },
+  "events": [
+    {
+      "date": "2026-05-07",
+      "time_utc": "18:00",
+      "name": "FOMC Rate Decision (May)",
+      "category": "macro",
+      "severity": "high",
+      "scope": "all_crypto,equities",
+      "note": "rate decision + Powell press conference"
+    },
+    {
+      "date": "2026-05-13",
+      "time_utc": "12:30",
+      "name": "US CPI (April)",
+      "category": "macro",
+      "severity": "high",
+      "scope": "all_crypto,equities",
+      "note": "core inflation print"
+    },
+    {
+      "date": "2026-05-02",
+      "time_utc": "12:30",
+      "name": "Non-Farm Payrolls (April)",
+      "category": "macro",
+      "severity": "high",
+      "scope": "all_crypto,equities"
+    },
+    {
+      "date": "2026-04-30",
+      "time_utc": "12:30",
+      "name": "US GDP Q1 Advance",
+      "category": "macro",
+      "severity": "medium",
+      "scope": "all_crypto,equities"
+    },
+    {
+      "date": "2026-06-18",
+      "time_utc": "18:00",
+      "name": "FOMC Rate Decision (June) + Dot Plot",
+      "category": "macro",
+      "severity": "high",
+      "scope": "all_crypto,equities"
+    }
+  ]
+}

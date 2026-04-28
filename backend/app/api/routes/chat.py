@@ -395,6 +395,18 @@ def _auto_calc_indicator_values(
         except Exception as _rg_err:
             logger.debug(f"regime 分類失敗（不影響主流程）: {_rg_err}")
 
+        # v103 6A：注入未來 72h 高影響事件（FOMC / CPI / NFP 等）
+        try:
+            from app.core.event_injector import get_upcoming_events
+            from app.utils.symbol import is_tw_stock as _is_tw
+            scope = "equities" if _is_tw(symbol) else "crypto"
+            events = get_upcoming_events(within_hours=72, min_severity="medium", scope_match=scope)
+            if events:
+                chart_state["upcoming_events"] = events
+                logger.info(f"[event_injector] 注入 {len(events)} 筆 72h 內事件 (scope={scope})")
+        except Exception as _ev_err:
+            logger.debug(f"event_injector 失敗（不影響主流程）: {_ev_err}")
+
         # 注入跨股票群體訊號（台股 + 加密）：給 LLM 看到所屬集合 + 龍頭 + breadth
         try:
             from app.utils.symbol import is_tw_stock

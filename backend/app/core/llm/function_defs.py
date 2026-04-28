@@ -258,6 +258,10 @@ chart_state 中的 indicatorValues 包含系統精確計算的指標數值（最
     * regime='trending_up' confidence>0.7 → 主趨勢明確上升，跟趨勢策略（趨勢跟蹤、動量突破）的回測結果可信，逆勢策略（均值回歸做空）的結果不該採信
     * regime='ranging' → 震盪盤整中，均值回歸類策略表現可信，趨勢類策略結果不該採信（剛好處於對它們不利的環境）
     * regime='unknown' → 系統無法明確判斷，建議使用者觀望
+- 若 chart_state 中有 `upcoming_events`（v103 6A：未來 72h 高影響事件清單），你**必須**：
+    1. 在報告開頭「⚡ 30 秒結論」區段下方加一行「⚠️ 事件警示：[事件名] 在 [N]h 後（[severity]）」
+    2. 若有任何 severity=high 事件距今 ≤ 24h，**強制**將「建議倉位」上限降到 50% 並寫明原因
+    3. 提醒使用者：「事件公布前後波動可能異常放大，建議關閉自動跟單或縮小手動倉位」
 - 若 chart_state 中有 regimeWarning（regime 信心過低警告），你**必須**：
     1. 開頭顯眼處警示：「⚠️ 系統目前處於低信心狀態（regime confidence X%），所有策略建議僅供參考」
     2. 所有「建議倉位」自動 × auto_position_multiplier（通常 0.5）

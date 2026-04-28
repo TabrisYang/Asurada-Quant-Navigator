@@ -165,6 +165,25 @@ def main():
     else:
         print("✅ 穩定，不需 retrain")
 
+    # v103 6B+6C：順便跑資料品質檢查（outlier + 重複偵測）
+    try:
+        from app.core.data_quality_monitor import run_full_check
+        dq = run_full_check(sigma=5.0, auto_dedupe=True)
+        status["data_quality"] = {
+            "checked": dq.get("checked", 0),
+            "total_outliers": dq.get("total_outliers", 0),
+            "total_dupes_removed": dq.get("total_dupes_removed", 0),
+        }
+        print(f"\n資料品質：檢查 {dq.get('checked',0)} 檔 | outliers={dq.get('total_outliers',0)} | dupes 已移除={dq.get('total_dupes_removed',0)}")
+        if dq.get("total_outliers", 0) > 0 or dq.get("total_dupes_removed", 0) > 0:
+            _notify(
+                "📊 資料品質警示",
+                f"outliers={dq.get('total_outliers',0)} | dupes={dq.get('total_dupes_removed',0)}（log: data_quality.log）",
+            )
+    except Exception as e:
+        print(f"資料品質檢查失敗（不影響主流程）：{e}")
+        status["data_quality"] = {"error": str(e)}
+
     _STATUS_JSON.write_text(json.dumps(status, ensure_ascii=False, indent=2, default=str))
     elapsed = (datetime.now() - started).total_seconds()
     print(f"\n完成（{elapsed:.1f}s）")
