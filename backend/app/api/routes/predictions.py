@@ -144,6 +144,112 @@ async def evaluate_quality_gate_endpoint():
     return evaluate_v101_readiness()
 
 
+@router.get("/imitation/auc_history")
+async def get_auc_history(limit: int = Query(12, ge=1, le=50)):
+    """v103 4A：取最近 N 次訓練的 lockbox_auc + oof_auc，給 Dashboard 畫趨勢線。
+
+    回傳 list 由舊到新，每筆含 version / trained_at / lockbox_auc / oof_auc / status / regime。
+    """
+    from app.core.prediction_tracker import prediction_tracker
+    prediction_tracker._ensure_db()
+    if not prediction_tracker._conn:
+        return {"items": []}
+    rows = prediction_tracker._conn.execute(
+        """SELECT version, trained_at, lockbox_auc, auc, status, regime
+           FROM imitation_model_metrics
+           WHERE status IN ('activated', 'rejected_overfit', 'rejected_lockbox_random', 'skipped_low_improvement')
+           ORDER BY version DESC LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    items = [
+        {
+            "version": r[0],
+            "trained_at": r[1],
+            "lockbox_auc": r[2],
+            "oof_auc": r[3],
+            "status": r[4],
+            "regime": r[5],
+        }
+        for r in reversed(rows)  # 由舊到新
+    ]
+    return {"items": items}
+
+
+@router.get("/imitation/shap_top_features")
+async def get_shap_top_features(days: int = Query(30, ge=1, le=365)):
+    """v103 4B：聚合最近 N 天的 SHAP top features 出現次數。
+
+    從 shap_log 表抓，依出現次數排序回傳。給 Dashboard 畫 bar chart。
+    """
+    import json
+    from datetime import datetime, timedelta
+    from app.core.prediction_tracker import prediction_tracker
+    prediction_tracker._ensure_db()
+    if not prediction_tracker._conn:
+        return {"items": [], "total_logs": 0}
+
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+    rows = prediction_tracker._conn.execute(
+        "SELECT top_features_json FROM shap_log WHERE logged_at >= ?",
+        (cutoff,),
+    ).fetchall()
+    counts: dict[str, int] = {}
+    total = 0
+    for (raw,) in rows:
+        if not raw:
+            continue
+        total += 1
+        try:
+            features = json.loads(raw)
+            for f in features:
+                name = f.get("name")
+                if name:
+                    counts[name] = counts.get(name, 0) + 1
+        except Exception:
+            continue
+    items = [{"name": k, "count": v} for k, v in counts.items()]
+    items.sort(key=lambda x: x["count"], reverse=True)
+    return {"items": items[:20], "total_logs": total, "days": days}
+
+
+@router.get("/imitation/divergence_stats")
+async def get_divergence_stats():
+    """v103 4C：模型 vs 規則分歧次數統計（|p_ml - p_rule| > 0.2）。
+
+    回傳最近 7 天 / 30 天 / 全期分歧筆數 + 比例。
+    """
+    from datetime import datetime, timedelta
+    from app.core.prediction_tracker import prediction_tracker
+    prediction_tracker._ensure_db()
+    if not prediction_tracker._conn:
+        return {"error": "DB 未初始化"}
+
+    now = datetime.now()
+    cutoffs = {
+        "7d": (now - timedelta(days=7)).isoformat(),
+        "30d": (now - timedelta(days=30)).isoformat(),
+        "all": "1970-01-01",
+    }
+
+    out: dict[str, dict] = {}
+    for label, cutoff in cutoffs.items():
+        row = prediction_tracker._conn.execute(
+            """SELECT COUNT(*) AS total,
+                      SUM(CASE WHEN ABS(COALESCE(v101_p_ml,0) - COALESCE(v101_p_rule,0)) > 0.2 THEN 1 ELSE 0 END) AS divergent
+               FROM shadow_predictions
+               WHERE created_at >= ?""",
+            (cutoff,),
+        ).fetchone()
+        total = row[0] or 0
+        divergent = row[1] or 0
+        out[label] = {
+            "total": int(total),
+            "divergent": int(divergent),
+            "ratio": round(divergent / total, 3) if total > 0 else 0.0,
+        }
+    return out
+
+
 @router.get("/imitation/last_run")
 async def get_last_run_status():
     """讀最近一次 launchd 重訓的執行紀錄（給前端顯示「上次自動重訓何時、結果如何」）。"""

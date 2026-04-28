@@ -57,6 +57,11 @@ export default function PredictionDashboard() {
   const [imitationStatus, setImitationStatus] = useState<any>(null);
   const [imitationLoading, setImitationLoading] = useState(false);
 
+  // ★ v103 4：Dashboard 觀察工具（AUC 趨勢 / SHAP 統計 / 分歧）
+  const [aucHistory, setAucHistory] = useState<any[]>([]);
+  const [shapTopFeatures, setShapTopFeatures] = useState<{ items: { name: string; count: number }[]; total_logs: number; days: number } | null>(null);
+  const [divergenceStats, setDivergenceStats] = useState<any>(null);
+
   // 情境預測
   const [scenarioData, setScenarioData] = useState<any>(null);
   const [scenarioLoading, setScenarioLoading] = useState(false);
@@ -173,12 +178,36 @@ export default function PredictionDashboard() {
     finally { setImitationLoading(false); }
   }, []);
 
+  // ★ v103 4：Dashboard 觀察工具（AUC 趨勢 / SHAP 統計 / 分歧）
+  const loadImitationObservatory = useCallback(async () => {
+    try {
+      const [aucRes, shapRes, divRes] = await Promise.all([
+        fetch('/api/predictions/imitation/auc_history?limit=12'),
+        fetch('/api/predictions/imitation/shap_top_features?days=30'),
+        fetch('/api/predictions/imitation/divergence_stats'),
+      ]);
+      const aucData = await aucRes.json();
+      const shapData = await shapRes.json();
+      const divData = await divRes.json();
+      setAucHistory(aucData.items ?? []);
+      setShapTopFeatures(shapData ?? null);
+      setDivergenceStats(divData ?? null);
+    } catch {
+      setAucHistory([]); setShapTopFeatures(null); setDivergenceStats(null);
+    }
+  }, []);
+
   useEffect(() => { loadData(); }, [loadData]);
   useEffect(() => { if (viewTab === 'scenarios') loadScenarios(); }, [viewTab, loadScenarios]);
   useEffect(() => { if (viewTab === 'adjustments') loadAdjustments(); }, [viewTab, loadAdjustments]);
   useEffect(() => { if (viewTab === 'reviews') loadReviews(); }, [viewTab, loadReviews]);
   useEffect(() => { if (viewTab === 'calibration') loadCalibration(); }, [viewTab, loadCalibration]);
-  useEffect(() => { if (viewTab === 'imitation') loadImitation(); }, [viewTab, loadImitation]);
+  useEffect(() => {
+    if (viewTab === 'imitation') {
+      loadImitation();
+      loadImitationObservatory();
+    }
+  }, [viewTab, loadImitation, loadImitationObservatory]);
 
   const handleSaveNote = async (predId: number) => {
     setSavingNote(true);
@@ -778,6 +807,108 @@ export default function PredictionDashboard() {
                   🛟 Stable Fallback v{imitationStatus.stable_fallback.version}（AUC {imitationStatus.stable_fallback.lockbox_auc?.toFixed(3)}）
                 </div>
               )}
+
+              {/* ★ v103 4：模型觀察工具 */}
+              <div className="p-3 rounded text-xs space-y-3" style={{ background: 'var(--bg-secondary)' }}>
+                <div className="font-medium" style={{ color: 'var(--accent-blue)' }}>📊 模型觀察（v103）</div>
+
+                {/* 4A：AUC 趨勢 sparkline */}
+                <div>
+                  <div className="mb-1" style={{ color: 'var(--text-secondary)' }}>
+                    Lockbox AUC 趨勢（最近 {aucHistory.length} 次訓練）
+                  </div>
+                  {aucHistory.length === 0 ? (
+                    <div style={{ color: 'var(--text-secondary)' }}>尚無訓練紀錄</div>
+                  ) : (
+                    (() => {
+                      const W = 280, H = 50, P = 4;
+                      const vals = aucHistory.map(p => Number(p.lockbox_auc) || 0.5);
+                      const minV = Math.min(0.4, ...vals);
+                      const maxV = Math.max(0.8, ...vals);
+                      const range = Math.max(0.01, maxV - minV);
+                      const pts = vals.map((v, i) => {
+                        const x = P + (i * (W - 2 * P)) / Math.max(1, vals.length - 1);
+                        const y = H - P - ((v - minV) / range) * (H - 2 * P);
+                        return `${x.toFixed(1)},${y.toFixed(1)}`;
+                      }).join(' ');
+                      const last = vals[vals.length - 1];
+                      const first = vals[0];
+                      const delta = last - first;
+                      return (
+                        <div>
+                          <svg width={W} height={H} style={{ display: 'block' }}>
+                            <line x1={P} y1={H / 2} x2={W - P} y2={H / 2} stroke="var(--text-secondary)" strokeOpacity="0.2" strokeDasharray="2 2" />
+                            <polyline points={pts} fill="none" stroke="var(--accent-blue)" strokeWidth="1.5" />
+                            {vals.map((v, i) => {
+                              const x = P + (i * (W - 2 * P)) / Math.max(1, vals.length - 1);
+                              const y = H - P - ((v - minV) / range) * (H - 2 * P);
+                              return <circle key={i} cx={x} cy={y} r="2" fill="var(--accent-blue)" />;
+                            })}
+                          </svg>
+                          <div className="mt-1" style={{ color: 'var(--text-secondary)' }}>
+                            起點 {first.toFixed(3)} → 最新 {last.toFixed(3)}（
+                            <span style={{ color: delta >= 0 ? '#3fb950' : '#f85149' }}>{delta >= 0 ? '+' : ''}{delta.toFixed(3)}</span>
+                            ）
+                          </div>
+                        </div>
+                      );
+                    })()
+                  )}
+                </div>
+
+                {/* 4B：SHAP top features 統計 */}
+                <div>
+                  <div className="mb-1" style={{ color: 'var(--text-secondary)' }}>
+                    過去 {shapTopFeatures?.days ?? 30} 天最常被引用 feature（共 {shapTopFeatures?.total_logs ?? 0} 次推論）
+                  </div>
+                  {!shapTopFeatures || shapTopFeatures.items.length === 0 ? (
+                    <div style={{ color: 'var(--text-secondary)' }}>尚無 SHAP 紀錄</div>
+                  ) : (
+                    <div className="space-y-1">
+                      {shapTopFeatures.items.slice(0, 8).map((it) => {
+                        const max = shapTopFeatures.items[0].count || 1;
+                        const pct = (it.count / max) * 100;
+                        return (
+                          <div key={it.name} className="flex items-center gap-2">
+                            <span className="font-mono" style={{ width: 110, fontSize: 10 }}>{it.name}</span>
+                            <div style={{ flex: 1, height: 8, background: 'var(--bg-tertiary)', borderRadius: 2, overflow: 'hidden' }}>
+                              <div style={{ width: `${pct}%`, height: '100%', background: 'var(--accent-blue)' }} />
+                            </div>
+                            <span className="font-mono" style={{ width: 24, textAlign: 'right' }}>{it.count}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {/* 4C：模型 vs 規則分歧次數 */}
+                <div>
+                  <div className="mb-1" style={{ color: 'var(--text-secondary)' }}>
+                    ML vs 規則分歧次數（|p_ml - p_rule| &gt; 0.2）
+                  </div>
+                  {!divergenceStats ? (
+                    <div style={{ color: 'var(--text-secondary)' }}>無資料</div>
+                  ) : (
+                    <div className="grid grid-cols-3 gap-2">
+                      {(['7d', '30d', 'all'] as const).map((k) => {
+                        const s = divergenceStats[k];
+                        if (!s) return null;
+                        const pct = ((s.ratio || 0) * 100).toFixed(1);
+                        return (
+                          <div key={k} className="p-2 rounded" style={{ background: 'var(--bg-tertiary)' }}>
+                            <div style={{ color: 'var(--text-secondary)' }}>{k === 'all' ? '全期' : k}</div>
+                            <div className="font-mono" style={{ color: 'var(--accent-blue)' }}>
+                              {s.divergent} / {s.total}
+                            </div>
+                            <div style={{ color: 'var(--text-secondary)' }}>{pct}%</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
 
               {/* ★ v102：強制啟用 v101（跳過 Quality Gate）*/}
               <button
