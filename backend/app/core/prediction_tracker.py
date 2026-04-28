@@ -463,6 +463,20 @@ class PredictionTracker:
             )
         """)
 
+        # v104 Q4：prediction_features 加 8 個 lag column（純加法）
+        for col_name in [
+            "rsi_14_lag5", "rsi_14_change_5",
+            "macd_hist_lag5", "macd_hist_change_5",
+            "close_return_5", "close_return_20",
+            "volatility_change_30", "trend_persistence",
+        ]:
+            try:
+                self._conn.execute(
+                    f"ALTER TABLE prediction_features ADD COLUMN {col_name} REAL"
+                )
+            except sqlite3.OperationalError:
+                pass  # 欄位已存在
+
         # shadow_predictions：v101 在 SHADOW MODE 期間偷跑的預測（不給使用者看，用來驗證）
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS shadow_predictions (

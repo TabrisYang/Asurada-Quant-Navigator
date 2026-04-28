@@ -49,21 +49,37 @@ FEATURE_COLUMNS = [
     "recent_30d_winrate", "recent_n", "calibration_brier",
 ]
 
+# v104 Q4：序列性 lag features（純加法、暫不進 FEATURE_COLUMNS，避免破壞 39-特徵模型）
+# 寫進 DB 累積，下次 train_imitation_model(use_lag=True) 才併入。
+LAG_FEATURE_COLUMNS = [
+    "rsi_14_lag5",          # 5 根 K 線前的 RSI
+    "rsi_14_change_5",      # RSI 5 根變化（鈍化 / 加速）
+    "macd_hist_lag5",       # MACD hist 5 根前
+    "macd_hist_change_5",   # MACD hist 變化（動能轉折）
+    "close_return_5",       # 5 根累計報酬 %
+    "close_return_20",      # 20 根累計報酬 %
+    "volatility_change_30", # 30 根波動率變化（vs 60 根前）
+    "trend_persistence",    # 連續同方向 K 線數（突破延續性）
+]
+
+# 完整 schema（schema migration / 全特徵訓練用）
+ALL_FEATURE_COLUMNS = FEATURE_COLUMNS + LAG_FEATURE_COLUMNS
+
 
 def extract_features_at(
     df: pd.DataFrame,
     chart_state: Optional[dict],
     prediction: dict,
 ) -> dict:
-    """從 OHLCV df + 可選的 chart_state + 預測本身 抽 39 個特徵。
+    """從 OHLCV df + 可選的 chart_state + 預測本身 抽特徵。
 
     df 應該是預測時點以前的歷史 K 線（不含未來）。
     chart_state 可選 — 若有就優先用，否則從 df 重算。
     prediction 必含 entry_price / target_price / stop_price / direction / confidence / timeframe_hours。
 
-    回傳 dict（39 個 key），失敗欄位用 None 填。
+    回傳 dict（FEATURE_COLUMNS + LAG_FEATURE_COLUMNS 全 key），失敗欄位用 None 填。
     """
-    features: dict = {col: None for col in FEATURE_COLUMNS}
+    features: dict = {col: None for col in ALL_FEATURE_COLUMNS}
 
     if df is None or df.empty or len(df) < 30:
         return features
@@ -228,6 +244,65 @@ def extract_features_at(
     except Exception:
         pass
 
+    # ─── v104 Q4：lag features（序列性，累積進 DB 等下次訓練啟用）───
+    try:
+        # RSI lag + change
+        rsi_calc = _calc_indicator(df, "rsi", {"period": 14})
+        if rsi_calc:
+            rsi_series = rsi_calc.get("RSI") or rsi_calc.get("rsi") or []
+            valid = [v for v in rsi_series if v is not None]
+            if len(valid) >= 6:
+                features["rsi_14_lag5"] = float(valid[-6])
+                if features["rsi_14"] is not None:
+                    features["rsi_14_change_5"] = float(features["rsi_14"] - valid[-6])
+
+        # MACD hist lag + change
+        macd_calc2 = _calc_indicator(df, "macd")
+        if macd_calc2:
+            hist_series = macd_calc2.get("MACD_Hist") or macd_calc2.get("Histogram") or []
+            valid = [v for v in hist_series if v is not None]
+            if len(valid) >= 6:
+                features["macd_hist_lag5"] = float(valid[-6])
+                if features["macd_hist"] is not None:
+                    features["macd_hist_change_5"] = float(features["macd_hist"] - valid[-6])
+
+        # 累計報酬
+        if len(df) >= 21:
+            c_now = float(df["close"].iloc[-1])
+            c_5 = float(df["close"].iloc[-6])
+            c_20 = float(df["close"].iloc[-21])
+            if c_5 > 0:
+                features["close_return_5"] = (c_now - c_5) / c_5 * 100
+            if c_20 > 0:
+                features["close_return_20"] = (c_now - c_20) / c_20 * 100
+
+        # 波動率變化（最近 30 vs 之前 30）
+        if len(df) >= 60:
+            ret = df["close"].pct_change().dropna()
+            recent_vol = float(ret.tail(30).std())
+            prev_vol = float(ret.iloc[-60:-30].std())
+            if prev_vol > 0:
+                features["volatility_change_30"] = (recent_vol - prev_vol) / prev_vol * 100
+
+        # 趨勢延續性（連續同方向 K 線數）
+        if len(df) >= 5:
+            closes = df["close"].tail(20).values
+            persist = 0
+            last_dir = 0  # +1 / -1
+            for i in range(len(closes) - 1, 0, -1):
+                d = 1 if closes[i] > closes[i - 1] else -1 if closes[i] < closes[i - 1] else 0
+                if d == 0:
+                    break
+                if last_dir == 0:
+                    last_dir = d
+                if d == last_dir:
+                    persist += 1
+                else:
+                    break
+            features["trend_persistence"] = float(persist * last_dir) if last_dir else 0.0
+    except Exception as e:
+        logger.debug(f"lag features 計算失敗（不影響主流程）: {e}")
+
     return features
 
 
@@ -247,22 +322,41 @@ def record_features(prediction_id: int, df: pd.DataFrame, chart_state: Optional[
 
 
 def _insert_to_db(prediction_id: int, features: dict, source: str) -> None:
-    """寫入 prediction_features 表（INSERT OR REPLACE 容忍重複）。"""
+    """寫入 prediction_features 表（INSERT OR REPLACE 容忍重複）。
+
+    v104 Q4：寫全 ALL_FEATURE_COLUMNS（含 lag），但容忍 schema 還沒 migrate 的舊環境
+    （IntegrityError fallback 只寫 39 主特徵）。
+    """
     if not prediction_tracker._conn:
         return
 
-    cols = ["prediction_id"] + FEATURE_COLUMNS + ["snapshot_at", "source"]
-    values = [prediction_id] + [features.get(c) for c in FEATURE_COLUMNS] + [
+    full_cols = ["prediction_id"] + ALL_FEATURE_COLUMNS + ["snapshot_at", "source"]
+    full_values = [prediction_id] + [features.get(c) for c in ALL_FEATURE_COLUMNS] + [
         datetime.now().isoformat(), source,
     ]
-    placeholders = ", ".join("?" * len(cols))
-    cols_sql = ", ".join(cols)
+    placeholders = ", ".join("?" * len(full_cols))
+    cols_sql = ", ".join(full_cols)
 
-    prediction_tracker._conn.execute(
-        f"INSERT OR REPLACE INTO prediction_features ({cols_sql}) VALUES ({placeholders})",
-        values,
-    )
-    prediction_tracker._conn.commit()
+    try:
+        prediction_tracker._conn.execute(
+            f"INSERT OR REPLACE INTO prediction_features ({cols_sql}) VALUES ({placeholders})",
+            full_values,
+        )
+        prediction_tracker._conn.commit()
+    except Exception as e:
+        # Fallback：lag column 還沒 migrate 時，只寫 39 主特徵
+        logger.debug(f"_insert_to_db 全特徵失敗，fallback 39 主特徵: {e}")
+        cols = ["prediction_id"] + FEATURE_COLUMNS + ["snapshot_at", "source"]
+        values = [prediction_id] + [features.get(c) for c in FEATURE_COLUMNS] + [
+            datetime.now().isoformat(), source,
+        ]
+        placeholders = ", ".join("?" * len(cols))
+        cols_sql = ", ".join(cols)
+        prediction_tracker._conn.execute(
+            f"INSERT OR REPLACE INTO prediction_features ({cols_sql}) VALUES ({placeholders})",
+            values,
+        )
+        prediction_tracker._conn.commit()
 
 
 # ─── helper ───────────────────────────────────────────────

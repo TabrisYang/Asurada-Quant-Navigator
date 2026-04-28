@@ -29,7 +29,7 @@ from sklearn.metrics import brier_score_loss, roc_auc_score
 
 import lightgbm as lgb
 
-from app.core.feature_extractor import FEATURE_COLUMNS
+from app.core.feature_extractor import FEATURE_COLUMNS, LAG_FEATURE_COLUMNS, ALL_FEATURE_COLUMNS
 from app.core.prediction_tracker import prediction_tracker
 
 _MODELS_DIR = Path(__file__).resolve().parents[2] / "models"
@@ -40,21 +40,22 @@ def train_imitation_model(
     min_samples: int = 50,
     force: bool = False,
     regime: Optional[str] = None,
+    use_lag: bool = False,
 ) -> dict:
     """訓練 v101 LightGBM 模仿學習模型。
 
     Args:
-        regime: v103 3A — 若指定則只訓練該 regime 的子模型（trending_up / trending_down /
-                ranging / high_vol）。None = 訓練 all-in-one champion（不限 regime）。
+        regime: v103 3A — 若指定則只訓練該 regime 的子模型。
+        use_lag: v104 Q4 — True 時併入 LAG_FEATURE_COLUMNS（47 特徵）；
+                 False 維持 39 特徵（跟既有 model.pkl 相容）。
+                 預設 False，等樣本累積到 50+ 再開啟。
 
     Returns:
-        dict 含 status / metrics 等。status:
-        - "insufficient_samples"
-        - "rejected_overfit" / "rejected_lockbox_random"
-        - "skipped_low_improvement" / "activated"
+        dict 含 status / metrics 等。
     """
     df = _load_training_data(regime=regime)
     n = len(df)
+    feature_cols = ALL_FEATURE_COLUMNS if use_lag else FEATURE_COLUMNS
 
     if n < min_samples and not force:
         return {"status": "insufficient_samples", "n": n, "needed": min_samples}
@@ -69,10 +70,14 @@ def train_imitation_model(
         return {"status": "insufficient_samples", "n": n, "note": "Lockbox 切分後樣本不足"}
 
     # 強制所有特徵欄位轉 float（容忍 None / NaN）
+    # 容忍 schema 還沒 lag column → 缺 column 自動填 0
     def _to_float_df(d: pd.DataFrame) -> pd.DataFrame:
-        out = d[FEATURE_COLUMNS].copy()
-        for col in FEATURE_COLUMNS:
-            out[col] = pd.to_numeric(out[col], errors="coerce")
+        out = pd.DataFrame()
+        for col in feature_cols:
+            if col in d.columns:
+                out[col] = pd.to_numeric(d[col], errors="coerce")
+            else:
+                out[col] = 0.0
         return out.fillna(0).astype(float)
 
     X_train = _to_float_df(train_df)
@@ -229,7 +234,7 @@ def train_imitation_model(
         joblib.dump(plain_base, _MODELS_DIR / f"imitation_v{version}{suffix}_plain.pkl")
 
         # Feature importance（自動）
-        importance = dict(zip(FEATURE_COLUMNS, plain_base.feature_importances_.tolist()))
+        importance = dict(zip(feature_cols, plain_base.feature_importances_.tolist()))
         _update_feature_importance(version, importance)
     except Exception as e:
         logger.warning(f"plain base / SHAP 準備失敗：{e}")
