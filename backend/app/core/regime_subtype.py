@@ -28,7 +28,10 @@ _ADX_LOW = 15           # ADX < 15 → 趨勢非常弱
 _BB_WIDTH_PCTL_LOW = 30 # BB 寬度 30 百分位以下 → 窄
 _ATR_PCT_PCTL_LOW = 30  # ATR% 30 百分位以下 → 低波動
 _OVERLAP_HIGH = 0.7     # 高低點重疊比例 > 0.7 → 真震盪（窄區間反覆）
-_BIAS_THRESHOLD = 0.5   # bias score 絕對值 > 0.5 才標為 lean_long/lean_short
+# 注意：bias_score 範圍 [-1, +1]。EMA60(0.3) + RSI(0.2) 兩條件加總 0.5 是「常態偏向」訊號；
+# 設 0.3 讓「中度偏向」也能觸發 lean，避免 neutral_ranging 吃掉太多應該偏向的情境。
+# external_signals 缺失時（如 batch eval）這個閾值更關鍵。
+_BIAS_THRESHOLD = 0.3
 
 
 def _percentile_of_last(series: pd.Series, lookback: int = 100) -> Optional[float]:
@@ -178,8 +181,10 @@ def classify_ranging_subtype(
         "metrics": {adx, bb_width_pctl, atr_pct_pctl, overlap_ratio, bias_score},
       }
     """
-    if regime_info.get("regime") != "ranging":
-        return {"subtype": None, "reason": "regime != ranging"}
+    # v104：ranging + unknown 兩種模糊情境都跑子分類
+    # （unknown = 結構分類器無法判定 HH/HL/LH/LL，本質跟 ranging 同樣需要拆細）
+    if regime_info.get("regime") not in ("ranging", "unknown"):
+        return {"subtype": None, "reason": "regime != ranging/unknown"}
 
     if df is None or len(df) < 60:
         return {"subtype": "neutral_ranging", "reason": "資料不足", "confidence": 0.3}

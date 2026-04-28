@@ -457,14 +457,14 @@ type 可選：support_resistance, trend, pattern, indicator, strategy, volume, s
 │ 3 │ regime=trending_down + 信心 ≥ 0.6                    → 「做空」結論卡（高） │
 │ 4 │ regime=trending_up + 信心 0.4-0.6                    → 🟢 偏多單向計劃     │
 │ 5 │ regime=trending_down + 信心 0.4-0.6                  → 🔴 偏空單向計劃     │
-│ 6 │ regime=ranging + regime_subtype="true_ranging"       → 🔀 雙向計劃         │
-│ 7 │ regime=ranging + regime_subtype="breakout_pending"   → 🔀 雙向計劃（窄區間）│
-│ 8 │ regime=ranging + regime_subtype="lean_long"          → 🟢 偏多單向計劃     │
-│ 9 │ regime=ranging + regime_subtype="lean_short"         → 🔴 偏空單向計劃     │
-│10 │ regime=ranging + regime_subtype="neutral_ranging"    → 看大型結構決定偏多/偏空│
+│ 6 │ regime=ranging/unknown + subtype="true_ranging"      → 🔀 雙向計劃         │
+│ 7 │ regime=ranging/unknown + subtype="breakout_pending"  → 🔀 雙向計劃（窄區間）│
+│ 8 │ regime=ranging/unknown + subtype="lean_long"         → 🟢 偏多單向計劃     │
+│ 9 │ regime=ranging/unknown + subtype="lean_short"        → 🔴 偏空單向計劃     │
+│10 │ regime=ranging/unknown + subtype="neutral_ranging"   → bias_score>0→偏多 / <0→偏空 / =0→雙向│
 └──────────────────────────────────────────────────────────────────────────────┘
 
-★ 關鍵：分析 ranging 場景時，**必須先讀 chart_state.regime_subtype.subtype**，
+★ 關鍵：分析 ranging / unknown 場景時，**必須先讀 chart_state.regime_subtype.subtype**，
   按上表選對應結論卡。**禁止**直接套「ranging → 雙向」舊邏輯。
   若 regime_subtype 缺失（資料不足），fallback 到雙向計劃。
 

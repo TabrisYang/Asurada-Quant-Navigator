@@ -439,11 +439,11 @@ def _auto_calc_indicator_values(
         except Exception as _cs_err:
             logger.debug(f"跨股票訊號計算失敗（不影響主流程）: {_cs_err}")
 
-        # v104 Fix B：ranging 子類型分類（true_ranging / lean_long / lean_short / breakout_pending / neutral_ranging）
-        # 必須在 currentRegime + crossStockSignals + external_signals 注入完才跑（會用到這些）
+        # v104 Fix B：ranging / unknown 子類型分類
+        # 必須在 currentRegime + crossStockSignals + external_signals 注入完才跑
         try:
             _ri = chart_state.get("currentRegime") or {}
-            if _ri.get("regime") == "ranging":
+            if _ri.get("regime") in ("ranging", "unknown"):
                 from app.core.regime_subtype import classify_ranging_subtype
                 _sub = classify_ranging_subtype(df, _ri, chart_state)
                 if _sub and _sub.get("subtype"):
