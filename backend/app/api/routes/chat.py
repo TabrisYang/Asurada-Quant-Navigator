@@ -2549,6 +2549,38 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
         except Exception as e:
             logger.warning(f"accuracy 注入失敗（不影響主流程）：{e}")
 
+        # 4d. v103 Phase 2B：用 LLM 產出的真實 entry/target/stop 重做 ML 推論
+        # 初始推論用 placeholder（current+5%/-3%），這裡用真實值算 refined SHAP，前端 append 一行
+        try:
+            _cs = request.chart_state or {}
+            _cached_df = _cs.get("_cached_df")
+            if final_text and _cached_df is not None and not _cached_df.empty:
+                parsed = parse_predictions(final_text)
+                if parsed:
+                    real_pred = parsed[0]
+                    # parse_predictions 回的 dict 沒有 symbol（chat 流程後填），手動補
+                    real_pred = {**real_pred, "symbol": chart_symbol_for_save or real_pred.get("symbol", "")}
+                    from app.core.feature_extractor import extract_features_at as _eft
+                    from app.core.ml_client import predict_via_subprocess as _pvs
+                    refined_features = _eft(_cached_df, _cs, real_pred)
+                    refined_insight = _pvs(refined_features, _cs, timeout_sec=15)
+                    if refined_insight and refined_insight.get("top_features"):
+                        yield _sse_event("shap_refine", {
+                            "top_features": refined_insight["top_features"],
+                            "p_hit_target": refined_insight.get("p_hit_target"),
+                            "model_regime": refined_insight.get("model_regime"),
+                            "real_entry": real_pred.get("entry_price"),
+                            "real_target": real_pred.get("target_price"),
+                            "real_stop": real_pred.get("stop_price"),
+                            "real_direction": real_pred.get("direction"),
+                        })
+                        logger.info(
+                            f"[shap_refine] direction={real_pred.get('direction')} "
+                            f"top={[f['name'] for f in refined_insight['top_features'][:3]]}"
+                        )
+        except Exception as _shap_err:
+            logger.debug(f"shap_refine 失敗（不影響主流程）: {_shap_err}")
+
         # 5. 立刻發 done event，post-processing 改在背景跑（避免 SSE 沉默觸發前端 timeout）
         done_data: dict = {"conversation_id": conversation_id}
         try:

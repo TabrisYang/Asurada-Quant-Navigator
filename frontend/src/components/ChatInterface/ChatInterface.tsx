@@ -708,6 +708,25 @@ export default function ChatInterface() {
           );
           updateMessage(assistantMsgId, { content: replaced });
         },
+        // v103 Phase 2B：refined SHAP（基於真實 entry/target/stop）
+        onShapRefine: (data) => {
+          if (!data.top_features?.length) return;
+          const currentMsg = useChartStore.getState().messages.find(m => m.id === assistantMsgId);
+          if (!currentMsg) return;
+          // 避免重複附加
+          if (String(currentMsg.content || '').includes('🎯 **SHAP（基於真實進場價）**')) return;
+
+          const topLine = data.top_features
+            .slice(0, 3)
+            .map(f => `${f.name}=${f.value != null ? f.value.toFixed(2) : '?'}（推${f.direction === 'long' ? '多' : '空'}）`)
+            .join('、');
+          const parts = [`🎯 **SHAP（基於真實進場價）**：${topLine}`];
+          if (data.p_hit_target != null) parts.push(`命中機率 ${(data.p_hit_target * 100).toFixed(0)}%`);
+          if (data.model_regime) parts.push(`模型 regime：${data.model_regime}`);
+          const refinedNote = '\n\n' + parts.join('｜');
+
+          updateMessage(assistantMsgId, { content: String(currentMsg.content || '') + refinedNote });
+        },
       },
       currentConversationId || undefined,
       store.getChartStateSummary(),
