@@ -101,6 +101,11 @@ class Settings(BaseSettings):
     # 預設 True；False 時走原 5 分量行為（緊急回滾用）
     bias_score_extended_dimensions: bool = True
 
+    # v105 Phase B：bias_score 權重資料驅動（取代 v104.1 經驗值）
+    # 預設 True；若 learned weights 存在（通過 lockbox AUC ≥ 0.55 quality gate）才會生效；
+    # 沒檔自動 fallback 經驗值。設 False 強制走經驗值。
+    bias_score_data_driven_weights: bool = True
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",

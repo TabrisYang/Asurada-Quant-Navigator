@@ -108,9 +108,21 @@ def _compute_bias_score(
     try:
         from app.core.config.settings import settings as _s
         extended = getattr(_s, "bias_score_extended_dimensions", True)
+        use_learned = getattr(_s, "bias_score_data_driven_weights", True)
     except Exception:
         extended = True
+        use_learned = True
     full_metrics["extended_dimensions"] = extended
+
+    # v105 Phase B：嘗試載 learned weights（若通過 quality gate 才存在）
+    learned_weights = None
+    if use_learned:
+        try:
+            from app.core.factor_weight_learner import load_learned_weights
+            learned_weights = load_learned_weights()
+        except Exception:
+            learned_weights = None
+    full_metrics["weights_source"] = "learned" if learned_weights else "heuristic"
 
     # ─── 分量 1：EMA60 斜率 ───
     try:

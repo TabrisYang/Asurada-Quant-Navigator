@@ -238,6 +238,18 @@ def main():
             print(f"[5/6] Quality Gate 失敗：{e}")
             status["steps"]["quality_gate"] = {"error": str(e)}
 
+        # v105 Phase B：bias_score 權重學習（樣本到了自動跑，含 quality gate）
+        try:
+            from app.core.factor_weight_learner import fit_bias_weights, fit_pca_model
+            wl = fit_bias_weights(min_samples=50)
+            pl = fit_pca_model(min_samples=50)
+            print(f"\n[+] bias_score 權重學習：{wl.get('status')} (lockbox_AUC={wl.get('lockbox_auc')})")
+            print(f"[+] PCA 訓練：{pl.get('status')} (n_pc={pl.get('n_components')})")
+            status["steps"]["factor_weight_learning"] = {"weights": wl, "pca": pl}
+        except Exception as e:
+            print(f"[+] 權重學習失敗（不影響主流程）：{e}")
+            status["steps"]["factor_weight_learning"] = {"error": str(e)}
+
         # 6. 老舊模型清理
         try:
             cleanup = _cleanup_old_models(keep_recent=5)
