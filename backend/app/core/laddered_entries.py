@@ -269,6 +269,53 @@ def _normalize_ratios(entries: list[dict]) -> list[dict]:
     return entries
 
 
+def _enforce_minimum_spacing(
+    entries: list[dict],
+    atr: float,
+    side: Literal["long", "short"],
+    min_atr_fraction: float = 0.5,
+) -> list[dict]:
+    """v105.1：強制各檔距離 ≥ 0.5×ATR，避免 BB 下軌跟 Donchian 下緣重合（差 0.04%）。
+
+    實測 ADA 4h 案例：BB Lower=$0.2430、Donchian Lower=$0.2429 → 第 2/3 檔幾乎同價。
+    根因：低波動環境下兩個 indicator 偶會重合，但 ladder 設計期望各檔有間距。
+
+    解法：偵測相鄰兩檔距離 < min_atr_fraction × ATR 時，把較深那檔調整到「上一檔 - 0.5×ATR」
+    （long）或「上一檔 + 0.5×ATR」（short），保證 spacing。
+    若 ATR 太小（< 平均價的 0.1%），跳過調整避免微調無意義。
+    """
+    if not entries or atr <= 0 or len(entries) < 2:
+        return entries
+    avg_price = sum(e["price"] for e in entries) / len(entries)
+    if atr / max(avg_price, 1e-9) < 0.001:  # ATR 太小，無法用 ATR 拉開
+        return entries
+
+    min_gap = atr * min_atr_fraction
+    # entries 排序：long 第 1 檔最高、第 3 檔最低；short 反之
+    if side == "long":
+        # 多檔由高到低，下一檔應該 ≤ 上一檔 - min_gap
+        sorted_entries = sorted(entries, key=lambda e: -e["price"])
+        for i in range(1, len(sorted_entries)):
+            prev = sorted_entries[i - 1]
+            cur = sorted_entries[i]
+            gap = prev["price"] - cur["price"]
+            if gap < min_gap:
+                cur["price"] = prev["price"] - min_gap
+                cur["source"] = cur.get("source", "") + f"（拉開 ≥ {min_atr_fraction}×ATR）"
+        return sorted_entries
+    else:
+        # 空檔由低到高，下一檔應該 ≥ 上一檔 + min_gap
+        sorted_entries = sorted(entries, key=lambda e: e["price"])
+        for i in range(1, len(sorted_entries)):
+            prev = sorted_entries[i - 1]
+            cur = sorted_entries[i]
+            gap = cur["price"] - prev["price"]
+            if gap < min_gap:
+                cur["price"] = prev["price"] + min_gap
+                cur["source"] = cur.get("source", "") + f"（拉開 ≥ {min_atr_fraction}×ATR）"
+        return sorted_entries
+
+
 def _weighted_average(entries: list[dict]) -> Optional[float]:
     """按 size_pct 加權平均進場價。"""
     if not entries:
@@ -384,10 +431,13 @@ def compute_laddered_entries(
     if direction in ("long", "both") and cfg["long_ok"]:
         entries, missing = _build_long_ladder(df, regime, current_price, atr, smc_long_entry)
         long_entries = _normalize_ratios(entries)
+        # v105.1：強制最小 spacing 避免 BB/Donchian 重合（< 0.5×ATR）
+        long_entries = _enforce_minimum_spacing(long_entries, atr, "long")
         missing_set.update(missing)
     if direction in ("short", "both") and cfg["short_ok"]:
         entries, missing = _build_short_ladder(df, regime, current_price, atr, smc_short_entry)
         short_entries = _normalize_ratios(entries)
+        short_entries = _enforce_minimum_spacing(short_entries, atr, "short")
         missing_set.update(missing)
 
     # v104 Fix A：依 timeframe + regime + 信心算 ATR 倍數（含 cap + feature flag）

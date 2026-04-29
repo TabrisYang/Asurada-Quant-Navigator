@@ -35,6 +35,25 @@ _BIAS_THRESHOLD_BASELINE = 0.3
 _BIAS_THRESHOLD_EXTENDED = 0.4
 
 
+def _dynamic_bias_threshold(n_active: int, extended: bool) -> float:
+    """v105.1：依激活分量數動態調 threshold（解決 0.4 對 2-3 分量過嚴）。
+
+    背景：實測 ADA 4h 案例 breadth=0% + RS=0.11 弱，bias=-0.30 是強空訊號，
+    但被固定 0.4 擋下走雙向。動態 threshold 解此問題：
+    - 2 個分量激活 → 0.20（兩個都明顯同向 = 強訊號）
+    - 3 個分量激活 → 0.30
+    - 4+ 個分量激活 → 0.40（多訊號加總要更高 confidence）
+    """
+    if not extended:
+        return _BIAS_THRESHOLD_BASELINE
+    n = max(0, int(n_active))
+    if n <= 2:
+        return 0.20
+    if n == 3:
+        return 0.30
+    return _BIAS_THRESHOLD_EXTENDED
+
+
 def _percentile_of_last(series: pd.Series, lookback: int = 100) -> Optional[float]:
     """最後一根 K 線在過去 lookback 根中的百分位（0-100）。"""
     if series is None or len(series) < 30:
@@ -427,7 +446,11 @@ def classify_ranging_subtype(
         }
 
     # v104.1：依 extended flag 動態切 threshold（baseline 0.3 / extended 0.4）
-    bias_threshold = _BIAS_THRESHOLD_EXTENDED if bias_full.get("extended_dimensions") else _BIAS_THRESHOLD_BASELINE
+    # v105.1：依激活分量數動態調 threshold
+    n_active = len([c for c in bias_full.get("all_contributions", []) if c.get("value", 0) != 0])
+    bias_threshold = _dynamic_bias_threshold(n_active, bool(bias_full.get("extended_dimensions")))
+    metrics["bias_threshold_used"] = bias_threshold
+    metrics["n_active_contributions"] = n_active
 
     # 突破待發：BB 收窄到極致（pctl < 20）但 ADX 未起，方向不明
     if (bb_width_pctl is not None and bb_width_pctl < 20
