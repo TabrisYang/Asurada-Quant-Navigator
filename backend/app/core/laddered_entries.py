@@ -352,12 +352,23 @@ def compute_laddered_entries(
 
     # confidence 閾值 — 沿用既有 regimeWarning 邏輯
     if regime_confidence < _CONFIDENCE_THRESHOLD or regime not in _REGIME_RATIO_MAP:
+        # v104.2：即使 ladder 不啟用，仍提供建議的 ATR 倍數給 LLM 用（避免它自己拍 1×ATR 太緊）
+        sl_mult_hint, tp_mult_hint = _get_atr_mults(timeframe_str, regime, confidence_label)
         return {
             "enabled": False,
             "warning": f"regime={regime} confidence={regime_confidence:.2f} < {_CONFIDENCE_THRESHOLD}，跳過分批進場（建議單一進場 + 小倉位試單）",
             "regime_used": regime,
             "regime_confidence": regime_confidence,
             "n_tranches": n_tranches,
+            # 提示倍數（即使 ladder disabled，LLM 自己定 entry 時應引用）
+            "sl_mult_hint": sl_mult_hint,
+            "tp_mult_hint": tp_mult_hint,
+            "timeframe_used": timeframe_str,
+            "confidence_label_used": confidence_label,
+            "fallback_guidance": (
+                f"ladder 雖 disabled，建議 LLM 自定 entry 時用 SL ≈ {sl_mult_hint} × {timeframe_str} ATR、"
+                f"TP ≈ {tp_mult_hint} × {timeframe_str} ATR（regime/timeframe-aware 倍數，比 1×ATR 合理）"
+            ),
         }
 
     cfg = _REGIME_RATIO_MAP[regime]

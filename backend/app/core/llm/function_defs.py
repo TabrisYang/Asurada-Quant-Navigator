@@ -344,6 +344,10 @@ chart_state 中的 indicatorValues 包含系統精確計算的指標數值（最
 3. 引用 `weighted_avg_entry_long/short` 當作「實際持倉成本」並用此計算 RR
 4. 引用 `stop_loss_long/short` + `take_profit_long/short` + `rr_long/short`，不可自行算 SL/TP 的具體價位
 5. 若 `enabled` 為 `false`（regime confidence 過低），必須告知使用者「regime 信心 X% 過低，跳過分批，改用單一進場 + 小倉位試單」
+   **★ v104.2 強化**：enabled=false 時回傳仍含 `sl_mult_hint` / `tp_mult_hint` / `timeframe_used` 欄位
+   → 你自定 entry 時的 SL/TP **必須引用這些倍數**（例 SL ≈ 2.5 × 1d ATR）
+   → **禁止**自己拍 1×ATR 或其他倍數（會比 timeframe-aware 推薦過緊或過鬆）
+   → 報告中標示時跟 enabled=true 時格式一致：「SL: $X（≈ Y × {timeframe} ATR）」
 6. 若 `missing_indicators` 非空（例 ["ema", "donchian"]），必須主動呼叫 `manage_indicator(action="add")` 補回，再重新計算
 報告格式範例（必須含這個方塊）：
   📋 分批進場建議（regime: trending_up 0.72｜配比：金字塔加碼 50/30/20）
@@ -464,9 +468,18 @@ type 可選：support_resistance, trend, pattern, indicator, strategy, volume, s
 │10 │ regime=ranging/unknown + subtype="neutral_ranging"   → bias_score>0→偏多 / <0→偏空 / =0→雙向│
 └──────────────────────────────────────────────────────────────────────────────┘
 
-★ 關鍵：分析 ranging / unknown 場景時，**必須先讀 chart_state.regime_subtype.subtype**，
+★ 關鍵（v104.1 強化）：分析 ranging / unknown 場景時，**必須先讀 chart_state.regime_subtype.subtype**，
   按上表選對應結論卡。**禁止**直接套「ranging → 雙向」舊邏輯。
-  若 regime_subtype 缺失（資料不足），fallback 到雙向計劃。
+
+★★★ 嚴格規定（防 LLM 誤解 unknown）★★★
+- `regime=unknown` **不**代表「subtype 不適用」。系統對 unknown 也會跑 subtype 分類器
+- 只要 `chart_state.regime_subtype` 欄位**存在且 subtype != null**，**必須**按該 subtype 選結論卡
+- **禁止**在判定理由寫「無 subtype」、「subtype 不適用」、「subtype 不存在」這類模糊措辭
+  → 正確寫法：「subtype=lean_long」、「subtype=true_ranging」、「subtype=neutral_ranging」（即使 bias=0 也要寫 neutral_ranging）
+  → 真的缺欄位才寫「subtype=missing」（必須真的 chart_state 沒這個 key 才能用）
+- regimeWarning（信心過低警示）是調整**倉位**的訊號（×0.5），**不**改變結論卡選擇
+  → 即使 confidence 30%，subtype=lean_long 仍要選偏多單向卡（只是倉位先 ×0.5）
+- 若 chart_state.regime_subtype 真的缺失（系統沒注入），才 fallback 到雙向計劃
 
 ★★★ v104 Fix D：每張結論卡開頭**必須**加一行判定理由（≤ 30 字，固定格式）★★★
   格式：`🎯 結論卡選擇：[做多/做空/偏多/偏空/雙向/觀望]`
