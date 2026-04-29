@@ -468,6 +468,22 @@ class PredictionTracker:
         except sqlite3.OperationalError:
             pass  # 欄位已存在
 
+        # v105 A1：加入 horizon_class 欄位（short/medium/long 持倉分類，給 ML 訓練分桶用）
+        try:
+            self._conn.execute(
+                "ALTER TABLE predictions ADD COLUMN horizon_class TEXT DEFAULT 'medium'"
+            )
+        except sqlite3.OperationalError:
+            pass
+
+        # v105 C1：加入 regime_std 欄位（標準化的 6 種 regime label）
+        try:
+            self._conn.execute(
+                "ALTER TABLE predictions ADD COLUMN regime_std TEXT DEFAULT NULL"
+            )
+        except sqlite3.OperationalError:
+            pass
+
         # 覆盤報告紀錄表
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS review_log (
@@ -608,6 +624,24 @@ class PredictionTracker:
         """)
         self._conn.commit()
 
+    @staticmethod
+    def classify_horizon(timeframe_hours: int) -> str:
+        """v105 A1：依持倉時數分類為 short/medium/long（給 ML 訓練分桶用）。
+
+        - short:  < 24h（15m / 1h / 4h 持倉）
+        - medium: 24-168h（4h-1w）
+        - long:   > 168h（> 1w）
+        """
+        try:
+            h = int(timeframe_hours or 0)
+        except (TypeError, ValueError):
+            return "medium"
+        if h < 24:
+            return "short"
+        if h > 168:
+            return "long"
+        return "medium"
+
     def store(
         self,
         symbol: str,
@@ -621,6 +655,13 @@ class PredictionTracker:
             now = taipei_now()
             hours = prediction["timeframe_hours"]
             expires = now + timedelta(hours=hours)
+            horizon = self.classify_horizon(hours)
+            # v105 C1：標準化 regime label（給 per-regime 模型訓練用）
+            try:
+                from app.core.regime_mapping import standardize_regime
+                regime_std = standardize_regime(prediction.get("regime", ""))
+            except Exception:
+                regime_std = "unknown"
 
             # 多時間框架矛盾檢測 + 限制
             rows = self._conn.execute(
@@ -662,8 +703,8 @@ class PredictionTracker:
                    (symbol, timeframe, direction, entry_price, target_price, stop_price,
                     timeframe_hours, confidence, regime, indicators, invalidation,
                     source_question, created_at, expires_at, status,
-                    is_bilateral, bilateral_pair_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)""",
+                    is_bilateral, bilateral_pair_id, horizon_class, regime_std)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)""",
                 (
                     symbol, timeframe,
                     prediction["direction"],
@@ -680,6 +721,8 @@ class PredictionTracker:
                     expires.isoformat(),
                     prediction.get("is_bilateral", 0),
                     prediction.get("bilateral_pair_id"),
+                    horizon,
+                    regime_std,
                 ),
             )
             self._conn.commit()

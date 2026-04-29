@@ -136,8 +136,40 @@ def _fetch_long_short_ratio(client: httpx.Client, sym: str) -> Optional[dict]:
         return None
 
 
-# 註：Binance allForceOrders 已要求認證（2024 後），免費取不到清算資料 → 不做。
-# 若使用者未來有 Coinglass 免費層 API key，可在這裡擴充。
+# 註：Binance allForceOrders 已要求認證（2024 後）。
+# v105 A2：嘗試 Coinglass 公開 endpoint 取 24h liquidation；多數情況會失敗（anti-bot），
+#         graceful fallback → derivatives 不含 liquidation 欄位。
+def _fetch_coinglass_liquidation(client: httpx.Client, sym: str) -> Optional[dict]:
+    """嘗試 Coinglass 公開 endpoint 抓 24h 清算（多空合計 + 拆分）。
+
+    Coinglass free tier 政策變動頻繁，2026 起多數 endpoint 已封閉。
+    這個 fetcher 採嘗試式 + graceful fallback，全失敗回 None。
+    """
+    try:
+        # 嘗試 open API（若使用者後續設 COINGLASS_API_KEY env，可用付費 tier）
+        headers = {"User-Agent": "Mozilla/5.0", "accept": "application/json"}
+        api_key = os.environ.get("COINGLASS_API_KEY")
+        if api_key:
+            headers["coinglassSecret"] = api_key
+            url = "https://open-api-v3.coinglass.com/api/futures/liquidation/v2/aggregated-history"
+            r = client.get(url, params={"symbol": sym.replace("USDT", ""), "interval": "1d"},
+                           headers=headers, timeout=5.0)
+            r.raise_for_status()
+            data = r.json().get("data") or []
+            if data:
+                latest = data[-1]
+                return {
+                    "liq_24h_long_usd": float(latest.get("longLiquidationUsd") or 0),
+                    "liq_24h_short_usd": float(latest.get("shortLiquidationUsd") or 0),
+                    "liq_24h_total_usd": float(latest.get("longLiquidationUsd") or 0)
+                                          + float(latest.get("shortLiquidationUsd") or 0),
+                    "liq_source": "coinglass_paid",
+                }
+        # 沒 API key 直接 skip（公開 endpoint 全擋了）
+        return None
+    except Exception as e:
+        logger.debug(f"[external] coinglass liquidation 失敗 ({sym}): {e}")
+        return None
 
 
 # ─── 情緒指標 ─────────────────────────
@@ -263,6 +295,7 @@ def get_signals_snapshot(symbol: str, include_macro: bool = True) -> dict:
                 (_fetch_funding_rate, None),
                 (_fetch_open_interest, None),
                 (_fetch_long_short_ratio, None),
+                (_fetch_coinglass_liquidation, None),
             ]:
                 try:
                     res = fn(client, sym)
@@ -314,6 +347,11 @@ def format_signals_summary(signals: dict) -> str:
             bits.append(f"全網多空比={r:.2f}{tag}")
         if "top_traders_long_short_ratio" in deriv:
             bits.append(f"大戶多空比={deriv['top_traders_long_short_ratio']:.2f}")
+        if "liq_24h_total_usd" in deriv:
+            tot = deriv["liq_24h_total_usd"]
+            long_l = deriv.get("liq_24h_long_usd", 0)
+            short_l = deriv.get("liq_24h_short_usd", 0)
+            bits.append(f"24h 清算 ${tot/1e6:.1f}M（多 ${long_l/1e6:.1f}M / 空 ${short_l/1e6:.1f}M）")
         if bits:
             lines.append("📉 衍生品：" + " | ".join(bits))
 
