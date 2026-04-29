@@ -401,11 +401,14 @@ def _compute_sl_tp(
         sl = min(prices) - sl_mult * atr
         risk = avg - sl
         tp = avg + max(tp_mult * atr, risk * _MIN_RR_RATIO)
+        # v105.3 Bug C：算實際 RR（之前直接 max(tp_mult, MIN_RR) 跟實際距離比例不符）
+        reward = tp - avg
     else:
         sl = max(prices) + sl_mult * atr
         risk = sl - avg
         tp = avg - max(tp_mult * atr, risk * _MIN_RR_RATIO)
-    rr = max(tp_mult, _MIN_RR_RATIO)
+        reward = avg - tp
+    rr = (reward / risk) if risk > 0 else _MIN_RR_RATIO
     return sl, tp, rr
 
 

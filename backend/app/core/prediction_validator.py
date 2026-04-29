@@ -118,7 +118,10 @@ def _validate_one(pred: dict, now: datetime) -> str:
     stop = pred["stop_price"]
     direction = pred["direction"]
 
-    # 滑價緩衝：目標價需多穿越 0.1%，止損提前 0.1% 觸發
+    # 滑價緩衝（v105.3 重審後保留原設計）：悲觀驗證 — target 多穿越 0.1%、stop 提前 0.1% 觸發
+    #   long: target 上方加 +0.001（拉高更難），stop 下方加 +0.001（拉近 entry，提早觸發）
+    #   short: target 下方加 -0.001（拉低更難），stop 上方加 -0.001（拉近 entry，提早觸發）
+    # 兩邊都對稱「stop 提早觸發」（保守地多算 hit_stop），不是 bug
     slippage_buffer = 0.001
     if direction == "long":
         effective_target = target * (1 + slippage_buffer)

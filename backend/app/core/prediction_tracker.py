@@ -59,11 +59,11 @@ _BILATERAL_CARD_PATTERN = re.compile(
 )
 # 雙向計劃內的子段（多空兩段）
 _BILATERAL_LONG_BLOCK = re.compile(
-    r"🟢\s*做多計劃.*?(?=🔴|⏱|$)",
+    r"🟢\s*做多計劃.*?(?=🔴|⏱|═══|$)",
     re.DOTALL,
 )
 _BILATERAL_SHORT_BLOCK = re.compile(
-    r"🔴\s*做空計劃.*?(?=⏱|═══|$)",
+    r"🔴\s*做空計劃.*?(?=🟢|⏱|═══|$)",
     re.DOTALL,
 )
 # 雙向子段內的欄位 regex（趨向比較鬆，可能寫成「進場：$X1/$X2 分批」）
@@ -484,6 +484,14 @@ class PredictionTracker:
         except sqlite3.OperationalError:
             pass
 
+        # v105.3 Bug 7：加入 position_size_multiplier 欄位（lean 卡 0.7、其他 1.0）
+        try:
+            self._conn.execute(
+                "ALTER TABLE predictions ADD COLUMN position_size_multiplier REAL DEFAULT 1.0"
+            )
+        except sqlite3.OperationalError:
+            pass
+
         # 覆盤報告紀錄表
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS review_log (
@@ -705,8 +713,9 @@ class PredictionTracker:
                    (symbol, timeframe, direction, entry_price, target_price, stop_price,
                     timeframe_hours, confidence, regime, indicators, invalidation,
                     source_question, created_at, expires_at, status,
-                    is_bilateral, bilateral_pair_id, horizon_class, regime_std)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)""",
+                    is_bilateral, bilateral_pair_id, horizon_class, regime_std,
+                    position_size_multiplier)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)""",
                 (
                     symbol, timeframe,
                     prediction["direction"],
@@ -725,6 +734,7 @@ class PredictionTracker:
                     prediction.get("bilateral_pair_id"),
                     horizon,
                     regime_std,
+                    prediction.get("position_size_multiplier", 1.0),
                 ),
             )
             self._conn.commit()
