@@ -272,8 +272,32 @@ def _parse_lean_card(text: str) -> Optional[dict]:
     return pred
 
 
+def _strip_markdown_emphasis(text: str) -> str:
+    r"""v104.4：移除 markdown 強調符號（** * __ _），避免 parser regex 因此 fail。
+
+    LLM 常常會把標題寫成 `🔀 **雙向計劃**` 或 `📊 ***本次分析總結***`，
+    導致 `🔀\s*雙向計劃` 這種 regex 不 match。
+    這個函式只移除強調標記，保留所有實際文字 + emoji + 結構符號。
+    """
+    if not text:
+        return text
+    # ** 跟 __ bold（先處理較長的）
+    text = re.sub(r"\*\*([^\n*]+?)\*\*", r"\1", text)
+    text = re.sub(r"__([^\n_]+?)__", r"\1", text)
+    # * 跟 _ italic（保留單獨 * 不誤殺，例如算式 "5 * 3"）
+    text = re.sub(r"(?<![\w*])\*([^\n*]+?)\*(?![\w*])", r"\1", text)
+    text = re.sub(r"(?<![\w_])_([^\n_]+?)_(?![\w_])", r"\1", text)
+    return text
+
+
 def parse_predictions(llm_response: str) -> list[dict]:
-    """從 LLM 回答中解析預測（v104：雙向 → 2 筆 / 單向（含 lean）→ 1 筆 / 觀望 → 0 筆）。"""
+    """從 LLM 回答中解析預測（v104：雙向 → 2 筆 / 單向（含 lean）→ 1 筆 / 觀望 → 0 筆）。
+
+    v104.4：先剝 markdown bold/italic 標記，避免 LLM 寫成 `**雙向計劃**` 時 parser 失敗。
+    """
+    # 先剝 markdown 標記（純加法、不破壞 emoji 跟結構符號）
+    llm_response = _strip_markdown_emphasis(llm_response)
+
     # 觀望卡：不產生 prediction
     if _OBSERVE_CARD_PATTERN.search(llm_response):
         return []
