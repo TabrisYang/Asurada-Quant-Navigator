@@ -250,6 +250,22 @@ def main():
             print(f"[+] 權重學習失敗（不影響主流程）：{e}")
             status["steps"]["factor_weight_learning"] = {"error": str(e)}
 
+        # v105 Phase C：per-regime isotonic 校準 + walk-forward
+        try:
+            from app.core.per_regime_calibrator import (
+                fit_per_regime_calibrators, per_regime_walk_forward_summary
+            )
+            cal = fit_per_regime_calibrators()
+            wf = per_regime_walk_forward_summary()
+            n_saved = sum(1 for v in cal.values() if isinstance(v, dict) and v.get("status") == "saved")
+            n_skipped = sum(1 for v in cal.values() if isinstance(v, dict) and v.get("status", "").startswith("skipped"))
+            print(f"[+] Per-regime calibration：{n_saved} saved, {n_skipped} skipped (樣本不足)")
+            status["steps"]["per_regime_calibration"] = cal
+            status["steps"]["per_regime_walk_forward"] = wf
+        except Exception as e:
+            print(f"[+] Per-regime calibration 失敗：{e}")
+            status["steps"]["per_regime_calibration"] = {"error": str(e)}
+
         # 6. 老舊模型清理
         try:
             cleanup = _cleanup_old_models(keep_recent=5)

@@ -632,8 +632,10 @@ class PredictionTracker:
         - medium: 24-168h（4h-1w）
         - long:   > 168h（> 1w）
         """
+        if timeframe_hours is None:
+            return "medium"  # 未提供當作中等持倉
         try:
-            h = int(timeframe_hours or 0)
+            h = int(timeframe_hours)
         except (TypeError, ValueError):
             return "medium"
         if h < 24:
