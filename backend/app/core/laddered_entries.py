@@ -269,6 +269,59 @@ def _normalize_ratios(entries: list[dict]) -> list[dict]:
     return entries
 
 
+def _clamp_to_current_price(
+    entries: list[dict],
+    current_price: float,
+    side: Literal["long", "short"],
+) -> list[dict]:
+    """v105.2 Bug A：long entries 必須 ≤ 現價、short entries 必須 ≥ 現價。
+
+    根因（從 ADA 4h 真實案例）：價格在區間下半部時 BB 中軌會高於現價，
+    但 ladder 仍用 BB 中軌當第 1 檔做多 → 「等漲了再買」反邏輯。
+
+    處理：indicator 值若違反方向約束，clamp 到現價並標註。
+    """
+    if not entries or current_price <= 0:
+        return entries
+    out = []
+    for e in entries:
+        p = e["price"]
+        if side == "long" and p > current_price:
+            new_p = current_price
+            e = {**e, "price": new_p, "source": e.get("source", "") + f"（原 ${p:.4f} > 現價，clamp 到現價）"}
+        elif side == "short" and p < current_price:
+            new_p = current_price
+            e = {**e, "price": new_p, "source": e.get("source", "") + f"（原 ${p:.4f} < 現價，clamp 到現價）"}
+        out.append(e)
+    return out
+
+
+def _reassign_ratios_by_position(
+    entries: list[dict],
+    regime_ratios: list[int],
+    side: Literal["long", "short"],
+) -> list[dict]:
+    """v105.2 Bug B：依最終價格位置（不是建立順序）重新分配 size_pct。
+
+    根因（從 ADA 4h 真實案例）：v105.1 _enforce_minimum_spacing 排序時 size 跟著
+    source 走 → 25/40/35 不是設計的 25/35/40。
+
+    處理：排序後依「越深倉位越重」（倒金字塔接刀）原則重新分配 ratios。
+    long: 最貴的 → ratios[0]（最輕）/ 最便宜 → ratios[-1]（最重）
+    short: 反之
+    """
+    if not entries or len(entries) != len(regime_ratios):
+        return entries
+    # long 由高到低（最便宜在最後加最多倉），short 由低到高（最貴在最後加最多倉）
+    if side == "long":
+        sorted_entries = sorted(entries, key=lambda e: -e["price"])
+    else:
+        sorted_entries = sorted(entries, key=lambda e: e["price"])
+    for i, e in enumerate(sorted_entries):
+        e["size_pct"] = regime_ratios[i]
+    return sorted_entries
+
+
 def _enforce_minimum_spacing(
     entries: list[dict],
     atr: float,
@@ -430,14 +483,20 @@ def compute_laddered_entries(
 
     if direction in ("long", "both") and cfg["long_ok"]:
         entries, missing = _build_long_ladder(df, regime, current_price, atr, smc_long_entry)
+        # v105.2 Bug A：clamp long entries ≤ current_price（避免「等漲了才買」）
+        entries = _clamp_to_current_price(entries, current_price, "long")
         long_entries = _normalize_ratios(entries)
         # v105.1：強制最小 spacing 避免 BB/Donchian 重合（< 0.5×ATR）
         long_entries = _enforce_minimum_spacing(long_entries, atr, "long")
+        # v105.2 Bug B：依最終位置重新分配 ratios（倒金字塔接刀越深倉位越重）
+        long_entries = _reassign_ratios_by_position(long_entries, list(cfg["ratios"]), "long")
         missing_set.update(missing)
     if direction in ("short", "both") and cfg["short_ok"]:
         entries, missing = _build_short_ladder(df, regime, current_price, atr, smc_short_entry)
+        entries = _clamp_to_current_price(entries, current_price, "short")
         short_entries = _normalize_ratios(entries)
         short_entries = _enforce_minimum_spacing(short_entries, atr, "short")
+        short_entries = _reassign_ratios_by_position(short_entries, list(cfg["ratios"]), "short")
         missing_set.update(missing)
 
     # v104 Fix A：依 timeframe + regime + 信心算 ATR 倍數（含 cap + feature flag）
