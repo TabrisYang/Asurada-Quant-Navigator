@@ -413,15 +413,21 @@ def _auto_calc_indicator_values(
         except Exception as _ex_err:
             logger.debug(f"external_signals 失敗（不影響主流程）: {_ex_err}")
 
-        # v103 6A：注入未來 72h 高影響事件（FOMC / CPI / NFP 等）
+        # v103 6A + v105.4：注入未來 72h 高影響事件 + calendar_meta（過期警示）
         try:
-            from app.core.event_injector import get_upcoming_events
+            from app.core.event_injector import get_upcoming_events, get_calendar_meta
             from app.utils.symbol import is_tw_stock as _is_tw
             scope = "equities" if _is_tw(symbol) else "crypto"
             events = get_upcoming_events(within_hours=72, min_severity="medium", scope_match=scope)
+            cal_meta = get_calendar_meta()
             if events:
                 chart_state["upcoming_events"] = events
-                logger.info(f"[event_injector] 注入 {len(events)} 筆 72h 內事件 (scope={scope})")
+                logger.info(
+                    f"[event_injector] 注入 {len(events)} 筆 72h 內事件 (scope={scope}) "
+                    f"calendar age={cal_meta.get('age_days')} 天 stale={cal_meta.get('is_stale')}"
+                )
+            # 即使沒事件也注入 calendar_meta（給 prompt 判斷是否過期）
+            chart_state["calendar_meta"] = cal_meta
         except Exception as _ev_err:
             logger.debug(f"event_injector 失敗（不影響主流程）: {_ev_err}")
 

@@ -88,10 +88,23 @@ def get_upcoming_events(
             "event_dt_utc": ev_dt.isoformat(),
             "hours_until": round(hours_until, 1),
             "note": ev.get("note", ""),
+            "unverified": bool(ev.get("unverified", False)),  # v105.4：標未驗證日期
         })
 
     out.sort(key=lambda e: e["hours_until"])
     return out
+
+
+def get_calendar_meta() -> dict:
+    """v105.4：給 chat.py 注入用 — 含 last_updated / age_days / is_stale。"""
+    meta = _load_events().get("_meta", {})
+    age = calendar_age_days()
+    return {
+        "last_updated": meta.get("last_updated"),
+        "age_days": age,
+        "is_stale": (age is not None and age > 14),  # 超過 14 天視為過期
+        "version": meta.get("version"),
+    }
 
 
 def calendar_age_days() -> Optional[float]:
