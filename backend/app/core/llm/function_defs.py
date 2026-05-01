@@ -1095,8 +1095,31 @@ _PROMPT_MODULES["conditional_prob"] = """
 回覆時「必須」同時報告 lift（條件機率 - 基線機率），lift > 10% 才有實質意義。
 禁止只報告絕對機率而不提 lift。
 
+★★★ v105.5：必須引用樣本量 + Wilson CI + Bayesian shrunken 機率 ★★★
+每個 bin 的回傳含：
+- count：樣本量 n
+- prob_pct：原始機率（hits/count，可能被小樣本噪音放大）
+- wilson_ci_pct：[lo, hi] 95% Wilson 信賴區間
+- shrunken_prob_pct：Bayesian Beta-Binomial 收縮後機率（小樣本往 baseline 拉）
+- ci_includes_baseline：true 表示 CI 包含 baseline → lift 可能僅噪音
+
+報告時**必須**：
+1. 每個 bin 顯示「prob % (n=N, 95% CI: lo-hi%)」格式，不可只顯示 prob_pct
+2. 比較 raw prob 跟 shrunken prob：差距大代表小樣本噪音，使用者該謹慎
+3. 若 ci_includes_baseline=true，必須警示「⚠️ CI 重疊基線，lift 可能僅噪音不採信」
+4. 用 shrunken_prob_pct（不是 raw prob_pct）算 lift 才是「保守 lift」
+
+範例（修正後格式）：
+```
+RSI 46.0-50.9：39.6% → shrunken 41.8% (n=23, 95% CI: 22-58%)
+基線：42.3% (n=2718, 95% CI: 40-44%)
+Lift（shrunken）: -0.5pp ⚠️ CI 重疊基線，視為噪音不採信
+```
+
 結果解讀：
-- best_range / best_prob_pct / lift_vs_baseline：最佳區間及提升幅度
+- best_range / best_prob_pct / lift_vs_baseline：最佳區間及提升幅度（已用 shrunken 機率）
+- baseline_wilson_ci_pct：基線本身的 CI（樣本大時很窄、樣本小時寬）
+- shrinkage_k：Bayesian 先驗強度（k=20 預設，5 樣本強拉、100 樣本幾乎不動）
 - hit_pattern_analysis：命中 K 線的共同特徵（significant_features）
   - effect_size > 0.5 的特徵才標記為顯著
   - current_similarity：當前與歷史成功模式的相似度（含 5 維度 breakdown）

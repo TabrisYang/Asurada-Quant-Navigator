@@ -1424,8 +1424,48 @@ async def _exec_optimize_params(args: dict, default_symbol: str, default_tf: str
     return result
 
 
+def _wilson_ci(hits: int, count: int, z: float = 1.96) -> tuple[float, float]:
+    """v105.5：Wilson 信賴區間（百分點）給條件機率用。
+
+    比 normal approximation 在小樣本/極端機率時更準。z=1.96 對應 95% CI。
+    """
+    import math
+    if count <= 0:
+        return (0.0, 100.0)
+    p = hits / count
+    z2 = z * z
+    denom = 1.0 + z2 / count
+    center = (p + z2 / (2 * count)) / denom
+    margin = z * math.sqrt(p * (1 - p) / count + z2 / (4 * count * count)) / denom
+    lo = max(0.0, (center - margin) * 100)
+    hi = min(100.0, (center + margin) * 100)
+    return (round(lo, 1), round(hi, 1))
+
+
+def _bayesian_shrink(hits: int, count: int, baseline_prob: float, k: float = 20.0) -> float:
+    """v105.5：Beta-Binomial shrinkage，把小樣本機率往 baseline 收縮。
+
+    Prior: Beta(α, β) with mean=baseline_prob, effective sample size=k
+    α = baseline × k, β = (1-baseline) × k
+    Posterior mean = (α + hits) / (α + β + count)
+
+    k=20 意味：5 樣本被強烈拉回 baseline；100 樣本幾乎不收縮。
+    回傳百分點（0-100）。
+    """
+    if count <= 0:
+        return baseline_prob * 100 if baseline_prob <= 1 else baseline_prob
+    base = baseline_prob / 100 if baseline_prob > 1 else baseline_prob
+    alpha = base * k
+    beta = (1 - base) * k
+    posterior = (alpha + hits) / (alpha + beta + count)
+    return round(posterior * 100, 1)
+
+
 async def _exec_conditional_prob_scan(args: dict, default_symbol: str, default_tf: str) -> dict:
-    """條件機率掃描：掃描指標數值區間，計算每個區間後續 N 根 K 線漲/跌 ≥ X% 的機率"""
+    """條件機率掃描：掃描指標數值區間，計算每個區間後續 N 根 K 線漲/跌 ≥ X% 的機率
+
+    v105.5：每個 bin 加 wilson_ci + shrunken_prob_pct 給 LLM 引用，避免被小樣本誤導。
+    """
     import numpy as np
 
     symbol = args.get("symbol", default_symbol)
@@ -1493,6 +1533,12 @@ async def _exec_conditional_prob_scan(args: dict, default_symbol: str, default_t
             bin_edges = np.linspace(lo, hi, n_bins + 1)
             bins = []
 
+            # v105.5：先算 baseline 給 Bayesian shrinkage 用
+            total_valid = int(valid_mask.sum())
+            total_hits = int(future_hit[:valid_range][valid_mask].sum())
+            baseline_prob = round(total_hits / total_valid * 100, 1) if total_valid > 0 else 0.0
+            baseline_ci = _wilson_ci(total_hits, total_valid)
+
             best_prob = 0.0
             best_bin_label = ""
 
@@ -1513,28 +1559,38 @@ async def _exec_conditional_prob_scan(args: dict, default_symbol: str, default_t
 
                 hit_count = int(future_hit[:valid_range][in_bin].sum())
                 prob = hit_count / count * 100
+                # v105.5：Wilson CI + Bayesian shrinkage
+                ci_lo, ci_hi = _wilson_ci(hit_count, count)
+                shrunken = _bayesian_shrink(hit_count, count, baseline_prob, k=20.0)
+                # 顯著性快速旗標：CI 若包含 baseline → lift 不顯著
+                ci_includes_baseline = ci_lo <= baseline_prob <= ci_hi
 
                 label = f"{bl:.2f}~{bh:.2f}"
                 bins.append({
                     "range": label, "count": count,
-                    "hit": hit_count, "prob_pct": round(prob, 1),
+                    "hit": hit_count,
+                    "prob_pct": round(prob, 1),
+                    "wilson_ci_pct": [ci_lo, ci_hi],
+                    "shrunken_prob_pct": shrunken,        # Beta-Binomial 收縮後機率
+                    "ci_includes_baseline": ci_includes_baseline,  # True = lift 可能僅噪音
                 })
 
-                if prob > best_prob and count >= 5:
-                    best_prob = prob
+                # v105.5：用 shrunken_prob 而非 raw prob 找最佳 bin（避免小樣本噪音）
+                if shrunken > best_prob and count >= 5:
+                    best_prob = shrunken
                     best_bin_label = label
-
-            baseline_prob = round(float(future_hit[:valid_range][valid_mask].sum()) / valid_mask.sum() * 100, 1)
 
             results_by_indicator[key] = {
                 "indicator": ind_id,
                 "series": series_name,
-                "total_valid_samples": int(valid_mask.sum()),
-                "baseline_prob_pct": round(baseline_prob, 1),
+                "total_valid_samples": total_valid,
+                "baseline_prob_pct": baseline_prob,
+                "baseline_wilson_ci_pct": list(baseline_ci),  # baseline 的 CI
                 "best_range": best_bin_label,
                 "best_prob_pct": round(best_prob, 1),
                 "lift_vs_baseline": round(best_prob - baseline_prob, 1) if best_prob > 0 else 0,
                 "bins": bins,
+                "shrinkage_k": 20,  # 給 LLM 解讀用
             }
 
     if not results_by_indicator:
