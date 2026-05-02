@@ -255,7 +255,8 @@ export function streamChatMessage(
         const decoder = new TextDecoder();
         let buffer = '';
         let currentEvent = '';
-        const STREAM_TIMEOUT_MS = 300_000;
+        // v105.6 Fix 3：300s → 600s（給「全部分析」+ post-processing 更多 buffer）
+        const STREAM_TIMEOUT_MS = 600_000;
 
         try {
           while (true) {
@@ -272,7 +273,13 @@ export function streamChatMessage(
               if (!value) {
                 // 超時：強制斷開 HTTP 連線，通知後端停止處理
                 controller.abort();
-                wrappedCallbacks.onError?.('分析連線無回應超過 300 秒，已自動斷開（如分析仍在進行請查看後端 log）');
+                wrappedCallbacks.onError?.('分析連線無回應超過 600 秒，已自動斷開（如分析仍在進行請查看後端 log）');
+                // v105.6 Fix 1：強制 fire onDone 確保 ChatInterface 的 streamPromise 能 resolve
+                // 否則 chatLoading 卡 true、後續訊息無法送出
+                if (!doneEmitted) {
+                  doneEmitted = true;
+                  callbacks.onDone?.(undefined, { aborted: true, reason: 'timeout' });
+                }
               }
               break;
             }

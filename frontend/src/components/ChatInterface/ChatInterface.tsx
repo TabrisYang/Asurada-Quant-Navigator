@@ -753,7 +753,20 @@ export default function ChatInterface() {
 
     // 保存 abort 函式，讓 handleAbort 可以真正斷開連線
     abortStreamRef.current = streamAbort;
-    await streamPromise;
+    // v105.6 Fix 2：streamPromise race 一個 hard timeout（630s = SSE timeout 600s + 30s 寬限）
+    // 即使 streamPromise 永遠不 settle（罕見），也保證 chatLoading 不會卡住
+    const HARD_TIMEOUT_MS = 630_000;
+    try {
+      await Promise.race([
+        streamPromise,
+        new Promise((_, reject) => setTimeout(
+          () => reject(new Error('hard_timeout_streamPromise')), HARD_TIMEOUT_MS
+        )),
+      ]);
+    } catch (e) {
+      // hard_timeout 觸發 → 確保佇列不卡（finally 會跑 setChatLoading(false)）
+      try { streamAbort(); } catch {}
+    }
     abortStreamRef.current = null;
 
     // ★ 安全兜底：如果串流結束但沒收到 done 事件（連線中斷等），也要結束載入狀態
