@@ -1357,9 +1357,16 @@ def _format_function_results(function_calls: list[dict], exec_result: dict) -> s
                         parts.append(f"  ✗ {c.get('name', '?')}: {c.get('message', '錯誤')}")
             else:
                 # 通用格式化（截斷過長內容）
+                # v105.7：limit 3000→8000，且改為「前 6000 + 後 2000」截斷，
+                # 保留結尾關鍵摘要（避免 generate_scenarios/detect_smc 因截斷被
+                # LLM 誤判為「未回傳有效數據」）
                 result_str = json.dumps(r, ensure_ascii=False, default=_json_safe_default)
-                if len(result_str) > 3000:
-                    result_str = result_str[:3000] + "..."
+                if len(result_str) > 8000:
+                    result_str = (
+                        result_str[:6000]
+                        + f"\n\n... [中段省略 {len(result_str) - 8000} 字以節省 token] ...\n\n"
+                        + result_str[-2000:]
+                    )
                 parts.append(f"結果: {result_str}")
         parts.append("")
 
