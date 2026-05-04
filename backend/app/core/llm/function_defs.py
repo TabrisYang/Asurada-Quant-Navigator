@@ -299,6 +299,18 @@ chart_state 中的 indicatorValues 包含系統精確計算的指標數值（最
        - fear_greed_value < 25（極度恐懼）或 > 75（極度貪婪）→ 對應反向操作機會
     3. 若 macro 有 dxy.change_pct > 0.5%（單日）→ 對 BTC 偏空，反之偏多
     4. 把這些訊號併入 confidence 計算：當衍生品/情緒指標跟你的方向**反向極端**，必須降低信心並警示
+    5. **v106 C2 — L2 訂單簿（external_signals.derivatives.ob_*）**：
+       - 若 `ob_imbalance_ratio > 1.5`（強買壓）跟方向同向 → 加分；反向 → 警示「市價有大買單堆疊，做空注意短線軋空」
+       - 若 `ob_imbalance_ratio < 0.67`（強賣壓）跟方向同向 → 加分；反向 → 警示「賣盤厚重，多單需注意被砸下風險」
+       - 若 `ob_top_5_bids` / `ob_top_5_asks` 出現遠大於其他 levels 的單筆深度（≥ 3× 中位）→ 視為「大單支撐 / 壓力位」，可作為動態 SL/TP 的一個參考錨點
+       - `ob_spread_bps > 5` → 流動性不足，警示「進場滑價可能放大」
+- 若 chart_state 中有 `historical_insights`（v106 C3：從 200 筆驗證樣本萃取的 per-(symbol/tf/regime) patterns），你**必須**：
+    1. 在「📊 市場環境」段最後加一行：「📚 歷史：本 segment（[symbol] [tf] [regime]）n=[N] 筆，整體勝率 [X]%（Wilson 下界 [Y]%）」
+    2. 從 `patterns` 中挑出與當前情境最相關的 1-2 條（例：當前 RSI=72 → 引用「RSI >=70: n=8, wr=62%」），引用時**必須附上樣本量 + Wilson 下界 + verdict**
+    3. **若 verdict="歷史多失敗"** 跟你的方向同向 → 強制降低信心並警示「⚠️ 此 pattern 在歷史 n=N 筆裡勝率僅 X%，逆勢進場應減倉」
+    4. **若 verdict="強訊號"** 跟你的方向同向 → 可以提升信心但**仍須說明樣本量**
+    5. **絕對禁止**把 historical_insights 當成硬 override：所有 insight 僅供「校正信心 / 補充說明」，不能取代 indicatorValues / regime / external_signals 的主訊號
+    6. 若 `stale_warning` 不為 null → 「⚠️ 歷史洞察 N 天沒更新」也要寫出來
 - 若 chart_state 中有 `upcoming_events`（v103 6A：未來 72h 高影響事件清單），你**必須**：
     1. 在報告開頭「⚡ 30 秒結論」區段下方加一行「⚠️ 事件警示：[事件名] 在 [N]h 後（[severity]）」
     2. 若有任何 severity=high 事件距今 ≤ 24h，**強制**將「建議倉位」上限降到 50% 並寫明原因

@@ -495,6 +495,21 @@ def _auto_calc_indicator_values(
         except Exception as _sub_err:
             logger.debug(f"regime_subtype 分類失敗（不影響主流程）: {_sub_err}")
 
+        # v106 C3：注入歷史洞察庫（從 200 筆驗證樣本萃取 patterns）
+        try:
+            from app.core.strategy_insights import get_insights_for
+            _ri_insight = chart_state.get("currentRegime") or {}
+            _regime_label = _ri_insight.get("regime", "unknown")
+            _insight = get_insights_for(chart_symbol, timeframe, _regime_label)
+            if _insight:
+                chart_state["historical_insights"] = _insight
+                logger.info(
+                    f"[strategy_insights] {chart_symbol} {timeframe} {_regime_label}: "
+                    f"n={_insight['n_samples']} winrate={_insight['winrate']*100:.1f}%"
+                )
+        except Exception as _ins_err:
+            logger.debug(f"strategy_insights 注入失敗（不影響主流程）: {_ins_err}")
+
         # 強制重算模式：清除前端傳來的舊值，完全以後端計算為準
         if force_recalc:
             auto_values = {}
@@ -2793,6 +2808,42 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ─── v106 C1：Reflection Critic 端點 ──────────────────────────────
+
+@router.post("/critique")
+async def critique_analysis(request: ChatRequest):
+    """v106 C1：對主分析的 final_text 做 critic 審查（用 gpt-4o-mini 便宜模型）。
+
+    使用方式：使用者拿到主分析後，UI 點「進階審查」按鈕 → 呼叫此端點。
+    request.message = 主分析的 final_text（由前端傳回）
+    request.chart_state = 該次分析的 chart_state snapshot
+    request.messages[0].content（可選）= 使用者原始問題
+
+    回傳 verdict / issues_found / summary / tokens_used
+    """
+    from app.core.llm.reflection_critic import critique
+
+    final_text = request.message or ""
+    if not final_text.strip():
+        return {"verdict": "skipped", "reason": "缺少待審查文字"}
+
+    user_question = ""
+    if request.messages:
+        for m in request.messages:
+            if m.role == "user":
+                user_question = m.content
+                break
+
+    _, api_key, _, _ = _resolve_api_key(request)
+    result = await critique(
+        final_text=final_text,
+        chart_state=request.chart_state,
+        user_question=user_question,
+        api_key=api_key,
+    )
+    return {"status": "ok", **result}
 
 
 # ─── 對話歷史端點 ──────────────────────────────

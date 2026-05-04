@@ -105,6 +105,56 @@ def _fetch_open_interest(client: httpx.Client, sym: str) -> Optional[dict]:
         return None
 
 
+def _fetch_order_book(client: httpx.Client, sym: str, limit: int = 20) -> Optional[dict]:
+    """v106 C2：Binance L2 order book snapshot（無 key，免費）。
+
+    抓 spot /api/v3/depth，取 top N bids/asks，算：
+    - top_5_bids / top_5_asks（給 LLM 引用「大單在 $X 堆疊」）
+    - total_bid_depth_usd / total_ask_depth_usd（top N 累積）
+    - imbalance_ratio = bid / ask（>1.5 偏多買壓 / <0.67 偏空賣壓）
+    - spread_bps = (best_ask - best_bid) / mid * 10000
+    - mid_price
+    """
+    try:
+        r = client.get(
+            "https://fapi.binance.com/fapi/v1/depth",
+            params={"symbol": sym, "limit": limit},
+            timeout=5.0,
+        )
+        r.raise_for_status()
+        data = r.json()
+        bids = [(float(p), float(q)) for p, q in data.get("bids", [])][:limit]
+        asks = [(float(p), float(q)) for p, q in data.get("asks", [])][:limit]
+        if not bids or not asks:
+            return None
+        best_bid = bids[0][0]
+        best_ask = asks[0][0]
+        mid = (best_bid + best_ask) / 2 if (best_bid and best_ask) else 0
+        spread_bps = ((best_ask - best_bid) / mid * 10000) if mid > 0 else 0
+        bid_depth_usd = sum(p * q for p, q in bids)
+        ask_depth_usd = sum(p * q for p, q in asks)
+        imbalance = (bid_depth_usd / ask_depth_usd) if ask_depth_usd > 0 else 0
+        return {
+            "ob_mid_price": round(mid, 6),
+            "ob_spread_bps": round(spread_bps, 2),
+            "ob_top_5_bids": [{"price": round(p, 6), "qty": round(q, 4)} for p, q in bids[:5]],
+            "ob_top_5_asks": [{"price": round(p, 6), "qty": round(q, 4)} for p, q in asks[:5]],
+            "ob_bid_depth_usd": round(bid_depth_usd, 0),
+            "ob_ask_depth_usd": round(ask_depth_usd, 0),
+            "ob_imbalance_ratio": round(imbalance, 3),
+            "ob_imbalance_label": (
+                "強買壓" if imbalance > 1.5
+                else "偏買壓" if imbalance > 1.15
+                else "強賣壓" if imbalance < 0.67
+                else "偏賣壓" if imbalance < 0.85
+                else "平衡"
+            ),
+        }
+    except Exception as e:
+        logger.debug(f"[external] order_book fetch 失敗 ({sym}): {e}")
+        return None
+
+
 def _fetch_long_short_ratio(client: httpx.Client, sym: str) -> Optional[dict]:
     """多空持倉比（top traders + global）。"""
     try:
@@ -296,6 +346,7 @@ def get_signals_snapshot(symbol: str, include_macro: bool = True) -> dict:
                 (_fetch_open_interest, None),
                 (_fetch_long_short_ratio, None),
                 (_fetch_coinglass_liquidation, None),
+                (_fetch_order_book, None),
             ]:
                 try:
                     res = fn(client, sym)
@@ -354,6 +405,26 @@ def format_signals_summary(signals: dict) -> str:
             bits.append(f"24h 清算 ${tot/1e6:.1f}M（多 ${long_l/1e6:.1f}M / 空 ${short_l/1e6:.1f}M）")
         if bits:
             lines.append("📉 衍生品：" + " | ".join(bits))
+
+        # v106 C2：order book L2 摘要
+        if "ob_imbalance_ratio" in deriv:
+            ob_bits = [
+                f"imbalance={deriv['ob_imbalance_ratio']:.2f}（{deriv.get('ob_imbalance_label','?')}）",
+                f"買單深度 ${deriv.get('ob_bid_depth_usd', 0)/1e6:.2f}M",
+                f"賣單深度 ${deriv.get('ob_ask_depth_usd', 0)/1e6:.2f}M",
+                f"spread {deriv.get('ob_spread_bps', 0):.1f}bps",
+            ]
+            lines.append("📚 L2 訂單簿：" + " | ".join(ob_bits))
+            top_bids = deriv.get("ob_top_5_bids") or []
+            top_asks = deriv.get("ob_top_5_asks") or []
+            if top_bids:
+                lines.append("  Top 5 買單: " + ", ".join(
+                    f"${b['price']}×{b['qty']}" for b in top_bids[:5]
+                ))
+            if top_asks:
+                lines.append("  Top 5 賣單: " + ", ".join(
+                    f"${a['price']}×{a['qty']}" for a in top_asks[:5]
+                ))
 
     sent = signals.get("sentiment") or {}
     if sent.get("fear_greed_value") is not None:
