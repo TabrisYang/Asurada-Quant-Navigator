@@ -1389,11 +1389,56 @@ def _format_function_results(function_calls: list[dict], exec_result: dict) -> s
                                      f"Sharpe={m.get('sharpe_ratio', '?')} 報酬={m.get('total_return_pct', '?')}%")
                     else:
                         parts.append(f"  ✗ {c.get('name', '?')}: {c.get('message', '錯誤')}")
+            elif fname == "compute_laddered_entries":
+                # v106 B1：分批進場專用 formatter（取代 raw JSON dump）
+                if not r.get("enabled"):
+                    parts.append(f"分批進場：disabled — {r.get('warning', '?')}")
+                    if r.get("sl_mult_hint"):
+                        parts.append(f"  建議 SL ≈ {r['sl_mult_hint']} × {r.get('timeframe_used','?')} ATR")
+                        parts.append(f"  建議 TP ≈ {r.get('tp_mult_hint','?')} × {r.get('timeframe_used','?')} ATR")
+                else:
+                    parts.append(
+                        f"分批進場（regime={r.get('regime_used','?')} {r.get('regime_confidence',0):.2f} | "
+                        f"配比 {r.get('ratio_strategy','?')}）"
+                    )
+                    parts.append(f"  ATR: {r.get('atr_used','?')} | 當前: {r.get('current_price','?')}")
+                    if r.get("long_entries"):
+                        parts.append("  Long entries:")
+                        for e in r["long_entries"]:
+                            parts.append(f"    {e['size_pct']}% @ ${e['price']} ({e.get('source','')})")
+                        parts.append(
+                            f"    avg=${r.get('weighted_avg_entry_long','?')} | "
+                            f"SL=${r.get('stop_loss_long','?')} (≈{r.get('sl_mult_used','?')}×ATR) | "
+                            f"TP=${r.get('take_profit_long','?')} (≈{r.get('tp_mult_used','?')}×ATR) | "
+                            f"RR={r.get('rr_long','?')}"
+                        )
+                    if r.get("short_entries"):
+                        parts.append("  Short entries:")
+                        for e in r["short_entries"]:
+                            parts.append(f"    {e['size_pct']}% @ ${e['price']} ({e.get('source','')})")
+                        parts.append(
+                            f"    avg=${r.get('weighted_avg_entry_short','?')} | "
+                            f"SL=${r.get('stop_loss_short','?')} | "
+                            f"TP=${r.get('take_profit_short','?')} | "
+                            f"RR={r.get('rr_short','?')}"
+                        )
+                    if r.get("missing_indicators"):
+                        parts.append(f"  ⚠️ 缺失指標: {', '.join(r['missing_indicators'])}")
+            elif fname == "analyze_sector":
+                # v106 B1：族群分析專用 formatter
+                parts.append(f"族群分析：{r.get('sector_name', '?')}")
+                if r.get("status") == "error":
+                    parts.append(f"  錯誤：{r.get('message', '?')}")
+                else:
+                    parts.append(f"  成員: {r.get('member_count', '?')} 檔")
+                    parts.append(f"  廣度: {r.get('breadth_pct', '?')}% advancing")
+                    if r.get("leader"):
+                        parts.append(f"  龍頭: {r['leader']} (5K 線 {r.get('leader_change_5d','?')}%)")
+                    if r.get("interpretation"):
+                        parts.append(f"  解讀: {r['interpretation'][:300]}")
             else:
                 # 通用格式化（截斷過長內容）
-                # v105.7：limit 3000→8000，且改為「前 6000 + 後 2000」截斷，
-                # 保留結尾關鍵摘要（避免 generate_scenarios/detect_smc 因截斷被
-                # LLM 誤判為「未回傳有效數據」）
+                # v105.7：limit 3000→8000，且改為「前 6000 + 後 2000」截斷
                 result_str = json.dumps(r, ensure_ascii=False, default=_json_safe_default)
                 if len(result_str) > 8000:
                     result_str = (

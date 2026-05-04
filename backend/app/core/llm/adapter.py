@@ -293,9 +293,21 @@ class OpenAIAdapter(BaseLLMAdapter):
                         }
                         break
 
+            # v106 B4：OpenAI auto-caches prompts ≥1024 tokens with stable prefix
+            # 拆 system 為「靜態（前）+ 動態（後）」最大化 cache hit
+            static_sys, dynamic_sys = self._build_system_blocks(chart_state, system_prompt)
+            # 替換 all_messages 中第一個 system 訊息為兩段
+            non_system = [m for m in all_messages if m.get("role") != "system"]
+            structured_messages = [
+                {"role": "system", "content": static_sys},
+            ]
+            if dynamic_sys:
+                structured_messages.append({"role": "system", "content": dynamic_sys})
+            structured_messages.extend(non_system)
+
             create_kwargs: dict = {
                 "model": self.model,
-                "messages": all_messages,
+                "messages": structured_messages,
                 "temperature": settings.llm_temperature,
                 "max_tokens": settings.llm_max_tokens,
             }
@@ -403,8 +415,13 @@ class OpenAIAdapter(BaseLLMAdapter):
             from openai import AsyncOpenAI
             client = AsyncOpenAI(api_key=self.api_key, timeout=_LLM_TIMEOUT)
 
-            sys_msg = {"role": "system", "content": self._build_system_message(chart_state, system_prompt)}
-            all_messages = [sys_msg] + messages
+            # v106 B4：OpenAI auto-caches prompts ≥1024 tokens with stable prefix
+            static_sys, dynamic_sys = self._build_system_blocks(chart_state, system_prompt)
+            structured_messages: list[dict] = [{"role": "system", "content": static_sys}]
+            if dynamic_sys:
+                structured_messages.append({"role": "system", "content": dynamic_sys})
+            structured_messages.extend(m for m in messages if m.get("role") != "system")
+            all_messages = structured_messages
 
             # 注入圖表截圖到最後一個 user 訊息
             if chart_screenshot:
