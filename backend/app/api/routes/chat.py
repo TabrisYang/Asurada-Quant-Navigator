@@ -1804,13 +1804,36 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
     6. 發送 done 事件
     """
 
-    # 速率限制檢查
+    # 速率限制檢查（per-IP）
     client_ip = raw_request.client.host if raw_request.client else "unknown"
     if not _check_rate_limit(client_ip):
         return JSONResponse(
             status_code=429,
             content={"detail": "請求過於頻繁，請稍後再試（每分鐘上限 30 次）"},
         )
+
+    # v106 D1：per-session 進階 rate limit（更嚴）
+    from app.core.security import (
+        check_session_rate_limit,
+        detect_prompt_injection,
+        log_security_event,
+    )
+    sess_ok, sess_remaining = check_session_rate_limit(request.session_id)
+    if not sess_ok:
+        log_security_event("session_rate_limited", {"session_id": (request.session_id or "")[:8]})
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "此 session 請求過於頻繁，請稍候再試（每分鐘上限 20 次）"},
+        )
+
+    # v106 D1：prompt injection 偵測（不阻擋，只 log + 後續 prompt 加 fence）
+    injection_check = detect_prompt_injection(request.message)
+    if injection_check["detected"]:
+        log_security_event("prompt_injection_detected", {
+            "severity": injection_check["severity"],
+            "patterns": injection_check["patterns"],
+            "session_id": (request.session_id or "")[:8],
+        })
 
     # 安全檢查
     if not check_input_safety(request.message):
@@ -1947,6 +1970,26 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
 
             # ★ ML 增強：自動注入 ML 預測信號
             request.chart_state = _inject_ml_prediction(request.chart_state, _intents)
+
+            # v106 D3：依 intent 壓縮 chart_state（節省 token / 提升 cache hit）
+            try:
+                from app.core.context_compressor import (
+                    compress_chart_state, estimate_token_savings,
+                )
+                _orig_state = request.chart_state
+                _compressed = compress_chart_state(request.chart_state, _intents)
+                if _compressed and _orig_state:
+                    _stats = estimate_token_savings(_orig_state, _compressed)
+                    if _stats["saved_chars"] > 0:
+                        logger.info(
+                            f"[context_compress] intents={sorted(_intents)} "
+                            f"kept={len(_compressed)-1}/{len(_orig_state)} fields "
+                            f"saved≈{_stats['estimated_token_savings']} tokens "
+                            f"({_stats['savings_pct']}%)"
+                        )
+                    request.chart_state = _compressed
+            except Exception as _comp_err:
+                logger.debug(f"context_compress 失敗（不影響主流程）: {_comp_err}")
 
             messages = _build_messages(request, rag_fragments=_rag_context_fragments, intents=_intents)
         except Exception as e:

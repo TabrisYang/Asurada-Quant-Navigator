@@ -42,11 +42,55 @@ def _compute_query_hash(question: str, symbol: str, timeframe: str) -> str:
 def _compute_data_fingerprint(
     symbol: str, timeframe: str, data_points: int, last_timestamp: str,
     last_close: float = 0.0,
+    regime: str = "",
+    confidence_bucket: int = 0,
 ) -> str:
-    """計算數據指紋：數據或價格改變時指紋也變"""
+    """計算數據指紋：數據、價格、regime 或信心改變時指紋也變。
+
+    v106 D2 強化：把 regime 和 confidence bucket 納入指紋
+    → 同 symbol 但 regime 從 trending_up 變 ranging 也會 invalidate cache。
+    """
     close_bucket = round(last_close, 2) if last_close else 0
-    raw = f"{symbol}|{timeframe}|{data_points}|{last_timestamp}|{close_bucket}"
+    raw = f"{symbol}|{timeframe}|{data_points}|{last_timestamp}|{close_bucket}|{regime}|{confidence_bucket}"
     return hashlib.md5(raw.encode()).hexdigest()[:10]
+
+
+def _extract_regime_signature(chart_state: Optional[dict]) -> tuple[str, int]:
+    """從 chart_state 取出 (regime, confidence_bucket) — 給指紋用。
+
+    confidence 用 0.1 寬度 bucket，避免微小波動導致 cache 失效。
+    """
+    if not chart_state:
+        return "", 0
+    ri = chart_state.get("currentRegime") or {}
+    regime = (ri.get("regime") or "unknown").strip()
+    try:
+        conf = float(ri.get("confidence") or 0)
+        bucket = int(round(conf * 10))  # 0.0-1.0 → 0-10
+    except (TypeError, ValueError):
+        bucket = 0
+    return regime, bucket
+
+
+def _is_volatility_significant(
+    chart_state: Optional[dict], cached_close: float, threshold_pct: float = 1.5,
+) -> bool:
+    """v106 D2：價格相對快取時刻變化超過 threshold% → 視為「重大波動」需重跑。
+
+    1.5% 是日內較大的單一移動；4h ATR 通常 1-2%。
+    """
+    if not chart_state or not cached_close:
+        return False
+    cur_close = (chart_state.get("priceOverview") or {}).get("lastClose") or 0
+    try:
+        cur = float(cur_close)
+        prev = float(cached_close)
+    except (TypeError, ValueError):
+        return False
+    if prev <= 0:
+        return False
+    delta_pct = abs(cur - prev) / prev * 100
+    return delta_pct >= threshold_pct
 
 
 def _is_recent_query(chart_state: Optional[dict]) -> bool:
@@ -151,18 +195,21 @@ class AnalysisCache:
                 self._conn.commit()
                 return None
 
-            # 檢查數據指紋（含最新收盤價）
+            # 檢查數據指紋（含最新收盤價 + regime + confidence bucket）
+            regime, conf_bucket = _extract_regime_signature(chart_state)
             current_fp = _compute_data_fingerprint(
                 symbol, timeframe,
                 chart_state.get("dataPoints", 0),
                 chart_state.get("priceOverview", {}).get("lastTimestamp", ""),
                 chart_state.get("priceOverview", {}).get("lastClose", 0.0),
+                regime=regime,
+                confidence_bucket=conf_bucket,
             )
             if cached_fp and cached_fp != current_fp:
-                # 數據已更新，快取失效
+                # 數據已更新（價格/regime/信心變了），快取失效
                 self._conn.execute("DELETE FROM cache WHERE query_hash = ?", (query_hash,))
                 self._conn.commit()
-                logger.info(f"快取失效（數據指紋不同）: {query_hash}")
+                logger.info(f"快取失效（指紋不同 — 可能是 regime/價格/信心變化）: {query_hash}")
                 return None
 
             # 命中！更新 hit count
@@ -203,11 +250,14 @@ class AnalysisCache:
 
         query_hash = _compute_query_hash(question, symbol, timeframe)
         is_recent = 1 if _is_recent_query(chart_state) else 0
+        regime, conf_bucket = _extract_regime_signature(chart_state)
         data_fp = _compute_data_fingerprint(
             symbol, timeframe,
             chart_state.get("dataPoints", 0),
             chart_state.get("priceOverview", {}).get("lastTimestamp", ""),
             chart_state.get("priceOverview", {}).get("lastClose", 0.0),
+            regime=regime,
+            confidence_bucket=conf_bucket,
         )
 
         try:
