@@ -33,7 +33,7 @@ _ANALYSIS_FIELDS = {
     "indicatorValues", "smcStructure",
     "external_signals", "external_signals_summary",
     "social_sentiment",
-    "user_positions", "portfolio_summary",
+    "portfolio_summary",  # v107.2：保留客觀組合風控；user_positions 已停用
     "historical_insights",
     "rl_strategic_insight",
     "upcoming_events",

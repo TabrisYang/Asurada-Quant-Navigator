@@ -35,7 +35,7 @@ _HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 _HTTP_TIMEOUT = 5.0
-_CACHE_TTL = 1800  # 30 分鐘
+_CACHE_TTL = 7200  # v107.3：2 小時（情緒變化沒這麼快、避免常常 stale）
 _cache: dict[str, tuple[float, dict]] = {}
 
 

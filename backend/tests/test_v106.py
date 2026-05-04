@@ -56,10 +56,16 @@ def test_b4_adapter_system_blocks_split():
 # ─── C 階段：精準性深化 + 穩定性 ─────────────────────
 
 
-def test_c1_reflection_critic_imports():
-    from app.core.llm.reflection_critic import critique, CRITIC_SYSTEM_PROMPT
-    assert callable(critique)
-    assert "Reflection Critic" in CRITIC_SYSTEM_PROMPT
+def test_c1_replaced_by_mechanical_audit():
+    # v107.1：LLM critic 已被 mechanical_audit 取代
+    from app.core.mechanical_audit import audit_final_text
+    assert callable(audit_final_text)
+    # 確認舊的 reflection_critic 已被移除
+    try:
+        importlib.import_module("app.core.llm.reflection_critic")
+        raise AssertionError("reflection_critic 應已刪除（v107.1）")
+    except ImportError:
+        pass
 
 
 def test_c2_order_book_signature():

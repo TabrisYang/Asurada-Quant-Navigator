@@ -161,6 +161,14 @@ export interface StreamCallbacks {
     real_target?: number;
     real_stop?: number;
   }) => void;
+  // v107.1：機械審查結果（純 Python，零成本，必有）
+  onAudit?: (data: {
+    passed: boolean;
+    issues: string[];
+    n_checks: number;
+    n_failures: number;
+    summary: string;
+  }) => void;
 }
 
 /** SSE 串流回傳值：promise 等待完成，abort 可主動斷開連線 */
@@ -406,6 +414,9 @@ function _handleSSEEvent(
       break;
     case 'fact_check':
       callbacks.onFactCheck?.(data as unknown as Parameters<NonNullable<StreamCallbacks['onFactCheck']>>[0]);
+      break;
+    case 'audit':
+      callbacks.onAudit?.(data as unknown as Parameters<NonNullable<StreamCallbacks['onAudit']>>[0]);
       break;
     default:
       break;

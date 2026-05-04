@@ -462,22 +462,19 @@ def _auto_calc_indicator_values(
         except Exception as _sent_err:
             logger.debug(f"social_sentiment 注入失敗（不影響主流程）: {_sent_err}")
 
-        # v106 A2：注入使用者持倉狀態（讓 LLM 給個人化建議）
+        # v107.2：只注入 portfolio_summary（客觀組合風控），不注入 user_positions（避免 LLM 偏向使用者立場）
         try:
             from app.core.position_tracker import position_tracker
-            _pos = position_tracker.get_positions_for_symbol(chart_symbol)
-            chart_state["user_positions"] = _pos
-            # 整體組合摘要（總曝險、各 symbol 比重）
             _portfolio = position_tracker.get_summary()
             if _portfolio.get("total_positions", 0) > 0:
                 chart_state["portfolio_summary"] = _portfolio
                 logger.info(
-                    f"[position_tracker] {chart_symbol}: has_position={_pos.get('has_position')} "
-                    f"portfolio={_portfolio.get('total_positions')} positions, "
+                    f"[portfolio_summary] {chart_symbol}: "
+                    f"{_portfolio.get('total_positions')} positions, "
                     f"${_portfolio.get('total_exposure_usd', 0):.0f}"
                 )
         except Exception as _pos_err:
-            logger.debug(f"position_tracker 注入失敗（不影響主流程）: {_pos_err}")
+            logger.debug(f"portfolio_summary 注入失敗（不影響主流程）: {_pos_err}")
 
         # v104 Fix B：ranging / unknown 子類型分類
         # 必須在 currentRegime + crossStockSignals + external_signals 注入完才跑
@@ -2820,6 +2817,19 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
         except Exception as _shap_err:
             logger.debug(f"shap_refine 失敗（不影響主流程）: {_shap_err}")
 
+        # v107.1：機械審查（純 Python，<50ms，不打 LLM）
+        try:
+            from app.core.mechanical_audit import audit_final_text
+            _audit = audit_final_text(final_text, request.chart_state)
+            if _audit.get("n_checks", 0) > 0:
+                logger.info(
+                    f"[mechanical_audit] {_audit['summary']}"
+                    + (f" issues={_audit['issues']}" if _audit['issues'] else "")
+                )
+            yield _sse_event("audit", _audit)
+        except Exception as _audit_err:
+            logger.debug(f"mechanical_audit 失敗（不影響主流程）: {_audit_err}")
+
         # 5. 立刻發 done event，post-processing 改在背景跑（避免 SSE 沉默觸發前端 timeout）
         done_data: dict = {"conversation_id": conversation_id}
         try:
@@ -2851,42 +2861,6 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
             "X-Accel-Buffering": "no",
         },
     )
-
-
-# ─── v106 C1：Reflection Critic 端點 ──────────────────────────────
-
-@router.post("/critique")
-async def critique_analysis(request: ChatRequest):
-    """v106 C1：對主分析的 final_text 做 critic 審查（用 gpt-4o-mini 便宜模型）。
-
-    使用方式：使用者拿到主分析後，UI 點「進階審查」按鈕 → 呼叫此端點。
-    request.message = 主分析的 final_text（由前端傳回）
-    request.chart_state = 該次分析的 chart_state snapshot
-    request.messages[0].content（可選）= 使用者原始問題
-
-    回傳 verdict / issues_found / summary / tokens_used
-    """
-    from app.core.llm.reflection_critic import critique
-
-    final_text = request.message or ""
-    if not final_text.strip():
-        return {"verdict": "skipped", "reason": "缺少待審查文字"}
-
-    user_question = ""
-    if request.messages:
-        for m in request.messages:
-            if m.role == "user":
-                user_question = m.content
-                break
-
-    _, api_key, _, _ = _resolve_api_key(request)
-    result = await critique(
-        final_text=final_text,
-        chart_state=request.chart_state,
-        user_question=user_question,
-        api_key=api_key,
-    )
-    return {"status": "ok", **result}
 
 
 # ─── 對話歷史端點 ──────────────────────────────

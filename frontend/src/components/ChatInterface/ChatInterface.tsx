@@ -741,6 +741,23 @@ export default function ChatInterface() {
 
           updateMessage(assistantMsgId, { content: String(currentMsg.content || '') + refinedNote });
         },
+        // v107.1：機械審查徽章（純 Python，零成本）
+        onAudit: (data) => {
+          if (!data || data.n_checks === 0) return;
+          const currentMsg = useChartStore.getState().messages.find(m => m.id === assistantMsgId);
+          if (!currentMsg) return;
+          if (String(currentMsg.content || '').includes('🔍 **機械審查**')) return;
+
+          const lines = [`🔍 **機械審查**：${data.summary}`];
+          if (!data.passed && data.issues.length > 0) {
+            lines.push('');
+            for (const issue of data.issues.slice(0, 5)) {
+              lines.push(`  - ${issue}`);
+            }
+          }
+          const note = '\n\n---\n' + lines.join('\n');
+          updateMessage(assistantMsgId, { content: String(currentMsg.content || '') + note });
+        },
       },
       currentConversationId || undefined,
       store.getChartStateSummary(),
