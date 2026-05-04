@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
-from app.api.routes import alerts, chat, chart, indicators, config, data_sync, export, factor_scan, ml, predictions, scenario, smc, tw_scanner, system_health
+from app.api.routes import alerts, chat, chart, indicators, config, data_sync, export, factor_scan, ml, predictions, scenario, smc, tw_scanner, system_health, positions
 from app.core.config.settings import settings
 from app.core.usage_tracker import usage_tracker
 from app.core.chat_history import chat_history
@@ -292,6 +292,7 @@ app.include_router(smc.router, prefix="/api/smc", tags=["SMC 分析"])
 app.include_router(alerts.router, prefix="/api/alerts", tags=["預警"])
 app.include_router(tw_scanner.router, prefix="/api/scanner", tags=["市場掃描"])
 app.include_router(system_health.router, prefix="/api/system", tags=["系統健康"])
+app.include_router(positions.router, tags=["持倉追蹤"])
 
 
 @app.get("/api/health")

@@ -276,6 +276,20 @@ chart_state 中的 indicatorValues 包含系統精確計算的指標數值（最
 - 命中率 ±5%
 超出容忍度 → fact_check 警示。
 
+- 若 chart_state 中有 `social_sentiment`（v106 A3：Reddit + 新聞情緒聚合），你**必須**：
+    1. 在「📊 市場環境」段引用「社群情緒：[label]（score）」
+    2. 若 `overall_sentiment > 0.4`（強看多）跟分析方向**反向** → 警示「⚠️ 社群極度看多但訊號偏空 → 反向擠壓風險」
+    3. 若 `overall_sentiment < -0.4`（強看空）跟分析方向反向 → 「⚠️ 社群極度看空 → 投降可能產生反彈機會」
+    4. 對「強看多 / 強看空」(|score| > 0.4) → 提醒使用者「逆向思考：散戶情緒極端時反向操作機率較高」
+    5. 引用 `news_recent` top 3 新聞標題（如果有）
+    6. 不可把社群情緒當主要進場依據（**僅作輔助**）— prompt 警示
+- 若 chart_state 中有 `user_positions`（v106 A2：使用者實際持倉），你**必須**個人化建議：
+    1. 若 `user_positions.has_position=true`，在「30 秒結論」後加一行：「📊 你的持倉：[direction] $[size_usd]（佔組合 [pct]%），均價 $[entry]，SL=$[sl]」
+    2. 若分析結論方向跟使用者持倉**反向**（持倉做多但分析建議偏空 / lean_short）→ 強制警示「⚠️ 持倉跟分析訊號反向，建議減倉 [N]% 或設緊止損」
+    3. 若分析結論方向跟使用者持倉**同向**強訊號 → 「持倉跟訊號同向，可考慮加碼但不超過 [pct]%」
+    4. 若 `portfolio_summary.long_short_ratio > 3` 或 `< 0.33` → 「⚠️ 整體組合偏[多/空] 嚴重，建議分散方向」
+    5. 若 `portfolio_summary.freshness_warning` 不為 null → 「⚠️ 持倉資料超過 7 天沒更新，請先確認最新狀態再參考分析」
+    6. 若該 symbol 的 `pct_of_portfolio > 30%` → 「⚠️ 此標的曝險超過組合 30%，集中度風險高」
 - 若 chart_state 中有 `external_signals`（v104 Q1：funding / OI / 多空比 / Fear&Greed / 總體），你**必須**：
     1. 在「📊 市場環境」段直接引用 funding_rate / OI 24h 變化 / 多空比，**禁止編造**
     2. **極端訊號自動警示**：

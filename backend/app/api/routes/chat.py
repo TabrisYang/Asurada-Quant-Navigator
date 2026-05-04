@@ -445,6 +445,40 @@ def _auto_calc_indicator_values(
         except Exception as _cs_err:
             logger.debug(f"跨股票訊號計算失敗（不影響主流程）: {_cs_err}")
 
+        # v106 A3：注入社群情緒（Reddit + CryptoPanic RSS，graceful fallback）
+        try:
+            from app.core.social_sentiment import get_social_sentiment
+            from app.utils.symbol import is_tw_stock as _is_tw_a3
+            # 只對加密 symbol 抓社群情緒（台股的 Reddit 沒參考價值）
+            if not _is_tw_a3(chart_symbol):
+                _sent = get_social_sentiment(chart_symbol)
+                if _sent and not _sent.get("stale_warning"):
+                    chart_state["social_sentiment"] = _sent
+                    logger.info(
+                        f"[social_sentiment] {chart_symbol}: "
+                        f"overall={_sent.get('overall_label')} "
+                        f"({_sent.get('overall_sentiment', 0):+.2f})"
+                    )
+        except Exception as _sent_err:
+            logger.debug(f"social_sentiment 注入失敗（不影響主流程）: {_sent_err}")
+
+        # v106 A2：注入使用者持倉狀態（讓 LLM 給個人化建議）
+        try:
+            from app.core.position_tracker import position_tracker
+            _pos = position_tracker.get_positions_for_symbol(chart_symbol)
+            chart_state["user_positions"] = _pos
+            # 整體組合摘要（總曝險、各 symbol 比重）
+            _portfolio = position_tracker.get_summary()
+            if _portfolio.get("total_positions", 0) > 0:
+                chart_state["portfolio_summary"] = _portfolio
+                logger.info(
+                    f"[position_tracker] {chart_symbol}: has_position={_pos.get('has_position')} "
+                    f"portfolio={_portfolio.get('total_positions')} positions, "
+                    f"${_portfolio.get('total_exposure_usd', 0):.0f}"
+                )
+        except Exception as _pos_err:
+            logger.debug(f"position_tracker 注入失敗（不影響主流程）: {_pos_err}")
+
         # v104 Fix B：ranging / unknown 子類型分類
         # 必須在 currentRegime + crossStockSignals + external_signals 注入完才跑
         try:
