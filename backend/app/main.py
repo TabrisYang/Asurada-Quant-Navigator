@@ -121,6 +121,20 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"[watcher startup] 啟動 sweep 失敗（不影響主流程）: {e}")
 
+        # v109：事件日曆自動同步（只收 FOMC + NFP 等可驗證事件）
+        # FOMC 用 HTML 結構爬蟲、NFP 用 first-Friday 規則計算；C 類（CPI/PPI/GDP）由 system prompt 提醒
+        try:
+            from app.core.event_calendar_sync import sync_verifiable_events
+            _evt_sync = sync_verifiable_events()
+            logger.info(
+                f"[event_sync] status={_evt_sync.get('status')} "
+                f"fomc={_evt_sync.get('fomc_status')} "
+                f"nfp={_evt_sync.get('nfp_status')} "
+                f"total={_evt_sync.get('n_total')}"
+            )
+        except Exception as e:
+            logger.warning(f"[event_sync] 啟動同步失敗（不影響主流程）: {e}")
+
     threading.Thread(target=_background_init, daemon=True).start()
 
     # 背景排程：每 2 小時自動驗證過期預測

@@ -1,6 +1,6 @@
 # 阿斯拉量化系統 — 完整系統 Prompt 與架構規格書
 
-> **最後更新：2026-05-06** — 與實際程式碼同步（v108）
+> **最後更新：2026-05-06** — 與實際程式碼同步（v109）
 
 ## 系統定位
 
@@ -1194,6 +1194,22 @@ GET    /api/health                   # 系統健康狀態
       - [chat.py](backend/app/api/routes/chat.py) `_inject_recent_accuracy` 另查 invalidated 筆數，> 0 時報告底加「📛 另 N 筆因失效條件觸發已排除（不計入命中率）」
     **設計鐵律**：用既有設施（lean 卡 / laddered_entries / fact_checker / function-call schema 都已存在但用得不夠），只新建必要的 watcher；watcher shadow mode 預設 ON 等實證觀察 1-2 週（觸發 ≥ 10 次、假陽性率 < 20% 才正式啟用，假陽性定義：觸發後 4h 內價格回到觸發前 ±0.5×ATR 範圍）；schema 純加法（既有 query 不影響）
     **完成後系統能力**：報告中所有客觀數值（區間位置、雙向進場分批價、TP/SL/RR、ATR 倍數、技術指標數值）都由系統算後注入並強制 LLM 抄，編造後系統會 fact-check 標警告區塊；失效條件由系統實際監控、自動標 invalidated 不污染 hit-rate 統計、報告中可見「📛」提示；資料不足時保留多級降階可用性（不對稱雙向 / lean / 觀望），不再無腦對稱 50/50 反 Kelly
+
+109. ✅ v109（2026-05-06）：經濟事件日曆改造 — 從手動維護改為純自動同步（只收可驗證事件）
+    **動機**：v108 完成後使用者實測報告，發現事件警示出現 (1) FOMC `2026-05-07` 是不存在的會議（2026 年 5 月根本沒 FOMC 會議，4/29 後直接跳到 6/17）(2) NFP `2026-05-08` 日期錯（5 月 NFP 實際是 5/1 已過，下一場是 6/5）(3) `2026-06-18 FOMC` 也錯（Fed 官方 6/16-17，會議結束日是 6/17）。根因是 [events.json](backend/data/calendar/events.json) 純手動維護易出錯，且 v105.4 加的 `unverified: true` flag 雖然標警示但 LLM 仍會引用 → 警示稀釋。**v107 誠實表述路線延伸：不講 > 講錯但加警示**
+    **事件分類策略**（按可行性決定處理方式）：
+      - **A 類（央行類）**：HTML 結構爬蟲可行 — Fed `class="fomc-meeting"` 結構穩定，預先公告全年會議
+      - **B 類（固定規則類）**：規則計算比爬蟲還可靠（NFP=每月第一週五、ISM=第一/三工作日），BLS anti-bot 擋住爬蟲反而是好事
+      - **C 類（爬不到 + 規則粗糙）**：CPI / PPI / Retail Sales / GDP / PCE — BLS/BEA 有 anti-bot、規則只能逼近 → **不收錄**，改 system prompt 通用提醒
+      - **D 類（不規律）**：OPEC / 地緣政治 → 不在 events.json 範疇（既有 social_sentiment + news 處理）
+    **Step 1 立即修 events.json**：刪假 May FOMC entry、移除過期錯日 NFP、修 June FOMC 日期 6/18 → 6/17、加正確 6/5 NFP；schema 加 `source_strategy` 欄位區分自動/手動來源
+    **Step 2 重寫 [event_calendar_sync.py](backend/app/core/event_calendar_sync.py) `fetch_fomc_dates()`**：舊策略用 `fomcpresconf[YYYYMMDD].htm` URL pattern 只能抓**已發生**會議（Fed 在會議結束後才上傳 press conference URL）→ 改用 `soup.find_all(class_="fomc-meeting")` 解析 HTML 結構（`fomc-meeting__month` + `fomc-meeting__date`），取結束日為利率公告日；含 SEP/Dot Plot 場次（`*` 標記）自動加「+ Dot Plot」名稱；實測抓到 8 筆未來會議含 2026 6/17、9/16、12/9 等含 Dot Plot 場次
+    **Step 3 新增 `compute_nfp_dates(months_ahead=6)` 規則計算**：每月第一個週五 8:30 ET (12:30 UTC)；含美國聯邦假日推遲邏輯（如 2026/7/3 因 7/4 國慶假日推遲到 7/6）；NFP 名稱用「上一個月」（5/1 公布 April NFP）；舊 `fetch_nfp_dates()` BLS 爬蟲保留作 fallback（雖 anti-bot 擋住）
+    **Step 4 新增 `sync_verifiable_events()`**：跑 fetch_fomc + compute_nfp + 過期清理（`date < today` 自動移除）+ 合併保留 `source_strategy="manual"` entries（自動同步不覆寫使用者手動加的）+ 寫回 events.json 加 `_meta.last_auto_sync` 時間戳；全失敗時 graceful fallback 保留現有 entries 並標 unverified
+    **Step 5 [main.py](backend/app/main.py) lifespan startup hook**：`_background_init` 加 `sync_verifiable_events()`（與 v108 watcher.startup_sweep 並列），啟動時自動跑事件同步，不阻塞主流程
+    **Step 6 [function_defs.py](backend/app/core/llm/function_defs.py) CORE prompt 加「v109 未收錄事件提醒」**：在既有「事件警示規則」段（line ~316）後加段落，明列 CPI/PPI/Retail Sales/GDP/PCE 不在 events.json；觸發條件 3 種（使用者問事件 / 月中 10-25 日 / BTC-ETH macro 分析）需提醒「⚠️ 系統未收錄通膨/總體數據，下單前請自行查 BLS/BEA 行事曆」；**絕對禁止**自編這些事件具體日期（會被 fact-checker 標 mismatch）
+    **設計鐵律**：A+B 類自動化覆蓋 ~80% 高頻重要事件（FOMC 月會 + NFP 月發 + ISM 月發 + Jobless 週發），C 類維持手動模式但改通用提醒避免誤觸；既有 [event_injector.py](backend/app/core/event_injector.py) 過期過濾邏輯（line 75 `if ev_dt < now_utc: continue`）已充分，雙重保護不需新增；HTML 結構雖穩定但不是合約，scraper 失敗 → 保留舊 events + log warning，不阻塞主流程
+    **完成後系統能力**：FOMC 從手動維護升級為 Fed 官方來源自動同步（HTML 結構穩定可靠）；NFP 用規則計算比爬蟲還準（含假日推遲）；CPI/PPI/GDP 等不再出現「unverified 但 LLM 仍引用」的假事件警示，改由通用提醒讓使用者主動核對；events.json 自動清過期、保留手動 entries、可追溯來源；報告中事件警示再無不存在會議或日期錯誤情況
 
 ### 待開發功能
 

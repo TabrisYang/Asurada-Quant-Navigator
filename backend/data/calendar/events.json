@@ -1,48 +1,169 @@
 {
   "_meta": {
-    "version": 2,
-    "last_updated": "2026-05-01",
-    "maintainer": "manual (no paid subscription)",
-    "instructions": "Add upcoming high-impact events here. Severity: high (always warn) / medium (warn ≤24h) / low (info only). 'unverified': true 表示日期未經人工驗證，prompt 會標警示。"
+    "version": 3,
+    "last_updated": "2026-05-06",
+    "maintainer": "auto-synced (FOMC scraper + NFP rule); manual entries kept if source_strategy=manual",
+    "instructions": "v109 改為純自動同步：FOMC 由 scraper_fed 從 federalreserve.gov 抓、NFP 由 rule_first_friday 規則計算；CPI/PPI/GDP/PCE 等不收錄（改 system prompt 通用提醒）。手動加事件請設 source_strategy=manual + unverified:true，自動同步不會覆寫。",
+    "last_auto_sync": "2026-05-06T16:50:46.613391",
+    "auto_sync_status": {
+      "fomc_scraper_fed": "fetched 8",
+      "nfp_rule_first_friday": "computed 6"
+    }
   },
   "events": [
     {
-      "date": "2026-05-08",
+      "date": "2026-06-05",
       "time_utc": "12:30",
-      "name": "Non-Farm Payrolls (April)",
+      "name": "Non-Farm Payrolls (May)",
       "category": "macro",
       "severity": "high",
       "scope": "all_crypto,equities",
-      "note": "user-verified 2026-05-01"
+      "source_strategy": "rule_first_friday",
+      "note": "first Friday of June 2026",
+      "auto_synced_at": "2026-05-06T16:50:46.613391"
     },
     {
-      "date": "2026-05-07",
-      "time_utc": "18:00",
-      "name": "FOMC Rate Decision (May)",
-      "category": "macro",
-      "severity": "high",
-      "scope": "all_crypto,equities",
-      "note": "rate decision + Powell press conference",
-      "unverified": true
-    },
-    {
-      "date": "2026-05-13",
-      "time_utc": "12:30",
-      "name": "US CPI (April)",
-      "category": "macro",
-      "severity": "high",
-      "scope": "all_crypto,equities",
-      "note": "core inflation print",
-      "unverified": true
-    },
-    {
-      "date": "2026-06-18",
+      "date": "2026-06-17",
       "time_utc": "18:00",
       "name": "FOMC Rate Decision (June) + Dot Plot",
       "category": "macro",
       "severity": "high",
       "scope": "all_crypto,equities",
-      "unverified": true
+      "source_strategy": "scraper_fed",
+      "note": "meeting June 16-17, rate decision 14:00 ET on day 17 + SEP/Dot Plot",
+      "auto_synced_at": "2026-05-06T16:50:46.613391"
+    },
+    {
+      "date": "2026-07-06",
+      "time_utc": "12:30",
+      "name": "Non-Farm Payrolls (June)",
+      "category": "macro",
+      "severity": "high",
+      "scope": "all_crypto,equities",
+      "source_strategy": "rule_first_friday",
+      "note": "first Friday of July 2026; shifted from 2026-07-03 due to US federal holiday",
+      "auto_synced_at": "2026-05-06T16:50:46.613391"
+    },
+    {
+      "date": "2026-07-29",
+      "time_utc": "18:00",
+      "name": "FOMC Rate Decision (July)",
+      "category": "macro",
+      "severity": "high",
+      "scope": "all_crypto,equities",
+      "source_strategy": "scraper_fed",
+      "note": "meeting July 28-29, rate decision 14:00 ET on day 29",
+      "auto_synced_at": "2026-05-06T16:50:46.613391"
+    },
+    {
+      "date": "2026-08-07",
+      "time_utc": "12:30",
+      "name": "Non-Farm Payrolls (July)",
+      "category": "macro",
+      "severity": "high",
+      "scope": "all_crypto,equities",
+      "source_strategy": "rule_first_friday",
+      "note": "first Friday of August 2026",
+      "auto_synced_at": "2026-05-06T16:50:46.613391"
+    },
+    {
+      "date": "2026-09-04",
+      "time_utc": "12:30",
+      "name": "Non-Farm Payrolls (August)",
+      "category": "macro",
+      "severity": "high",
+      "scope": "all_crypto,equities",
+      "source_strategy": "rule_first_friday",
+      "note": "first Friday of September 2026",
+      "auto_synced_at": "2026-05-06T16:50:46.613391"
+    },
+    {
+      "date": "2026-09-16",
+      "time_utc": "18:00",
+      "name": "FOMC Rate Decision (September) + Dot Plot",
+      "category": "macro",
+      "severity": "high",
+      "scope": "all_crypto,equities",
+      "source_strategy": "scraper_fed",
+      "note": "meeting September 15-16, rate decision 14:00 ET on day 16 + SEP/Dot Plot",
+      "auto_synced_at": "2026-05-06T16:50:46.613391"
+    },
+    {
+      "date": "2026-10-02",
+      "time_utc": "12:30",
+      "name": "Non-Farm Payrolls (September)",
+      "category": "macro",
+      "severity": "high",
+      "scope": "all_crypto,equities",
+      "source_strategy": "rule_first_friday",
+      "note": "first Friday of October 2026",
+      "auto_synced_at": "2026-05-06T16:50:46.613391"
+    },
+    {
+      "date": "2026-10-28",
+      "time_utc": "18:00",
+      "name": "FOMC Rate Decision (October)",
+      "category": "macro",
+      "severity": "high",
+      "scope": "all_crypto,equities",
+      "source_strategy": "scraper_fed",
+      "note": "meeting October 27-28, rate decision 14:00 ET on day 28",
+      "auto_synced_at": "2026-05-06T16:50:46.613391"
+    },
+    {
+      "date": "2026-11-06",
+      "time_utc": "12:30",
+      "name": "Non-Farm Payrolls (October)",
+      "category": "macro",
+      "severity": "high",
+      "scope": "all_crypto,equities",
+      "source_strategy": "rule_first_friday",
+      "note": "first Friday of November 2026",
+      "auto_synced_at": "2026-05-06T16:50:46.613391"
+    },
+    {
+      "date": "2026-12-09",
+      "time_utc": "18:00",
+      "name": "FOMC Rate Decision (December) + Dot Plot",
+      "category": "macro",
+      "severity": "high",
+      "scope": "all_crypto,equities",
+      "source_strategy": "scraper_fed",
+      "note": "meeting December 8-9, rate decision 14:00 ET on day 9 + SEP/Dot Plot",
+      "auto_synced_at": "2026-05-06T16:50:46.613391"
+    },
+    {
+      "date": "2027-01-27",
+      "time_utc": "18:00",
+      "name": "FOMC Rate Decision (January)",
+      "category": "macro",
+      "severity": "high",
+      "scope": "all_crypto,equities",
+      "source_strategy": "scraper_fed",
+      "note": "meeting January 26-27, rate decision 14:00 ET on day 27",
+      "auto_synced_at": "2026-05-06T16:50:46.613391"
+    },
+    {
+      "date": "2027-03-17",
+      "time_utc": "18:00",
+      "name": "FOMC Rate Decision (March) + Dot Plot",
+      "category": "macro",
+      "severity": "high",
+      "scope": "all_crypto,equities",
+      "source_strategy": "scraper_fed",
+      "note": "meeting March 16-17, rate decision 14:00 ET on day 17 + SEP/Dot Plot",
+      "auto_synced_at": "2026-05-06T16:50:46.613391"
+    },
+    {
+      "date": "2027-04-28",
+      "time_utc": "18:00",
+      "name": "FOMC Rate Decision (April)",
+      "category": "macro",
+      "severity": "high",
+      "scope": "all_crypto,equities",
+      "source_strategy": "scraper_fed",
+      "note": "meeting April 27-28, rate decision 14:00 ET on day 28",
+      "auto_synced_at": "2026-05-06T16:50:46.613391"
     }
   ]
 }

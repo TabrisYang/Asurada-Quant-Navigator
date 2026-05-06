@@ -25,9 +25,10 @@
 
 from __future__ import annotations
 
+import calendar as _cal
 import json
 import re
-from datetime import datetime, timezone
+from datetime import date as _date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -57,7 +58,99 @@ def _log(msg: str) -> None:
     logger.info(f"[calendar_sync] {msg}")
 
 
-# ─── NFP（BLS Employment Situation）─────────────────────────
+# ─── NFP — 規則計算（v109，比 BLS 爬蟲更可靠）─────────────────────────
+
+# 美國聯邦假日（影響 NFP 公布）— 必要時補齊
+# 規則：若每月第一週五碰到聯邦假日，BLS 會推遲到下個工作日
+_US_FEDERAL_HOLIDAYS_FIXED = {
+    # (month, day) — 固定日期假日
+    (1, 1): "New Year's Day",
+    (7, 4): "Independence Day",
+    (11, 11): "Veterans Day",
+    (12, 25): "Christmas Day",
+    # 註：MLK Day / Presidents Day / Memorial Day / Labor Day / Columbus Day /
+    # Thanksgiving 是「第 N 個週幾」規則，但這些都不會落在月初第一週五，所以不處理
+}
+
+
+def _is_us_federal_holiday(d: _date) -> bool:
+    """是否為美國聯邦假日（簡化版，只檢查可能影響月初第一週五的假日）。"""
+    if (d.month, d.day) in _US_FEDERAL_HOLIDAYS_FIXED:
+        return True
+    # New Year's Day 若落週六 → 前一個週五補假；若落週日 → 隔週一補假
+    # 月初第一週五最可能碰到的就是 1/1（如 2027 年 1/1 週五就是真假日）和 7/3（若 7/4 週六則 7/3 週五補假）
+    # 7/4 週六 → 7/3 補假
+    if d.month == 7 and d.day == 3:
+        next_day = d + timedelta(days=1)
+        if next_day.weekday() == 5:  # 7/4 是 Saturday
+            return True
+    return False
+
+
+def compute_nfp_dates(months_ahead: int = 6) -> list[dict]:
+    """v109：規則計算 NFP 公布日期，比 BLS 爬蟲（被 anti-bot 擋）更可靠。
+
+    規則：
+    - NFP = 每月第一個週五，8:30 ET 公布（12:30 UTC）
+    - 例外：若第一週五碰到聯邦假日，BLS 推遲到下個工作日
+    - 公布的是「上個月」資料（如 5/1 公布的是 April NFP）
+
+    Args:
+        months_ahead: 計算未來幾個月（預設 6）
+
+    Returns:
+        list of event dicts，按日期排序
+    """
+    out: list[dict] = []
+    today_dt = datetime.now()
+    today = _date(today_dt.year, today_dt.month, today_dt.day)
+
+    for offset in range(months_ahead + 1):
+        target_year = today_dt.year + (today_dt.month + offset - 1) // 12
+        target_month = (today_dt.month + offset - 1) % 12 + 1
+
+        # 找該月第一個週五
+        first_day = _date(target_year, target_month, 1)
+        # weekday(): Mon=0, Fri=4
+        days_to_friday = (4 - first_day.weekday()) % 7
+        first_friday = first_day + timedelta(days=days_to_friday)
+
+        # 假日推遲：若第一週五是假日，往後找下個工作日
+        actual_release = first_friday
+        max_iter = 5
+        while max_iter > 0 and (_is_us_federal_holiday(actual_release) or actual_release.weekday() >= 5):
+            actual_release = actual_release + timedelta(days=1)
+            max_iter -= 1
+
+        if actual_release < today:
+            continue
+
+        # NFP 名稱用「上一個月」
+        report_month_dt = first_day - timedelta(days=1)  # 前一個月
+        report_month_name = _cal.month_name[report_month_dt.month]
+
+        # 推遲說明
+        note_parts = [f"first Friday of {first_day.strftime('%B %Y')}"]
+        if actual_release != first_friday:
+            note_parts.append(f"shifted from {first_friday.isoformat()} due to US federal holiday")
+
+        out.append({
+            "date": actual_release.isoformat(),
+            "time_utc": "12:30",  # 8:30 AM ET = 12:30 UTC（簡化忽略 DST）
+            "name": f"Non-Farm Payrolls ({report_month_name})",
+            "category": "macro",
+            "severity": "high",
+            "scope": "all_crypto,equities",
+            "source_strategy": "rule_first_friday",
+            "note": "; ".join(note_parts),
+        })
+
+    out.sort(key=lambda e: e["date"])
+    _log(f"NFP rule_first_friday: 計算出 {len(out)} 筆未來日期")
+    return out
+
+
+# ─── NFP — BLS 爬蟲（legacy，anti-bot 擋住，留作 fallback）─────────────────────────
 
 
 def fetch_nfp_dates() -> list[dict]:
@@ -138,13 +231,23 @@ def fetch_nfp_dates() -> list[dict]:
 
 
 def fetch_fomc_dates() -> list[dict]:
-    """從 Federal Reserve 官方 calendar 抓 FOMC 會議日期。
+    """v109 改寫：從 Fed 官方 calendar 用 HTML 結構抓 FOMC 會議日期。
 
-    策略：用 URL pattern `fomcpresconfYYYYMMDD.htm` 抓所有會議日期，
-    過濾未來的 + 6 個月內的。Fed 把這些 URL 預先建立（即使會議還沒開）
-    所以可以提前取得排程。
+    舊策略（fomcpresconf URL pattern）只能抓「已發生」會議（Fed 在會議結束後才上傳
+    press conference URL）。新策略改解析 `class="fomc-meeting"` 結構，可預先取得未來
+    全年會議日期。
 
     來源：https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
+
+    HTML 結構：
+        <div class="row fomc-meeting">
+          <div class="fomc-meeting__month ...">June</div>
+          <div class="fomc-meeting__date ...">16-17*</div>
+          ...
+        </div>
+    （* 標星 = 含 SEP/Dot Plot 經濟預測摘要）
+
+    取會議結束日為利率公告日（FOMC 兩天會議，第 2 天 14:00 ET 公布利率 + Powell 演講）。
     """
     url = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
     try:
@@ -152,39 +255,95 @@ def fetch_fomc_dates() -> list[dict]:
             r = c.get(url)
             r.raise_for_status()
 
-        # URL pattern：fomcpresconf20260429.htm（注意 fomcpresconf 也有 fomcpres+conf 寫法）
-        pattern = re.compile(r"fomcpres+conf(\d{4})(\d{2})(\d{2})\.htm")
-        all_dates = pattern.findall(r.text)
+        soup = BeautifulSoup(r.text, "html.parser")
 
+        # Fed 頁面結構：年份 panel 包多個 fomc-meeting，每筆含 month + date 兩個 div
+        # 必須從 panel 找上下文判斷年份（month 只給「June」沒給年）
         out: list[dict] = []
         today = datetime.now().strftime("%Y-%m-%d")
-        seen = set()
-        for y, m, d in all_dates:
-            date_str = f"{y}-{m}-{d}"
-            if date_str < today:
+        today_dt = datetime.now()
+        seen: set[str] = set()
+
+        # 找所有含「YYYY FOMC Meetings」標題的 panel
+        panels = soup.find_all(class_=re.compile(r"panel.*default"))
+        if not panels:
+            # fallback：直接找所有 fomc-meeting + 從上下文找 year
+            panels = [soup]
+
+        for panel in panels:
+            # 從 panel 文字找 year（如 "2026 FOMC Meetings"）
+            panel_text = panel.get_text(" ", strip=True) if hasattr(panel, "get_text") else ""
+            year_m = re.search(r"\b(20\d{2})\s+FOMC\s+Meeting", panel_text)
+            if not year_m:
                 continue
-            if date_str in seen:
-                continue
-            seen.add(date_str)
-            try:
-                meeting_dt = datetime.strptime(date_str, "%Y-%m-%d")
-                if (meeting_dt - datetime.now()).days > 240:  # 8 月內
+            year = year_m.group(1)
+
+            # 找 panel 內所有 fomc-meeting（含標準 row + 含 SEP/Dot Plot 的 --shaded variant）
+            # BeautifulSoup class_=string 匹配「class list 含此 class」
+            # "fomc-meeting" 在標準會議 class="row fomc-meeting" 與 SEP class="fomc-meeting--shaded row fomc-meeting" 中都有
+            meetings = panel.find_all(class_="fomc-meeting")
+            for meeting in meetings:
+                month_el = meeting.find(class_=re.compile(r"fomc-meeting__month"))
+                date_el = meeting.find(class_=re.compile(r"fomc-meeting__date"))
+                if not month_el or not date_el:
                     continue
-                month_name = meeting_dt.strftime("%B")
+                month_name = month_el.get_text(strip=True)
+                date_range = date_el.get_text(strip=True)  # 例 "16-17*" / "27-28" / "8-9*" / "22 (notation vote)"
+
+                # 跳過 notation vote 等非會議式條目（無利率決議）
+                if "notation" in date_range.lower():
+                    continue
+
+                # 解析日期範圍：優先抓「結束日」（兩天會議的 day 2 = 利率公告日）
+                # 例 "16-17*" → 17；"8-9*" → 9；"27-28" → 28
+                has_sep = "*" in date_range
+                clean = date_range.replace("*", "").strip()
+                # 提取兩個數字
+                nums = re.findall(r"\d+", clean)
+                if not nums:
+                    continue
+                end_day = int(nums[-1]) if len(nums) >= 1 else None
+                if end_day is None:
+                    continue
+
+                try:
+                    meeting_dt = datetime.strptime(f"{year} {month_name} {end_day}", "%Y %B %d")
+                except ValueError:
+                    continue
+
+                date_str = meeting_dt.strftime("%Y-%m-%d")
+                if date_str < today:
+                    continue
+                if (meeting_dt - today_dt).days > 365:  # 12 個月內
+                    continue
+                if date_str in seen:
+                    continue
+                seen.add(date_str)
+
+                name = f"FOMC Rate Decision ({month_name})"
+                if has_sep:
+                    name += " + Dot Plot"
+
+                # 兩天會議命名加上完整日期範圍（避免維護者誤解）
+                start_day = int(nums[0]) if len(nums) >= 2 else end_day
+                day_range_str = f"{month_name} {start_day}-{end_day}" if start_day != end_day else f"{month_name} {end_day}"
+
                 out.append({
                     "date": date_str,
-                    "time_utc": "18:00",  # 2 PM ET
-                    "name": f"FOMC Rate Decision ({month_name})",
+                    "time_utc": "18:00",  # 14:00 ET = 18:00 UTC（夏令 EDT 改 17:00；本版簡化用 18:00）
+                    "name": name,
                     "category": "macro",
                     "severity": "high",
                     "scope": "all_crypto,equities",
-                    "note": "rate decision + Powell press conference",
-                    "source": "Federal Reserve official",
+                    "source_strategy": "scraper_fed",
+                    "note": (
+                        f"meeting {day_range_str}, rate decision 14:00 ET on day {end_day}"
+                        + (" + SEP/Dot Plot" if has_sep else "")
+                    ),
                 })
-            except Exception:
-                continue
 
-        _log(f"Federal Reserve FOMC: 抓到 {len(out)} 筆未來會議")
+        out.sort(key=lambda e: e["date"])
+        _log(f"Federal Reserve FOMC (HTML structure): 抓到 {len(out)} 筆未來會議")
         return out
     except Exception as e:
         _log(f"Federal Reserve FOMC 抓取失敗: {e}")
@@ -260,7 +419,149 @@ def fetch_cpi_dates() -> list[dict]:
         return []
 
 
-# ─── 主同步函式 ─────────────────────────
+# ─── v109 主同步函式：只收 A+B 類可驗證事件 ─────────────────────────
+
+
+def sync_verifiable_events() -> dict:
+    """v109：只同步可自動驗證的事件（FOMC + NFP），其他類別不收。
+
+    策略：
+    - A 類（FOMC）：用 fetch_fomc_dates()（HTML 結構爬蟲）
+    - B 類（NFP）：用 compute_nfp_dates()（規則計算，比爬蟲可靠）
+    - C 類（CPI/PPI/GDP/PCE）：完全不收，由 system prompt 通用提醒處理
+    - D 類（OPEC/地緣）：不在 events.json 範疇
+
+    合併規則：
+    - source_strategy="manual" 的 entry 不被自動同步覆寫（保留使用者手動加的事件）
+    - source_strategy="scraper_fed" / "rule_first_friday" 的舊 entry 會被新計算結果覆寫
+    - 過期 entry（date < today - 1d）自動移除
+    - 自動同步全部失敗 → 不動 events.json + log warning + 標 unverified
+
+    Returns:
+        summary dict
+    """
+    today_dt = datetime.now()
+    today = _date(today_dt.year, today_dt.month, today_dt.day)
+    today_str = today.isoformat()
+
+    # 1) 抓 A 類（FOMC）
+    fomc_status = "unknown"
+    try:
+        fomc_events = fetch_fomc_dates()
+        fomc_status = f"fetched {len(fomc_events)}"
+    except Exception as e:
+        _log(f"sync_verifiable: FOMC fetch 例外: {e}")
+        fomc_events = []
+        fomc_status = f"error: {e}"
+
+    # 2) 算 B 類（NFP）— 規則計算不會失敗
+    try:
+        nfp_events = compute_nfp_dates(months_ahead=6)
+        nfp_status = f"computed {len(nfp_events)}"
+    except Exception as e:
+        _log(f"sync_verifiable: NFP compute 例外: {e}")
+        nfp_events = []
+        nfp_status = f"error: {e}"
+
+    auto_events = list(fomc_events) + list(nfp_events)
+
+    # 3) 讀現有 events.json
+    if _CALENDAR_PATH.exists():
+        try:
+            existing = json.loads(_CALENDAR_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            existing = {"_meta": {}, "events": []}
+    else:
+        existing = {"_meta": {}, "events": []}
+
+    existing_events: list[dict] = existing.get("events", [])
+
+    # 4) 分類保留：manual entry 保留、自動 entry 全部丟掉用新算的
+    manual_events = [
+        ev for ev in existing_events
+        if ev.get("source_strategy") == "manual"
+    ]
+
+    # 5) 合併 — 過期過濾 + 排序
+    merged: list[dict] = []
+    seen_keys: set[str] = set()
+
+    def _key(ev: dict) -> str:
+        # 用 date + name 前綴當去重 key（容忍 month 後綴變動）
+        name_short = (ev.get("name") or "").split("(")[0].strip()[:40]
+        return f"{ev.get('date')}|{name_short}"
+
+    # auto events 優先（覆蓋 manual 同 key）
+    for ev in auto_events:
+        d = ev.get("date") or ""
+        if d < today_str:
+            continue
+        k = _key(ev)
+        if k in seen_keys:
+            continue
+        seen_keys.add(k)
+        ev["auto_synced_at"] = today_dt.isoformat()
+        merged.append(ev)
+
+    # manual 補進來（不覆蓋 auto）
+    for ev in manual_events:
+        d = ev.get("date") or ""
+        if d < today_str:
+            continue  # 過期跳過
+        k = _key(ev)
+        if k in seen_keys:
+            continue
+        seen_keys.add(k)
+        # manual entry 強制標 unverified（除非已標）
+        if "unverified" not in ev:
+            ev["unverified"] = True
+        merged.append(ev)
+
+    # 6) 全部失敗 fallback：保留現有非過期 entries 但標 unverified
+    if not auto_events and not manual_events:
+        _log("⚠️ 自動同步全部失敗且無 manual entries，events.json 保持空 events 狀態")
+        for ev in existing_events:
+            d = ev.get("date") or ""
+            if d < today_str:
+                continue
+            ev["unverified"] = True
+            ev.setdefault("source_strategy", "manual")
+            merged.append(ev)
+
+    merged.sort(key=lambda e: e.get("date", ""))
+
+    # 7) 寫回 events.json
+    new_meta = existing.get("_meta", {})
+    new_meta.update({
+        "version": 3,
+        "last_updated": today_str,
+        "last_auto_sync": today_dt.isoformat(),
+        "auto_sync_status": {
+            "fomc_scraper_fed": fomc_status,
+            "nfp_rule_first_friday": nfp_status,
+        },
+        "maintainer": "auto-synced (FOMC scraper + NFP rule); manual entries kept if source_strategy=manual",
+    })
+
+    _CALENDAR_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _CALENDAR_PATH.write_text(
+        json.dumps({"_meta": new_meta, "events": merged}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    summary = {
+        "status": "ok" if (fomc_events or nfp_events) else "all_failed_kept_manual",
+        "fomc_status": fomc_status,
+        "nfp_status": nfp_status,
+        "n_auto": len(auto_events),
+        "n_manual_kept": len([e for e in merged if e.get("source_strategy") == "manual"]),
+        "n_total": len(merged),
+    }
+    _log(f"sync_verifiable_events: {summary}")
+    return summary
+
+
+# ─── Legacy v106 主同步函式（保留向下相容）─────────────────────────
 
 
 def sync_calendar() -> dict:
