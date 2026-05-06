@@ -492,6 +492,54 @@ def _auto_calc_indicator_values(
         except Exception as _sub_err:
             logger.debug(f"regime_subtype 分類失敗（不影響主流程）: {_sub_err}")
 
+        # v108 Phase 2：注入 donchian_position_pct + bilateral_plan
+        # 解決 LLM 編造客觀數值問題：區間位置 % 與雙向計劃進場分批價必須由後端算好
+        try:
+            # 1. donchian_position_pct（標準 Donchian-20，範圍 0-100）
+            if len(df) >= 20:
+                _don_u = float(df["high"].iloc[-20:].max())
+                _don_l = float(df["low"].iloc[-20:].min())
+                _close_now = float(df["close"].iloc[-1])
+                _don_range = _don_u - _don_l
+                if _don_range > 0:
+                    _pct = ((_close_now - _don_l) / _don_range) * 100.0
+                    _pct = max(0.0, min(100.0, _pct))
+                    chart_state["donchian_position_pct"] = round(_pct, 1)
+                    chart_state["donchian_upper"] = round(_don_u, 6)
+                    chart_state["donchian_lower"] = round(_don_l, 6)
+                    logger.debug(
+                        f"[donchian_position] {symbol} {timeframe}: "
+                        f"{_pct:.1f}% (close={_close_now}, U={_don_u}, L={_don_l})"
+                    )
+
+            # 2. bilateral_plan — 僅 ranging/unknown 場景才算（其他 regime 不需雙向計劃）
+            _ri_bp = chart_state.get("currentRegime") or {}
+            _regime_bp = _ri_bp.get("regime", "")
+            if _regime_bp in ("ranging", "unknown"):
+                from app.core.laddered_entries import compute_laddered_entries
+                _conf_bp = float(_ri_bp.get("confidence", 0.0))
+                if _conf_bp >= 0.7:
+                    _conf_label_bp = "high"
+                elif _conf_bp >= 0.4:
+                    _conf_label_bp = "medium"
+                else:
+                    _conf_label_bp = "low"
+                _bp = compute_laddered_entries(
+                    df=df, direction="both", regime=_regime_bp,
+                    regime_confidence=_conf_bp, n_tranches=3,
+                    timeframe_str=timeframe, confidence_label=_conf_label_bp,
+                )
+                if _bp:
+                    chart_state["bilateral_plan"] = _bp
+                    logger.info(
+                        f"[bilateral_plan] {symbol} {timeframe}: "
+                        f"enabled={_bp.get('enabled')} "
+                        f"long={len(_bp.get('long_entries') or [])} "
+                        f"short={len(_bp.get('short_entries') or [])}"
+                    )
+        except Exception as _bp_err:
+            logger.debug(f"donchian_position / bilateral_plan 注入失敗（不影響主流程）: {_bp_err}")
+
         # v106 C3：注入歷史洞察庫（從 200 筆驗證樣本萃取 patterns）
         try:
             from app.core.strategy_insights import get_insights_for
@@ -1533,6 +1581,28 @@ def _inject_recent_accuracy(final_text: str, symbol: str, regime: str) -> str:
         return final_text
 
     total = stats.get("total", 0)
+
+    # v108 Phase 3：另查 invalidated 筆數，附加到 hit-rate 後讓使用者知道
+    invalidated_n = 0
+    try:
+        prediction_tracker._ensure_db()
+        with prediction_tracker._lock:
+            from datetime import timedelta as _td
+            cutoff = (taipei_now() - _td(days=30)).isoformat()
+            _q = "SELECT COUNT(*) FROM predictions WHERE status='invalidated' AND created_at > ?"
+            _params: list = [cutoff]
+            if symbol:
+                _q += " AND symbol = ?"
+                _params.append(symbol)
+            if regime:
+                _q += " AND regime = ?"
+                _params.append(regime)
+            row = prediction_tracker._conn.execute(_q, _params).fetchone()
+            if row:
+                invalidated_n = int(row[0] or 0)
+    except Exception as _inv_err:
+        logger.debug(f"_inject_recent_accuracy 取 invalidated 數失敗：{_inv_err}")
+
     if total < 3:
         replacement = f"📈 系統參考：樣本不足（n={total}，需 ≥ 3 筆已驗證），命中率尚不可估"
     else:
@@ -1543,6 +1613,11 @@ def _inject_recent_accuracy(final_text: str, symbol: str, regime: str) -> str:
         replacement = (
             f"📈 系統參考：你近 30 天類似條件（{regime}）命中率 {wr}%（n={total}{ci_str}）"
         )
+
+    # 若有 invalidated，附加說明
+    if invalidated_n > 0:
+        replacement += f"｜📛 另 {invalidated_n} 筆因失效條件觸發已排除（不計入命中率）"
+
     return _PLACEHOLDER_PATTERN.sub(replacement, final_text)
 
 
@@ -2767,6 +2842,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
             logger.warning(f"accuracy 注入失敗（不影響主流程）：{e}")
 
         # 4c-2. v104 Q3：LLM 數值編造偵測（fact-checker）
+        # v108 Phase 2：mismatch 時附加可見區塊到報告底部（不再只發 SSE event）
         try:
             if final_text and request.chart_state:
                 from app.core.fact_checker import check_text_against_chart_state
@@ -2777,11 +2853,34 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                         "mismatches": fc["mismatches"],
                         "summary": fc["summary"],
                     })
-                    if fc["mismatches"]:
+                    mismatches = fc.get("mismatches") or []
+                    if mismatches:
                         logger.warning(
-                            f"[fact_check] {len(fc['mismatches'])} mismatches in final_text "
+                            f"[fact_check] {len(mismatches)} mismatches in final_text "
                             f"(checked {fc['checked_count']})"
                         )
+                        # v108 Phase 2：將 mismatch 列表組成可見區塊串流給使用者
+                        _fc_lines = ["", "", "═══ ⚠️ 數值校驗異常（系統 fact-check）═══"]
+                        for _m in mismatches[:8]:  # 最多顯示 8 條，避免淹沒
+                            _t = _m.get("type", "?")
+                            _claimed = _m.get("claimed", "?")
+                            _actual = _m.get("actual", "?")
+                            _name = _m.get("name", "")
+                            _tol = _m.get("tolerance", "")
+                            _label = f"{_t}{('/'+_name) if _name else ''}"
+                            _fc_lines.append(
+                                f"  • {_label}: 報告寫 {_claimed}，系統實際 {_actual}"
+                                + (f"（容忍 {_tol}）" if _tol else "")
+                            )
+                        if len(mismatches) > 8:
+                            _fc_lines.append(f"  ... 還有 {len(mismatches) - 8} 條未列出")
+                        _fc_lines.append("⚠️ 標記區塊的數值不可採信，請以系統實際值為準")
+                        _fc_lines.append("═══════════════════════════════════════")
+                        _fc_block = "\n".join(_fc_lines)
+                        for chunk in _split_text_for_streaming(_fc_block):
+                            yield _sse_event("token", {"content": chunk})
+                            await asyncio.sleep(0.02)
+                        final_text += _fc_block
         except Exception as _fc_err:
             logger.debug(f"fact_check 失敗（不影響主流程）: {_fc_err}")
 

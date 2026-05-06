@@ -54,14 +54,47 @@ _WINRATE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# v108 Phase 2：「位於區間 X%」「donchian position 位置 X%」
+_DONCHIAN_POS_PATTERN = re.compile(
+    r"(?:位於區間|區間位置|donchian[_\s]*position)\s*[（(]?\s*"
+    r"(\d+(?:\.\d+)?)\s*%",
+    re.IGNORECASE,
+)
+
 # ─── 容忍度 ──────────────────────────────────
+# v108 Phase 2：指標分組容忍度（從原 ±10% 統一收緊）
+# 振盪類 (0-100 範圍) 用絕對差更精確；其餘用相對差
+_INDICATOR_TOLERANCE: dict[str, tuple[str, float]] = {
+    "RSI": ("abs", 2.0),
+    "STOCH": ("abs", 2.0),
+    "MFI": ("abs", 2.0),
+    "ADX": ("abs", 2.0),
+    "CCI": ("rel", 0.05),
+    "MACD": ("rel", 0.05),
+    "ATR": ("rel", 0.05),
+    "BB": ("rel", 0.02),
+    "布林": ("rel", 0.02),
+}
+_INDICATOR_DEFAULT_TOLERANCE: tuple[str, float] = ("rel", 0.05)  # 未列名指標用 ±5%
+
 _TOLERANCE = {
-    "indicator": 0.10,   # ±10%（指標值）
-    "funding": 0.0005,   # ±0.05%（絕對差，funding 本來就小）
+    # 舊欄位保留（funding / ls_ratio / fng / winrate 維持原值）
+    "funding": 0.0005,   # ±0.05%（絕對差）
     "ls_ratio": 0.20,    # ±0.2（絕對差）
     "fng": 5,            # ±5（FNG 是整數）
     "winrate": 5.0,      # ±5%（命中率）
+    # v108 新增：donchian_position_pct（百分位）絕對差 ±1%
+    "donchian_position": 1.0,
 }
+
+
+def _lookup_indicator_tolerance(name: str) -> tuple[str, float]:
+    """v108：依指標名查容忍度，未列名 fallback 到 default ±5%。"""
+    name_up = name.upper()
+    for key, tol in _INDICATOR_TOLERANCE.items():
+        if name_up == key.upper() or name_up.startswith(key.upper()):
+            return tol
+    return _INDICATOR_DEFAULT_TOLERANCE
 
 
 def _within(actual: float, claimed: float, tol: float, mode: str = "abs") -> bool:
@@ -117,12 +150,15 @@ def check_text_against_chart_state(
                 continue
 
             result["checked_count"] += 1
-            if not _within(actual, claimed, _TOLERANCE["indicator"], "rel"):
+            # v108 Phase 2：依指標分組容忍度
+            tol_mode, tol_val = _lookup_indicator_tolerance(name)
+            if not _within(actual, claimed, tol_val, tol_mode):
                 result["mismatches"].append({
                     "type": "indicator",
                     "name": name,
                     "claimed": claimed,
                     "actual": round(actual, 4),
+                    "tolerance": f"±{tol_val} ({tol_mode})",
                     "snippet": _snippet(text, m.start(), m.end()),
                 })
 
@@ -201,6 +237,29 @@ def check_text_against_chart_state(
                     "type": "winrate",
                     "claimed": claimed,
                     "actual": round(actual_wr, 1),
+                    "snippet": _snippet(text, m.start(), m.end()),
+                })
+
+    # ─── v108 Phase 2：donchian_position_pct ─────────────────
+    actual_dp = chart_state.get("donchian_position_pct")
+    if actual_dp is not None:
+        try:
+            actual_dp = float(actual_dp)
+        except (TypeError, ValueError):
+            actual_dp = None
+    if actual_dp is not None:
+        for m in _DONCHIAN_POS_PATTERN.finditer(text):
+            try:
+                claimed = float(m.group(1))
+            except ValueError:
+                continue
+            result["checked_count"] += 1
+            if not _within(actual_dp, claimed, _TOLERANCE["donchian_position"], "abs"):
+                result["mismatches"].append({
+                    "type": "donchian_position",
+                    "claimed": claimed,
+                    "actual": round(actual_dp, 1),
+                    "tolerance": f"±{_TOLERANCE['donchian_position']}",
                     "snippet": _snippet(text, m.start(), m.end()),
                 })
 

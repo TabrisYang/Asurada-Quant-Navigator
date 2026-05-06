@@ -99,6 +99,21 @@ async def _run_sync(request: DataSyncRequest, task_id: str):
                     except Exception:
                         pass  # ML 模組未初始化時靜默忽略
 
+                    # v108 Phase 3：失效條件 watcher sweep（資料同步後立即檢查 active 預測）
+                    try:
+                        from app.core.watcher import sweep_symbol as _watcher_sweep
+                        _w_result = _watcher_sweep(symbol, tf.value)
+                        if _w_result.get("invalidated", 0) > 0:
+                            _shadow_tag = "(shadow)" if _w_result.get("shadow_only") else ""
+                            task.logs.append(
+                                f"watcher{_shadow_tag}: {item_label} "
+                                f"checked={_w_result['checked']} "
+                                f"invalidated={_w_result['invalidated']}"
+                            )
+                    except Exception as _w_err:
+                        # watcher 失敗不影響資料同步
+                        task.logs.append(f"watcher 警告: {_w_err}")
+
                 except Exception as e:
                     error_msg = f"{item_label}: {str(e)}"
                     task.errors.append(error_msg)

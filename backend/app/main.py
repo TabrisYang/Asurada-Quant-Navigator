@@ -107,6 +107,20 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"[特徵分析] 背景初始化失敗: {e}")
 
+        # v108 Phase 3：啟動時冷啟動 watcher sweep
+        # （用既有本地資料補做離線期間的失效條件檢查，不強制重抓資料）
+        try:
+            from app.core.watcher import startup_sweep
+            _sw = startup_sweep()
+            logger.info(
+                f"[watcher startup] symbols={_sw.get('total_symbols')} "
+                f"checked={_sw.get('total_checked')} "
+                f"invalidated={_sw.get('total_invalidated')} "
+                f"shadow={_sw.get('shadow_only')}"
+            )
+        except Exception as e:
+            logger.warning(f"[watcher startup] 啟動 sweep 失敗（不影響主流程）: {e}")
+
     threading.Thread(target=_background_init, daemon=True).start()
 
     # 背景排程：每 2 小時自動驗證過期預測

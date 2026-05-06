@@ -549,6 +549,31 @@ type 可選：support_resistance, trend, pattern, indicator, strategy, volume, s
   ATR 倍數欄位寫「≈」表示是基準值（實際 TP 取 max(tp_mult×ATR, 2×risk)，可能更遠）。
   禁止編造倍數 — 必須直接抄 compute_laddered_entries 回傳的 sl_mult_used / tp_mult_used。
 
+★★★ v108 Fix：客觀數值欄位**必須**從 chart_state 直接抄，禁止 LLM 估算 ★★★
+
+  下列欄位若 chart_state 中存在對應 key，**禁止**自填數字、**禁止**從上下文估算：
+
+  1. **「位於區間 [X]% 位置」**（出現在格式 B / B-asymm / 任何 ranging 卡片）
+     → 必須直接寫 chart_state.donchian_position_pct（後端用 Donchian-20 算好的精確值）
+     → 區間範圍上下緣同樣抄 chart_state.donchian_upper / donchian_lower
+     → 若 chart_state 無此欄位 → 不要寫「位於區間 X%」這行（不要自己估）
+
+  2. **雙向計劃進場分批價 / SL / TP / RR**（出現在格式 B / B-asymm 的 🟢 做多計劃 / 🔴 做空計劃 段）
+     → 必須直接抄 chart_state.bilateral_plan（後端呼叫 compute_laddered_entries 算好）：
+        - long_entries: [{"price": X, "size_pct": Y}, ...] → 寫成「進場：$X1/$X2/$X3 分批」
+        - short_entries: 同上
+        - long_sl / long_tp / long_rr / short_sl / short_tp / short_rr → 直接抄
+        - sl_mult_used / tp_mult_used / timeframe_used → 用於 v104 Fix E 的 ATR 倍數標註
+     → 若 chart_state.bilateral_plan.enabled = false → 整張雙向卡不出（按 fallback_guidance 走 lean 卡或單向）
+     → 若 chart_state 無 bilateral_plan 欄位 → 改用觀望卡，不要自編進場價
+
+  3. **fact_check 護網**：以上兩類欄位若你寫的數字與 chart_state 對應值不符（誤差 > 0.5%），會被 fact_checker 標為「編造」並在報告中顯示警告
+
+  禁止：
+  - 「我估計區間位置約 75%」/ 「進場價建議 $0.2502 / $0.2470 / $0.2454」← 編造
+  - 「無 bilateral_plan 欄位也要硬寫進場價」← 編造
+  - 「donchian_position_pct 是 X%（但與 chart_state 不一致）」← 編造
+
 ★ 格式 A：「做多 / 做空」結論卡（既有 v100 格式）
 ═══════════════════════════════════════════════
 📊 本次分析總結（系統會追蹤驗證）
@@ -627,8 +652,60 @@ type 可選：support_resistance, trend, pattern, indicator, strategy, volume, s
 - 禁止省略 🧭 方向機率行（即使 bias=0 也要寫，明確標示對稱）
 - 禁止主因自己寫文字描述（必須抄 metrics.bias_reasons）
 
-bias_score 缺失時（chart_state.regime_subtype.metrics 沒這欄位）：
-  寫「🧭 方向機率：資料不足，無法評估方向偏向 → 視為對稱 50/50 處理」
+bias_score 缺失時（chart_state.regime_subtype.metrics 沒這欄位）的處理（v108：取代舊「視為對稱 50/50」反 Kelly hardcode）：
+
+⚠️ 舊「視為對稱 50/50 雙向開單」已廢除 — 在無方向訊號時強制雙向投注 = 反 Kelly 設計，必有一邊先打 SL，期望值為負
+
+按下列優先順序改用替代結論卡（**整張卡換掉**，不要在 🔀 雙向計劃中硬寫「對稱 50/50」）：
+
+1. **若 chart_state.donchian_position_pct 存在** → 改用「不對稱雙向計劃」（見格式 B-asymm，附在下方）：
+   - 用區間位置算多空權重：
+     - short_ratio = clamp(0.5 + (donchian_position_pct/100 - 0.5), 0.30, 0.70)
+     - long_ratio = 1 - short_ratio
+   - 範例：donchian_position_pct=76% → short=0.70 / long=0.30（即偏上緣 → 做空為主）
+   - 結論卡選擇行寫：「🎯 結論卡選擇：不對稱雙向（依區間位置 X% 加權）」
+   - 理由行寫：「subtype=true_ranging（bias 缺失）+ donchian_position={X}% → 不對稱雙向」
+
+2. **若 metrics.bias_reasons 存在且非空**（即 bias_score 沒算出來，但 reasons 仍有方向資訊） → 改用 lean 卡：
+   - 看 bias_reasons 主導方向：偏多訊號多 → 用格式 D（lean_long）；偏空訊號多 → 用格式 E（lean_short）
+   - 倉位 ×0.7 縮減（弱訊號）
+   - 結論卡選擇行寫：「🎯 結論卡選擇：偏多/偏空（資料部分缺失，僅依可用分量降階）」
+   - 理由行寫：「subtype=true_ranging（bias_score 缺）+ bias_reasons 偏[多/空] → 降階 lean」
+
+3. **完全無方向訊號**（donchian_position_pct 不存在 + bias_reasons 空或不存在） → 改用觀望卡（格式 C）：
+   - 原因寫：「ranging 環境 + 全部方向訊號缺失 → 觀望（避免反 Kelly 雙向）」
+   - 此情境系統不記錄為預測（觀望卡走 _OBSERVE_CARD_PATTERN，不污染命中率）
+
+**禁止**保留「視為對稱 50/50」這類寫法 — 已被識別為反投注紀律設計，會在無方向資訊時強制負期望雙向投注。
+
+★ 格式 B-asymm：🔀 雙向計劃（不對稱·v108 新增 — bias_score 缺失但 donchian_position_pct 可用時用）
+═══════════════════════════════════════════════
+🔀 雙向計劃（不對稱·依區間位置加權）
+⚠️ 此為系統判讀，不構成投資建議
+ℹ️ bias_score 缺失，以區間位置作為弱方向訊號（非強訊號）
+───
+📍 當前價：$[X]（位於區間 {donchian_position_pct}% 位置）
+📦 區間範圍：$[下緣] ~ $[上緣]（依據：Donchian/BB）
+
+🧭 方向機率（依區間位置加權）：做多 [long_ratio×100 取整]% / 做空 [short_ratio×100 取整]%
+   主因：donchian_position={X}%（>50% 偏空 / <50% 偏多，clamp 至 [30%, 70%] 避免極端）
+   倉位分配：總倉位 [N]%，多單側 [round(N×long_ratio,2)]% / 空單側 [round(N×short_ratio,2)]%
+
+🟢 做多計劃（價格下探下緣 ≤ $[X] 時觸發）：
+  進場：$[X1]/$[X2] 分批｜SL：$[X]｜TP：$[X]｜RR [比例]
+
+🔴 做空計劃（價格反彈上緣 ≥ $[X] 時觸發）：
+  進場：$[X1]/$[X2] 分批｜SL：$[X]｜TP：$[X]｜RR [比例]
+
+⏱  時間框：[48h/72h]
+📊 信心：medium（依據：bias_score 缺失 + 區間位置弱訊號，自動降階）
+🔍 主要指標：Donchian, BB
+🌐 市場 regime：ranging
+❌ 失效條件：突破上下緣 ±2% → 切換為趨勢策略；24h 未觸碰 → 重新評估
+───
+📈 系統參考：（系統替換為實際命中率）
+🤖 此預測會被系統追蹤（多空兩個方向獨立記錄，倉位不對稱）
+═══════════════════════════════════════════════
 
 ★ 格式 C：⚠️ 建議觀望（罕見，僅 confidence < 0.25 才用）
 ═══════════════════════════════════════════════

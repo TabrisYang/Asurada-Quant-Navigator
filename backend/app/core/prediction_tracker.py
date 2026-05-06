@@ -3,9 +3,11 @@
 從 LLM 回答中提取結構化預測，存入 SQLite，
 定期驗證預測結果，並生成績效統計回饋給 LLM。
 
-預測生命週期：active → hit_target / hit_stop / expired
+預測生命週期：active → hit_target / hit_stop / expired / invalidated（v108）
+- invalidated: watcher 偵測到失效條件成立（價格穿越邊界），不計入 hit-rate 分母
 """
 
+import json
 import math
 import re
 import sqlite3
@@ -18,6 +20,105 @@ from loguru import logger
 
 from app.core.config.settings import settings
 from app.utils.timezone import taipei_now
+
+
+# ═══════════════════════════════════════════════════════
+# v108 Phase 3：失效條件文字 → 結構化 JSON parser
+# ═══════════════════════════════════════════════════════
+
+# 失效條件常見模式（中文 LLM 輸出為主）：
+#   「跌破 $0.2442」「跌破 0.2442」「低於 $X」「< $X」
+#   「突破 $0.2552」「高於 $X」「上方 $X」「> $X」
+#   「+ 放量 > 1.5×」「+ 成交量 > 2 倍」「(放量)」
+#   「FOMC 公布前 12h 未觸邊界」（事件條件，本版不處理）
+#
+# 設計：
+# - 需要有方向關鍵字（突破/跌破/高於/低於/上方/下方/超過/⬆/⬇）或「< $」「> $」
+# - 純 `>` 或 `<` 不匹配（會被誤抓量過濾條件 "> 1.5×"）
+_INV_PRICE_BELOW = re.compile(
+    r"(?:跌破|低於|下方|⬇|<\s*=?\s*\$)\s*\$?(\d+(?:[.,]\d+)?)",
+    re.IGNORECASE,
+)
+_INV_PRICE_ABOVE = re.compile(
+    r"(?:突破|高於|上方|超過|⬆|>\s*=?\s*\$)\s*\$?(\d+(?:[.,]\d+)?)",
+    re.IGNORECASE,
+)
+_INV_VOL_MULT = re.compile(
+    r"(?:放量|成交量|量\s*>\s*).*?(\d+(?:\.\d+)?)\s*[×x倍]",
+    re.IGNORECASE,
+)
+
+
+def parse_invalidation_to_json(text: str) -> Optional[dict]:
+    """v108 Phase 3：把 LLM 寫的失效條件文字解析為結構化條件。
+
+    Args:
+        text: LLM 輸出的失效條件文字，例如
+              「突破 $0.2552（Donchian 上緣）+ 放量 > 1.5× 均量 → 切換趨勢做多；跌破 $0.2442 → 切換趨勢做空」
+
+    Returns:
+        dict 或 None。dict 結構：
+        {
+            "conditions": [
+                {"type": "price_above", "threshold": 0.2552, "volume_mult": 1.5},
+                {"type": "price_below", "threshold": 0.2442}
+            ],
+            "raw_text": "...",
+            "parser_version": "v108_phase3"
+        }
+        若沒抓到任何價格條件 → 回 None（caller 應 fallback 到純文字儲存）。
+
+    限制：
+        - 僅支援價格條件（突破 / 跌破 / 高於 / 低於）+ 量過濾
+        - 事件條件（FOMC 前 12h 等）由 event_calendar_sync 預先處理，不在此 parser 範疇
+        - 「方向切換」（→ 切換做多/空）不解析動作層，只記條件
+    """
+    if not text or not text.strip():
+        return None
+
+    text_norm = text.replace(",", "")  # 統一去千位逗號（避免 0.255,2 解析錯）
+    conditions: list[dict] = []
+    seen_thresholds: set[tuple[str, float]] = set()  # 去重
+
+    # 抽段：用 ；、；、→ 等切（同一條件的量過濾在同段內較易判斷）
+    segments = re.split(r"[；;]|→|->", text_norm)
+
+    for seg in segments:
+        seg = seg.strip()
+        if not seg:
+            continue
+
+        # 段內是否有量過濾
+        vol_m = _INV_VOL_MULT.search(seg)
+        vol_mult = float(vol_m.group(1)) if vol_m else None
+
+        # 取所有價格條件（一個段可能多個，少見但允許）
+        for pattern, cond_type in (
+            (_INV_PRICE_ABOVE, "price_above"),
+            (_INV_PRICE_BELOW, "price_below"),
+        ):
+            for m in pattern.finditer(seg):
+                try:
+                    threshold = float(m.group(1))
+                except ValueError:
+                    continue
+                key = (cond_type, threshold)
+                if key in seen_thresholds:
+                    continue
+                seen_thresholds.add(key)
+                cond = {"type": cond_type, "threshold": threshold}
+                if vol_mult is not None:
+                    cond["volume_mult"] = vol_mult
+                conditions.append(cond)
+
+    if not conditions:
+        return None
+
+    return {
+        "conditions": conditions,
+        "raw_text": text.strip()[:500],  # 截斷避免 JSON 太長
+        "parser_version": "v108_phase3",
+    }
 
 _PREDICTIONS_PATTERN = re.compile(
     r"---PREDICTIONS---\s*\n(.*?)(?:\n---END_PREDICTIONS---|$)",
@@ -492,6 +593,17 @@ class PredictionTracker:
         except sqlite3.OperationalError:
             pass
 
+        # v108 Phase 3：失效條件結構化儲存 + watcher 自動標記
+        for _col_def in (
+            "invalidation_json TEXT DEFAULT NULL",      # 結構化失效條件（JSON）
+            "invalidated_at TEXT DEFAULT NULL",          # watcher 標記失效時間
+            "invalidation_trigger TEXT DEFAULT NULL",    # 觸發描述（如「價格 > $0.2552」）
+        ):
+            try:
+                self._conn.execute(f"ALTER TABLE predictions ADD COLUMN {_col_def}")
+            except sqlite3.OperationalError:
+                pass  # 欄位已存在
+
         # 覆盤報告紀錄表
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS review_log (
@@ -708,14 +820,26 @@ class PredictionTracker:
                     f"vs 現有={conflict_info}（{symbol}）"
                 )
 
+            # v108 Phase 3：嘗試把 invalidation 文字解析為結構化 JSON（給 watcher 用）
+            _inv_text = prediction.get("invalidation", "")
+            _inv_json = None
+            if _inv_text:
+                try:
+                    _parsed = parse_invalidation_to_json(_inv_text)
+                    if _parsed:
+                        _inv_json = json.dumps(_parsed, ensure_ascii=False)
+                except Exception as _ip_err:
+                    logger.debug(f"invalidation parse 失敗（純文字 fallback）：{_ip_err}")
+
             cursor = self._conn.execute(
                 """INSERT INTO predictions
                    (symbol, timeframe, direction, entry_price, target_price, stop_price,
                     timeframe_hours, confidence, regime, indicators, invalidation,
+                    invalidation_json,
                     source_question, created_at, expires_at, status,
                     is_bilateral, bilateral_pair_id, horizon_class, regime_std,
                     position_size_multiplier)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)""",
                 (
                     symbol, timeframe,
                     prediction["direction"],
@@ -726,7 +850,8 @@ class PredictionTracker:
                     prediction["confidence"],
                     prediction["regime"],
                     prediction["indicators"],
-                    prediction.get("invalidation", ""),
+                    _inv_text,
+                    _inv_json,
                     source_question,
                     now.isoformat(),
                     expires.isoformat(),
@@ -770,7 +895,7 @@ class PredictionTracker:
         """取得已驗證的預測（支援按 symbol 和 regime 過濾）。"""
         with self._lock:
             self._ensure_db()
-            query = "SELECT * FROM predictions WHERE status != 'active'"
+            query = "SELECT * FROM predictions WHERE status NOT IN ('active', 'invalidated')"
             params = []
             if symbol:
                 query += " AND symbol = ?"
@@ -861,7 +986,7 @@ class PredictionTracker:
     ) -> dict:
         self._ensure_db()
         cutoff = (taipei_now() - timedelta(days=days)).isoformat()
-        query = "SELECT * FROM predictions WHERE status != 'active' AND created_at > ?"
+        query = "SELECT * FROM predictions WHERE status NOT IN ('active', 'invalidated') AND created_at > ?"
         params: list = [cutoff]
         if symbol:
             query += " AND symbol = ?"
@@ -989,7 +1114,7 @@ class PredictionTracker:
         with self._lock:
             self._ensure_db()
             cutoff = (taipei_now() - timedelta(days=days)).isoformat()
-            query = "SELECT direction, status FROM predictions WHERE status != 'active' AND created_at > ?"
+            query = "SELECT direction, status FROM predictions WHERE status NOT IN ('active', 'invalidated') AND created_at > ?"
             params: list = [cutoff]
             if symbol:
                 query += " AND symbol = ?"
@@ -1016,7 +1141,7 @@ class PredictionTracker:
         with self._lock:
             self._ensure_db()
             cutoff = (taipei_now() - timedelta(days=days)).isoformat()
-            query = "SELECT regime, status FROM predictions WHERE status != 'active' AND created_at > ?"
+            query = "SELECT regime, status FROM predictions WHERE status NOT IN ('active', 'invalidated') AND created_at > ?"
             params: list = [cutoff]
             if symbol:
                 query += " AND symbol = ?"
@@ -1132,7 +1257,7 @@ class PredictionTracker:
         """取得覆盤所需的資料（某時間範圍內的所有已驗證預測）"""
         with self._lock:
             self._ensure_db()
-            query = "SELECT * FROM predictions WHERE status != 'active'"
+            query = "SELECT * FROM predictions WHERE status NOT IN ('active', 'invalidated')"
             params: list = []
             if start_date:
                 query += " AND created_at >= ?"

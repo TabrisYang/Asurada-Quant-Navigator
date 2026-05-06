@@ -1,6 +1,6 @@
 # 阿斯拉量化系統 — 完整系統 Prompt 與架構規格書
 
-> **最後更新：2026-04-25** — 與實際程式碼同步
+> **最後更新：2026-05-06** — 與實際程式碼同步（v108）
 
 ## 系統定位
 
@@ -592,6 +592,10 @@
 - **分批進場價位引用規則**（v99 新增）：`compute_laddered_entries` 回傳的 `long_entries` / `short_entries` / `weighted_avg_entry` / `stop_loss` / `take_profit` / `rr` / `ratio_strategy` 欄位，LLM **必須**直接引用，**禁止**自行推算分批價位或 SL/TP。`enabled = false`（regime confidence 過低）→ 改為「單一進場 + 小倉位試單」；`missing_indicators` 非空 → 主動呼叫 `manage_indicator(action="add")` 補回再重算
 - **結構化結論卡規則**（v100 新增）：`comprehensive_analysis` / `deep_phase1-3` 結尾必須產出可見結論卡（emoji + 表格 + 9 欄位：方向/進場/目標/止損/時間框/信心/指標/regime/失效條件）— 取代舊隱藏 `---PREDICTIONS---` block。低信心場景（`regime confidence < 0.5` 或 Wilson CI 下界 < 50%）改用「⚠️ 建議觀望」格式，**不**留下預測。「📈 系統參考」這行寫成 placeholder，後端 `_inject_recent_accuracy()` 會替換為實際歷史命中率
 - **chart_state.recent_accuracy 引用規則**（v100 新增）：若 chart_state 含 `recent_accuracy` 欄位（30d/90d 命中率 + Bayesian CI + Brier + best/worst indicators），LLM **必須**：在信心評估納入此命中率（< 50% 且 n >= 10 強制降信心 + 顯眼處警示）；優先引用 `best_indicators`、對 `worst_indicators` 標警告；`calibration_brier > 0.3` 時提醒「校準偏差大，低倉位試單」
+- **v108 強化（投資分析報告品質根治）**：
+  1. **客觀數值必抄不得編造**：雙向計劃進場分批價、SL、TP、RR 必須直接抄 `chart_state.bilateral_plan`（後端 `compute_laddered_entries(direction="both")` 算好）；「位於區間 X% 位置」必抄 `chart_state.donchian_position_pct`（後端 Donchian-20 算）；技術指標數值必抄 `chart_state.indicatorValues`（後端精確算）。LLM 自編 → fact_checker 容忍度收緊（指標分組：振盪類 ±2 abs、趨勢類 ±5% rel、通道類 ±2% rel、donchian_position ±1 abs）會抓出，並在報告底部串流可見「⚠️ 數值校驗異常」區塊
+  2. **資料不足降階多級**（已廢除舊「視為對稱 50/50」反 Kelly hardcode）：bias_score 缺失時走決策樹 — `donchian_position_pct` 可用 → 格式 B-asymm 不對稱雙向（`short_ratio = clamp(0.5 + (pct/100 - 0.5), 0.30, 0.70)`）/ `bias_reasons` 仍有方向 → lean 卡（D/E）/ 完全無訊號 → 觀望卡（C）。任何情況下不再寫「對稱 50/50 雙向開單」
+  3. **失效條件結構化 + watcher 自動標記**：失效條件文字（如「跌破 $X」「突破 $Y + 放量 > 1.5×」）寫入 predictions 後，後端 `parse_invalidation_to_json()` 自動解析為 `invalidation_json` 結構化條件（價格條件 + 量過濾）；[watcher.py](backend/app/core/watcher.py) 在資料同步完成 / 系統啟動時 sweep（60min 最小存活 + 2 根 K 線確認 + shadow mode 預設 ON），觸發即標 `status='invalidated'`，hit-rate 計算自動排除（`status NOT IN ('active', 'invalidated')`）；報告底部顯示「📛 N 筆因失效條件已排除」
 
 ### 意圖驅動的 SYSTEM_PROMPT 動態組裝（v98 強化）
 
@@ -1124,6 +1128,72 @@ GET    /api/health                   # 系統健康狀態
     **Phase 7 收尾（this commit）**：系統prompt.md 加第 102/103 項；37 pytest 全綠；frontend tsc 零錯
     **設計鐵律**：每個 Phase 獨立 Stop-Safe / schema 純加法 / 不付費（無 Bloomberg / 無 cloud / 無 GPU）/ v100 結論卡格式不變
     **完成後系統能力**：每份「全部分析」具備真實 SHAP + 真相似路徑 + 雙向計劃 + 30 秒結論 + 事件警示 + per-regime 模型 + Dashboard 完整觀察工具
+
+104. ✅ v104 系列（2026-04-28 ~ 04-29）：fact-checker + ranging 子類型 + lean 卡 + bias 9 分量 + 雙向方向機率
+    **動機**：v103 後，使用者實測發現多個品質瑕疵：(1) LLM 寫具體數字無對照（fabrication 風險）(2) ranging 場景 90% 都被無腦套雙向計劃，未細分子類型 (3) ATR 倍數固定不分 timeframe / regime / 信心 (4) bias_score 只有 5 分量，訊號粒度不夠
+    **Q1（commit 7a20f6d）**：免費資料源整合（衍生品 funding/OI/多空比 + Fear&Greed + FRED 總體 + 批次掃描），注入 chart_state.external_signals
+    **Q3（commit ae023b0）**：[fact_checker.py](backend/app/core/fact_checker.py) 新建 — 掃 LLM 文本中具體數值（RSI/MACD/funding/多空比/F&G/命中率），與 chart_state 對照，超容忍度標 mismatch；CORE prompt 加「數值引用鐵律」（v104 Q3）
+    **Q4（commit 5596dae）**：prediction_features 加 8 個 lag column（rsi_14_lag5、close_return_5/20 等），給 ML 訓練序列性特徵
+    **Fix A（commit 2784fb5）**：timeframe + regime + 信心三維度自適應 ATR 倍數（[laddered_entries.py](backend/app/core/laddered_entries.py) `_get_atr_mults`），含 cap + feature flag
+    **Fix B（commit 0dcadfe）**：[regime_subtype.py](backend/app/core/regime_subtype.py) 新建 — ranging 拆 5 個子類型（true_ranging / lean_long / lean_short / breakout_pending / neutral_ranging），後端先算標籤注入 chart_state，LLM 看標籤直接選結論卡
+    **Fix C（commit 1d03582）**：6 規則卡片選擇表 + 偏多/偏空獨立結論卡（格式 D/E）+ parser 識別（[prediction_tracker.py](backend/app/core/prediction_tracker.py) `_LEAN_CARD_PATTERN`）；倉位 ×0.7 縮減
+    **Fix D + E + F（commit 363ab23）**：每張卡開頭加「🎯 結論卡選擇 + 理由 ≤30 字」+ SL/TP 後標 ATR 倍數 + CORE prompt 重組分區
+    **Fix G（commit 8c15380）**：量化驗證腳本 + 補規則涵蓋率
+    **4.1（commit cb036fc）**：bias_score 5→9 分量擴展（加均值回歸 IC、breadth、RS、funding squeeze、leadership 等），動態 threshold 依激活分量數調整
+    **4.2（commit 39b3de9）**：修 LLM 對 unknown subtype 措辭錯誤 + ladder fallback 加 SL/TP 倍數提示（即使 ladder disabled 也給 LLM 建議倍數）
+    **4.3（commit 5355289）**：雙向卡顯示方向機率行（🧭 行）— 從 metrics.bias_score 線性 clip 算 P_long / P_short，倉位按機率不對稱拆分（不再強制對稱）
+    **4.4（commit 8798f70）**：修 parser 對 markdown bold 的失敗（解 ETH/ADA 沒存進 DB 根因）
+    **設計鐵律**：fact-checker 不阻擋（事後標註）、ranging 子類型純加法、ATR 倍數 cap + flag 可關
+    **完成後系統能力**：報告數值有後端 fact-check 護網；ranging 場景按子類型走對應卡（90% 不再無腦雙向）；bias_score 訊號粒度從 5 → 9，雙向卡有方向機率不對稱倉位
+
+105. ✅ v105 系列（2026-04-29 ~ 05-02）：horizon 拆分 + 因子權重學習 + per-regime 校準 + 多個投資邏輯 bug 修復
+    **動機**：v104 後實測 ADA 案例發現 ladder 邏輯多個 bug；模型對不同 horizon 樣本混為一談；regime 間機率校準偏差大
+    **Phase A（commit 2f5d588）**：predictions 加 `horizon_class`（short/medium/long 持倉分類）+ `regime_std`（標準化 6 種 regime label）+ Coinglass 嘗試式 liq 抓取
+    **Phase B（commit f5a9c37）**：[factor_weight_learner.py](backend/app/core/factor_weight_learner.py) 新建 — 因子權重學習器 + PCA 正交化（含 quality gate，PSI / IC / 樣本門檻）
+    **Phase C（commit 623f987）**：per-regime isotonic 校準（[per_regime_calibrator.py](backend/app/core/per_regime_calibrator.py)）+ walk-forward + 32 unit tests
+    **5.1（commit 94b4d5a）**：bias_score 動態 threshold（依 9 分量激活數調整：n≤2→0.20、n=3→0.30、n≥4→0.40）+ ladder 最小 spacing 守衛（< 0.5×ATR 強制拉開避免重合）
+    **5.2（commit fa161c8）**：修 ladder 兩個邏輯 bug（Bug A：long entries 高於 current_price → clamp、Bug B：依最終位置重新分配 ratios）
+    **5.3（commit 9d4e43c）**：投資邏輯 bug 全面審查 + 19 個新 unit tests 補強
+    **5.4（commit e093a70）**：修經濟日曆 NFP 日期錯誤 + 加過期警示流程（calendar_meta 注入 chart_state）
+    **5.5（commit 13eeec0）**：條件機率掃描加 Wilson CI + Bayesian shrinkage（解決小樣本誤導）
+    **5.6（commit 5d657c0）**：修「全部分析後續查詢無回應」前端佇列卡死 bug
+    **5.7（commit ce1b0de）**：修 `_format_function_results` 3000 字截斷導致 LLM 誤判工具失敗
+    **設計鐵律**：因子權重學習過 quality gate 才上線；horizon / regime 純加法欄位
+    **完成後系統能力**：模型分 horizon 訓練；regime 間機率校準準確；ladder 邏輯經實戰驗證；條件機率有信心區間
+
+106. ✅ v106 系列（2026-05-04，5 階段）：策略品質升級 + 精準護網 + 體感優化 + 安全效率 + CI 防 regression
+    **動機**：累積多輪優化後需系統性品質提升 + 防止 regression，分 5 階段做完整套裝
+    **階段 1（commit e74a8fc）— A1+A2+A3 策略品質升級**：策略生成器強化 / 多策略對比改進 / 回測指標精細化
+    **階段 2（commit 5a50d47）— B1+B3+B4 精準護網 + 體感優化**：護網規則補強 / UI 響應優化 / 訊息表述精準
+    **階段 3（commit 4aaafae）— C1+C2+C3+C4 精準性深化 + 穩定性**：訊號精準度提升 / 穩定性護網 / 邊界情況處理
+    **階段 4（commit ca7cbd0）— D1+D2+D3 安全 + 效率**：安全防護強化 / 效率優化 / 資源管理
+    **階段 5（commit b61157a）— CI 防 regression**：[test_v106.py](backend/tests/test_v106.py) 12 個 smoke tests，每階段 commit 必過
+    **設計鐵律**：每階段獨立 Stop-Safe + smoke test 自動防 regression
+    **完成後系統能力**：策略品質、護網、效率、安全四大維度系統性升級，CI 自動把關
+
+107. ✅ v107（commit b992056，2026-05-04）：公正性 + 可靠性 + 資料誠實度
+    **動機**：v106 後使用者反饋系統有時「對使用者立場有偏向」、「指標來源不誠實揭露」、「可靠性表述需更精準」
+    **v107.1 公正性**：修正 LLM 對使用者持倉產生的偏向（注入 portfolio_summary 為**客觀組合風控**而非「使用者立場」），避免基於使用者多空比反向推論方向；CORE prompt 加引用規則（不可用組合推論方向）
+    **v107.2 可靠性**：[chat.py](backend/app/api/routes/chat.py) `chart_state["portfolio_summary"]` 注入時嚴格區分「組合層風控」vs「單一標的方向」；風控警示精準化（多空比 > 3 / freshness 警示 / 集中度 > 30%）
+    **v107.3 資料誠實度**：CORE prompt 強化「資料來源透明」原則，每個指標、訊號、命中率都需明確標註來源（chart_state 欄位 / 工具回傳 / 計算式）；fact-checker 警示優先順序提升
+    **設計鐵律**：誠實表述、不偏向、揭露邊界
+    **完成後系統能力**：報告中所有客觀數字、訊號、判斷都有可追溯來源；組合層資訊不再誤導單標的方向判斷
+
+108. ✅ v108（2026-05-06）：投資分析報告 3 點優化（不對稱降階 + 客觀數值強制 + 失效條件 watcher）
+    **動機**：使用者實測 ranging 雙向計劃報告，發現 3 個直接影響投資決策品質的問題：(1) 客觀數值（區間位置 %、雙向計劃進場分批價）由 LLM 自編而非系統算 → 用戶可能基於虛構數字下單 (2) 失效條件（如「跌破 $X 切換做空」「FOMC 12h 取消」）純文字裝飾、系統不處理 → 用戶以為自動處理但實際全手動 (3) 「資料不足」hardcode 走「視為對稱 50/50」雙向 = 反 Kelly 設計 → 必有一邊先打 SL，期望值為負
+    **Phase 1（[function_defs.py](backend/app/core/llm/function_defs.py) 改路由）**：把 `bias_score 缺失 → 對稱 50/50` hardcode 改為三分支決策樹：(1) `chart_state.donchian_position_pct` 可用 → 走新格式 B-asymm「🔀 雙向計劃（不對稱·依區間位置加權）」（`short_ratio = clamp(0.5 + (pct/100 - 0.5), 0.30, 0.70)`，倉位按比例不對稱拆）(2) `metrics.bias_reasons` 仍有方向 → 走 lean 卡（格式 D / E，倉位 ×0.7）(3) 完全無訊號 → 走觀望卡（格式 C，不寫 prediction）；新格式 B-asymm 標題「🔀 雙向計劃（不對稱·...）」刻意以「🔀 雙向計劃」開頭，相容既有 `_BILATERAL_CARD_PATTERN` regex
+    **Phase 2（chart_state 注入 + 強制插值 + fact_check 收緊）**：
+      - [chat.py](backend/app/api/routes/chat.py) regime_subtype 後注入 `donchian_position_pct`（標準 Donchian-20 算）+ `donchian_upper`/`donchian_lower` + `bilateral_plan`（ranging/unknown 時呼叫既有 `compute_laddered_entries(direction="both")`）
+      - [function_defs.py](backend/app/core/llm/function_defs.py) v104 Fix E 後加「v108 Fix」強制規則段：「位於區間 X% 位置」必抄 `chart_state.donchian_position_pct`、雙向進場分批價/SL/TP/RR 必抄 `chart_state.bilateral_plan`，禁止 LLM 自估自編
+      - [fact_checker.py](backend/app/core/fact_checker.py) 容忍度從統一 ±10% 收緊為依指標分組：振盪類（RSI/Stoch/MFI/ADX）±2 absolute、趨勢類（MACD/ATR/CCI）±5% relative、通道類（BB）±2% relative；新增 `donchian_position_pct` 校驗（±1 absolute）
+      - [chat.py](backend/app/api/routes/chat.py) fact_check 結果從只發 SSE event 升級為串流可見區塊到報告底部（「═══ ⚠️ 數值校驗異常 ═══」+ mismatch 列表，最多 8 條）
+    **Phase 3（失效條件 watcher）**：
+      - [prediction_tracker.py](backend/app/core/prediction_tracker.py) schema 加 3 欄位（`invalidation_json` / `invalidated_at` / `invalidation_trigger`）+ `parse_invalidation_to_json()` 把 LLM 寫的失效條件文字解析為結構化 conditions（價格條件 + 量過濾），支援「突破/跌破/高於/低於/上方/下方/超過/⬆/⬇/`> $`/`< $`」+「放量 > N×」+「；/ → / ;」分段；hit-rate 計算所有 query 從 `WHERE status != 'active'` 改為 `WHERE status NOT IN ('active', 'invalidated')`
+      - 新建 [watcher.py](backend/app/core/watcher.py) — `sweep_symbol(symbol, tf)` 對 active 預測逐根 K 線比對失效條件；風險控制：60 分鐘最小存活時間（防剛開單就被 wick）+ 2 根 K 線連續確認（防單根 wick 誤觸）；shadow mode（`settings.imitation_shadow_mode=True` 時只 log 不改 status）；`startup_sweep()` 啟動冷啟動掃所有 active
+      - [data_sync.py](backend/app/api/routes/data_sync.py) 每個 symbol+tf 同步完成後 hook 觸發 `sweep_symbol(symbol, tf)`；[main.py](backend/app/main.py) lifespan `_background_init` 加 `startup_sweep()` 不阻塞主流程
+      - [chat.py](backend/app/api/routes/chat.py) `_inject_recent_accuracy` 另查 invalidated 筆數，> 0 時報告底加「📛 另 N 筆因失效條件觸發已排除（不計入命中率）」
+    **設計鐵律**：用既有設施（lean 卡 / laddered_entries / fact_checker / function-call schema 都已存在但用得不夠），只新建必要的 watcher；watcher shadow mode 預設 ON 等實證觀察 1-2 週（觸發 ≥ 10 次、假陽性率 < 20% 才正式啟用，假陽性定義：觸發後 4h 內價格回到觸發前 ±0.5×ATR 範圍）；schema 純加法（既有 query 不影響）
+    **完成後系統能力**：報告中所有客觀數值（區間位置、雙向進場分批價、TP/SL/RR、ATR 倍數、技術指標數值）都由系統算後注入並強制 LLM 抄，編造後系統會 fact-check 標警告區塊；失效條件由系統實際監控、自動標 invalidated 不污染 hit-rate 統計、報告中可見「📛」提示；資料不足時保留多級降階可用性（不對稱雙向 / lean / 觀望），不再無腦對稱 50/50 反 Kelly
 
 ### 待開發功能
 
