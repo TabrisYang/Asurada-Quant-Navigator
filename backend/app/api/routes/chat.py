@@ -788,11 +788,18 @@ def _build_messages(
                     _stats_90d = prediction_tracker.get_stats(symbol=chart_symbol, days=90)
                     if _stats_30d.get("total", 0) >= 3 or _stats_90d.get("total", 0) >= 3:
                         _bayes = _stats_30d.get("bayesian", {})
-                        _ind_stats = _stats_30d.get("indicator_stats", {})
-                        _best = sorted(_ind_stats.items(), key=lambda x: x[1].get("win_rate", 0), reverse=True)
-                        _worst = sorted(_ind_stats.items(), key=lambda x: x[1].get("win_rate", 0))
-                        _best_inds = [k for k, _ in _best[:3] if _[1].get("samples", 0) >= 3] if _ind_stats else []
-                        _worst_inds = [k for k, _ in _worst[:2] if _[1].get("samples", 0) >= 3] if _ind_stats else []
+                        # v112 fix：3 個連環 bug
+                        # (1) get_stats 回傳 key 是 "indicator_performance"（不是 "indicator_stats"），導致 _ind_stats 永遠空
+                        # (2) 原本 `for k, _ in _best[:3] if _[1].get(...)` 的 _[1] 在 dict 上會 KeyError（_ 是 value dict 不是 tuple）
+                        # (3) 邏輯順序錯：先排序再 filter samples >= 3 → top 3 全是 samples=1 的 → 過濾後空
+                        # 正確順序：先 filter samples >= 3 再排序，避免 best/worst 被「樣本不足但碰巧勝率高/低」的 indicator 佔據
+                        _ind_stats = _stats_30d.get("indicator_performance", {})
+                        # 只考慮 samples >= 3 的 indicator（樣本不足的 win_rate 沒統計意義）
+                        _filtered_inds = [(k, v) for k, v in _ind_stats.items() if v.get("samples", 0) >= 3]
+                        _best = sorted(_filtered_inds, key=lambda x: x[1].get("win_rate", 0), reverse=True)
+                        _worst = sorted(_filtered_inds, key=lambda x: x[1].get("win_rate", 0))
+                        _best_inds = [k for k, _v in _best[:3]]
+                        _worst_inds = [k for k, _v in _worst[:2]]
                         if request.chart_state is None:
                             request.chart_state = {}
                         request.chart_state["recent_accuracy"] = {

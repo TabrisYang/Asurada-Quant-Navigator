@@ -73,7 +73,7 @@ async def get_calibration(
         "confidence_calibration": stats.get("confidence_calibration", {}),  # 信心 vs 命中率
         "bayesian": stats.get("bayesian", {}),                            # credible interval
         "by_regime": stats.get("by_regime", {}),                          # per-regime 拆分
-        "by_indicator": stats.get("indicator_stats", {}),                 # per-indicator 拆分
+        "by_indicator": stats.get("indicator_performance", {}),            # per-indicator 拆分（v112 fix：原 key 錯成 indicator_stats）
         "win_rate_weighted": stats.get("win_rate_weighted", 0),
         "total": stats.get("total", 0),
     }
