@@ -2904,6 +2904,29 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
             yield _sse_event("error", {"error": "LLM 回應超時，請稍後再試"})
         except asyncio.CancelledError:
             logger.warning("Streaming chat 被取消（客戶端斷線）")
+            # v114：partial-save — 把已生成的部分內容存進 DB
+            # 即使 client 斷線（瀏覽器/系統/網路層原因，外部不可控），
+            # 使用者重整頁面也能看到 partial 報告，不必打「請繼續」重跑浪費 token + 8 分鐘
+            # 用 sync 呼叫 chat_history.save_message（不 await），避免被 cancel scope 連坐
+            _partial_final = locals().get("final_text") or ""
+            _partial_conv_id = locals().get("conversation_id") or ""
+            if _partial_final.strip() and _partial_conv_id:
+                try:
+                    _partial_clean = (
+                        strip_system_distill(strip_predictions(strip_key_insights(_partial_final)))
+                        + "\n\n---\n⚠️ **報告生成中斷**（網路抖動 / 系統省電）— 已存上方部分內容。請輸入「請繼續」接續。"
+                    )
+                    _partial_total_usage = locals().get("total_usage")
+                    _partial_usage_dict = _partial_total_usage.to_dict() if _partial_total_usage else None
+                    chat_history.save_message(
+                        conversation_id=_partial_conv_id,
+                        role="assistant",
+                        content=_partial_clean,
+                        token_usage=_partial_usage_dict,
+                    )
+                    logger.info(f"[client_disconnect] partial 內容已存 DB，長度={len(_partial_clean)}")
+                except Exception as _save_err:
+                    logger.error(f"[client_disconnect] partial 存 DB 失敗: {_save_err}")
             return
         except Exception as e:
             logger.error(f"Streaming chat 錯誤: {e}")
