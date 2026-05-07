@@ -120,11 +120,29 @@ def check_input_safety(text: str) -> bool:
 
 
 def validate_function_call(func_name: str, args: dict) -> bool:
-    """驗證 function call 是否在白名單內"""
-    if func_name not in ALLOWED_FUNCTIONS:
-        logger.warning(f"LLM 嘗試呼叫未授權函式: {func_name}")
+    """驗證 function call 是否在白名單內。
+
+    v110：容忍 trailing/leading 空白；其餘嚴格匹配。
+    case mismatch 不容忍（function name 屬於 API contract，LLM 大小寫亂寫應拒絕修正而非靜默通過）。
+    """
+    if not func_name:
+        logger.warning("LLM 呼叫了空 function name")
         return False
-    return True
+
+    # 既有名稱已在白名單 → 直接通過
+    if func_name in ALLOWED_FUNCTIONS:
+        return True
+
+    # 容忍空白：strip 後若在白名單 → 通過（caller 端應用 stripped name 做後續處理）
+    stripped = func_name.strip()
+    if stripped != func_name and stripped in ALLOWED_FUNCTIONS:
+        return True
+
+    # 失敗時印詳細 repr 幫助 debug（看是空白、case、編碼問題）
+    logger.warning(
+        f"LLM 嘗試呼叫未授權函式: name={func_name!r} (stripped={stripped!r}, len={len(func_name)})"
+    )
+    return False
 
 
 # ========== 函式執行器 ==========
@@ -148,7 +166,10 @@ async def execute_function_calls(
         }
     """
     chart_updates: dict[str, Any] = {}
-    results: list[dict] = []
+    # v110：results 改 by-index 預先分配，保證 results[i] 對應 function_calls[i]
+    # 之前 list.append() 在 sequential / parallel / reject 三條路混合 push，順序跟 function_calls 不一致
+    # 導致 _format_function_results enumerate 對應錯，把 error 訊息誤掛到別的 function 上
+    results: list[dict] = [{} for _ in function_calls]
 
     # 從 chart_state 取得預設值
     default_symbol = (chart_state or {}).get("symbol", "BTC/USDT")
@@ -162,18 +183,23 @@ async def execute_function_calls(
         "detect_smc_structure", "compute_laddered_entries",
     }
 
-    # 分離：輕量同步/依序 vs 重量級可並行
-    sequential_calls = []
-    parallel_calls = []
-    for fc in function_calls:
-        name = fc.get("name", "")
+    # 分離：輕量同步/依序 vs 重量級可並行（保留原始 index）
+    sequential_calls: list[tuple[int, dict]] = []
+    parallel_calls: list[tuple[int, dict]] = []
+    for idx, fc in enumerate(function_calls):
+        raw_name = fc.get("name", "")
+        # v110：normalize trailing/leading 空白並寫回 fc，確保所有後續比對都用乾淨 name
+        name = (raw_name or "").strip()
+        if name != raw_name:
+            logger.warning(f"LLM function name 含空白：{raw_name!r} → 已修正為 {name!r}")
+            fc["name"] = name
         if not validate_function_call(name, fc.get("arguments", {})):
-            results.append({"function": name, "error": "未授權的函式呼叫"})
+            results[idx] = {"function": name, "error": "未授權的函式呼叫"}
             continue
         if name in _PARALLEL_FUNCS:
-            parallel_calls.append(fc)
+            parallel_calls.append((idx, fc))
         else:
-            sequential_calls.append(fc)
+            sequential_calls.append((idx, fc))
 
     # 初始化進度追蹤
     _total = len(sequential_calls) + len(parallel_calls)
@@ -182,8 +208,8 @@ async def execute_function_calls(
         progress.completed = 0
         progress.phase = "sequential" if sequential_calls else "parallel"
 
-    # --- Phase 1: 依序執行輕量函式 ---
-    for fc in sequential_calls:
+    # --- Phase 1: 依序執行輕量函式（v110：改用 idx 寫入 results）---
+    for idx, fc in sequential_calls:
         name = fc["name"]
         args = fc.get("arguments", {})
         if progress is not None:
@@ -196,48 +222,48 @@ async def execute_function_calls(
                     chart_updates.update(cu)
                 else:
                     chart_updates.setdefault("multi_symbol_data", []).append(cu)
-                results.append({"function": name, "result": result})
+                results[idx] = {"function": name, "result": result}
 
             elif name == "manage_indicator":
                 result = _exec_manage_indicator(args)
                 chart_updates.setdefault("indicator_actions", []).append(result)
-                results.append({"function": name, "result": result})
+                results[idx] = {"function": name, "result": result}
 
             elif name == "find_conditions":
                 result = await _exec_find_conditions(args, default_symbol, default_timeframe)
                 chart_updates.setdefault("annotations", []).extend(result.get("annotations", []))
-                results.append({"function": name, "result": result})
+                results[idx] = {"function": name, "result": result}
 
             elif name == "annotate_chart":
                 ann_list = _exec_annotate(args)
                 chart_updates.setdefault("annotations", []).extend(ann_list)
-                results.append({"function": name, "result": {"count": len(ann_list), "group_name": args.get("group_name", "AI 標記")}})
+                results[idx] = {"function": name, "result": {"count": len(ann_list), "group_name": args.get("group_name", "AI 標記")}}
 
             elif name == "draw_pattern":
                 ann_list = _exec_draw_pattern(args)
                 chart_updates.setdefault("annotations", []).extend(ann_list)
-                results.append({"function": name, "result": {"pattern": args.get("pattern_name"), "points": len(args.get("points", [])), "lines": len(ann_list)}})
+                results[idx] = {"function": name, "result": {"pattern": args.get("pattern_name"), "points": len(args.get("points", [])), "lines": len(ann_list)}}
 
             elif name == "generate_analysis":
-                results.append({"function": name, "result": {"type": "text_analysis"}})
+                results[idx] = {"function": name, "result": {"type": "text_analysis"}}
 
             elif name == "suggest_indicators":
                 result = _exec_suggest_indicators(args)
-                results.append({"function": name, "result": result})
+                results[idx] = {"function": name, "result": result}
 
         except Exception as e:
             logger.error(f"執行 {name} 失敗: {e}")
-            results.append({"function": name, "error": str(e)})
+            results[idx] = {"function": name, "error": str(e)}
         finally:
             if progress is not None:
                 progress.completed += 1
 
-    # --- Phase 2: 並行執行重量級函式 ---
+    # --- Phase 2: 並行執行重量級函式（v110：保留 idx）---
     if parallel_calls:
         if progress is not None:
             progress.phase = "parallel"
             # 顯示並行中最具代表性的任務名
-            progress.current_task = parallel_calls[0]["name"]
+            progress.current_task = parallel_calls[0][1]["name"]
 
         async def _run_one(fc: dict) -> dict:
             """執行單一重量級函式，完成後更新進度"""
@@ -298,20 +324,21 @@ async def execute_function_calls(
                     progress.completed += 1
                     # 更新 current_task 為尚未完成的並行任務中第一個
                     _remaining = [
-                        pc["name"] for pc in parallel_calls
-                        if pc["name"] != name
+                        pc[1]["name"] for pc in parallel_calls
+                        if pc[1]["name"] != name
                     ]
                     if _remaining:
                         progress.current_task = _remaining[0]
 
+        # v110：asyncio.gather 保證 parallel_results 順序對應輸入；用 zip 把結果寫回正確 idx
         parallel_results = await asyncio.gather(
-            *[_run_one(fc) for fc in parallel_calls],
+            *[_run_one(fc) for (idx, fc) in parallel_calls],
             return_exceptions=False,
         )
 
-        # 合併並行結果到 chart_updates 和 results
-        for pr in parallel_results:
-            results.append(pr)
+        # 合併並行結果到 chart_updates 和 results（用原始 idx 寫入）
+        for (idx, fc), pr in zip(parallel_calls, parallel_results):
+            results[idx] = pr
             r = pr.get("result", {})
             if not isinstance(r, dict):
                 continue

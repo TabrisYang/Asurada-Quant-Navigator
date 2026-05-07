@@ -142,6 +142,24 @@ export default function TopBar({ onSettingsClick }: TopBarProps) {
   const setShowSyncPanel = useChartStore((s) => s.setShowSyncPanel);
   const setShowTwScanPanel = useChartStore((s) => s.setShowTwScanPanel);
 
+  // v110：streaming 中切換保護 — 避免無聲打斷 LLM 分析（root cause of 「請繼續」沒回應 bug）
+  // 切換前若 chatLoading=true → confirm 用戶；確認則先廣播 abort 給 ChatInterface 再切
+  const confirmAndSwitch = (callback: () => void, label: string): void => {
+    const chatLoading = useChartStore.getState().chatLoading;
+    if (!chatLoading) {
+      callback();
+      return;
+    }
+    const ok = window.confirm(
+      `⚠️ 目前正在進行 AI 分析。\n切換${label}會中斷當前分析且無法回復。\n\n確定要強制切換嗎？`
+    );
+    if (!ok) return;
+    // 先廣播 abort（ChatInterface 監聽會跑 handleAbort 走完整清理路徑）
+    window.dispatchEvent(new CustomEvent('force-abort-streaming'));
+    // 給 React state flush 留一拍
+    setTimeout(callback, 50);
+  };
+
   const [symbolList, setSymbolList] = useState<SymbolList>(loadSymbolList);
   // downloadedSymbols 已移除 — 下拉選單只從 symbolList 生成
   const [showEditor, setShowEditor] = useState(false);
@@ -306,7 +324,10 @@ export default function TopBar({ onSettingsClick }: TopBarProps) {
       <div className="relative flex items-center gap-1">
         <select
           value={symbol}
-          onChange={(e) => setSymbol(e.target.value)}
+          onChange={(e) => {
+            const newVal = e.target.value;
+            confirmAndSwitch(() => setSymbol(newVal), '標的');
+          }}
           className="px-3 py-1 rounded text-sm border-none outline-none cursor-pointer"
           style={{
             background: 'var(--bg-tertiary)',
@@ -499,7 +520,10 @@ export default function TopBar({ onSettingsClick }: TopBarProps) {
           return (
             <button
               key={tf.value}
-              onClick={() => !disabled && setTimeframe(tf.value)}
+              onClick={() => {
+                if (disabled) return;
+                confirmAndSwitch(() => setTimeframe(tf.value), '時間週期');
+              }}
               disabled={disabled}
               className="px-3 py-1 rounded text-sm transition-colors"
               style={{
@@ -537,7 +561,10 @@ export default function TopBar({ onSettingsClick }: TopBarProps) {
             maxWidth: '170px',
           }}
           value={startDate || ''}
-          onChange={(e) => setDateRange(e.target.value || null, endDate)}
+          onChange={(e) => {
+            const newVal = e.target.value || null;
+            confirmAndSwitch(() => setDateRange(newVal, endDate), '日期範圍（起）');
+          }}
         />
         <span>~</span>
         <input
@@ -551,7 +578,10 @@ export default function TopBar({ onSettingsClick }: TopBarProps) {
             maxWidth: '170px',
           }}
           value={endDate || ''}
-          onChange={(e) => setDateRange(startDate, e.target.value || null)}
+          onChange={(e) => {
+            const newVal = e.target.value || null;
+            confirmAndSwitch(() => setDateRange(startDate, newVal), '日期範圍（迄）');
+          }}
         />
       </div>
 

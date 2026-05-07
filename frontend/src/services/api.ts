@@ -267,27 +267,36 @@ export function streamChatMessage(
         const STREAM_TIMEOUT_MS = 600_000;
 
         try {
+          // v110：區分「reader 自然結束」與「timeout 觸發」— 之前都當 timeout 顯示誤導
+          let timeoutFired = false;
           while (true) {
             if (controller.signal.aborted) break;
 
             const readPromise = reader.read();
             let timeoutId: ReturnType<typeof setTimeout>;
             const timeoutPromise = new Promise<{ done: true; value: undefined }>((resolve) => {
-              timeoutId = setTimeout(() => resolve({ done: true, value: undefined }), STREAM_TIMEOUT_MS);
+              timeoutId = setTimeout(() => {
+                timeoutFired = true;
+                resolve({ done: true, value: undefined });
+              }, STREAM_TIMEOUT_MS);
             });
             const { done, value } = await Promise.race([readPromise, timeoutPromise]);
             clearTimeout(timeoutId!);
             if (done) {
-              if (!value) {
+              if (timeoutFired) {
                 // 超時：強制斷開 HTTP 連線，通知後端停止處理
                 controller.abort();
                 wrappedCallbacks.onError?.('分析連線無回應超過 600 秒，已自動斷開（如分析仍在進行請查看後端 log）');
-                // v105.6 Fix 1：強制 fire onDone 確保 ChatInterface 的 streamPromise 能 resolve
-                // 否則 chatLoading 卡 true、後續訊息無法送出
                 if (!doneEmitted) {
                   doneEmitted = true;
                   callbacks.onDone?.(undefined, { aborted: true, reason: 'timeout' });
                 }
+              } else if (!doneEmitted) {
+                // v110：reader 自然結束但 SSE done event 從未收到
+                // 最常見原因：後端 ASGI handler 被 cancel（client 切換 symbol/timeframe / 網路波動 / browser 斷連）
+                wrappedCallbacks.onError?.('⚠️ 分析中斷：連線提早斷開（可能原因：切換標的/週期、網路波動、browser tab 斷連）');
+                doneEmitted = true;
+                callbacks.onDone?.(undefined, { aborted: true, reason: 'connection_closed' });
               }
               break;
             }
@@ -417,6 +426,10 @@ function _handleSSEEvent(
       break;
     case 'audit':
       callbacks.onAudit?.(data as unknown as Parameters<NonNullable<StreamCallbacks['onAudit']>>[0]);
+      break;
+    case 'heartbeat':
+      // v110：心跳事件，無 callback，僅維持 SSE 連線 active 防中間層判 idle 而斷
+      // 主迴圈的 reader.read() 收到此 event 即重置 timeout，無需額外處理
       break;
     default:
       break;

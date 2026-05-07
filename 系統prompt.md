@@ -1,6 +1,6 @@
 # 阿斯拉量化系統 — 完整系統 Prompt 與架構規格書
 
-> **最後更新：2026-05-06** — 與實際程式碼同步（v109）
+> **最後更新：2026-05-07** — 與實際程式碼同步（v110）
 
 ## 系統定位
 
@@ -1210,6 +1210,37 @@ GET    /api/health                   # 系統健康狀態
     **Step 6 [function_defs.py](backend/app/core/llm/function_defs.py) CORE prompt 加「v109 未收錄事件提醒」**：在既有「事件警示規則」段（line ~316）後加段落，明列 CPI/PPI/Retail Sales/GDP/PCE 不在 events.json；觸發條件 3 種（使用者問事件 / 月中 10-25 日 / BTC-ETH macro 分析）需提醒「⚠️ 系統未收錄通膨/總體數據，下單前請自行查 BLS/BEA 行事曆」；**絕對禁止**自編這些事件具體日期（會被 fact-checker 標 mismatch）
     **設計鐵律**：A+B 類自動化覆蓋 ~80% 高頻重要事件（FOMC 月會 + NFP 月發 + ISM 月發 + Jobless 週發），C 類維持手動模式但改通用提醒避免誤觸；既有 [event_injector.py](backend/app/core/event_injector.py) 過期過濾邏輯（line 75 `if ev_dt < now_utc: continue`）已充分，雙重保護不需新增；HTML 結構雖穩定但不是合約，scraper 失敗 → 保留舊 events + log warning，不阻塞主流程
     **完成後系統能力**：FOMC 從手動維護升級為 Fed 官方來源自動同步（HTML 結構穩定可靠）；NFP 用規則計算比爬蟲還準（含假日推遲）；CPI/PPI/GDP 等不再出現「unverified 但 LLM 仍引用」的假事件警示，改由通用提醒讓使用者主動核對；events.json 自動清過期、保留手動 entries、可追溯來源；報告中事件警示再無不存在會議或日期錯誤情況
+
+110. ✅ v110（2026-05-07）：streaming 中斷防護 + executor 並行結果對應修復 + 事件 prompt index mismatch 修復
+    **動機**：v109 後使用者實測「全部分析」遇到多種 streaming 中斷症狀：(1)「請繼續」連按沒反應 (2) 「⚠️ AI 分析完成但未能產生文字報告」(3) `[client_disconnect]` log 頻繁出現。深入排查發現多個獨立 bug 互相疊加。
+    **問題 1：前端切換 symbol/timeframe 無聲打斷分析**
+      - 使用者在 streaming 進行中切換標的 → 前端某條路徑觸發 SSE 連線 abort → 後端看到 `Cancelled by RequestResponseCycle.run_asgi` → LLM 二輪被打斷沒輸出 → 走 fallback「未能產生文字報告」
+      - **修法**：[TopBar.tsx](frontend/src/components/TopBar.tsx) 新增 `confirmAndSwitch` helper，4 個切換點（symbol selector / timeframe button / 起訖日期 input）都包進保護；[ChatInterface.tsx](frontend/src/components/ChatInterface/ChatInterface.tsx) useEffect 監聽 `force-abort-streaming` window event 走既有 `handleAbort` 完整清理路徑（重用 v105.6 兜底邏輯）
+    **問題 2：streamChatMessage 連線中斷靜默結束**
+      - reader 異常結束時前端只 onDone 不 onError → 使用者看不到任何錯誤提示，只看到「未能產生文字報告」誤以為 LLM 不會回
+      - **修法**：[api.ts](frontend/src/services/api.ts) `streamChatMessage` 區分「reader 自然結束」與「timeout 觸發」（用 `timeoutFired` flag）；natural close 時主動 `onError("⚠️ 分析中斷：連線提早斷開（可能原因：切換標的/週期、網路波動、browser tab 斷連）")`，使用者明確知道發生什麼
+    **問題 3：「尚無數據」UX 配套**
+      - 使用者切到無資料 timeframe 時只看到「前往同步數據」按鈕，但常常該標的其他週期已有資料
+      - **修法**：[ChartView.tsx](frontend/src/components/ChartView/ChartView.tsx) useEffect 拉 `/api/chart/available/list`，過濾該 symbol 其他可用 timeframe；空狀態加「💡 此標的其他週期已有資料：[切到 4h]」快速切換按鈕（重用既有 API 不新增後端）
+    **問題 4：executor results 順序錯位導致誤標未授權函式**
+      - [executor.py](backend/app/core/llm/executor.py) `execute_function_calls` 的 `results` 用 `.append()` 累積，sequential / parallel / reject 三條路混合 push；但 [`_format_function_results`](backend/app/api/routes/chat.py#L1084) 用 `enumerate(function_calls)` 對 `results[i]` 配對 → **index 完全錯位**
+      - 使用者看到 log「函式 1: detect_smc_structure 錯誤: 未授權的函式呼叫」是**誤報**：實際被 reject 的是別的 function（LLM 可能寫了 case mismatch 或 typo），但 error 訊息被掛到 detect_smc_structure 上
+      - **修法**：[executor.py](backend/app/core/llm/executor.py) 改 by-index 寫入 — `results = [{} for _ in function_calls]` 預先分配；sequential / parallel / reject 都用 `results[idx] = ...` 而非 `append`；parallel 用 `asyncio.gather` 保證順序對應，`zip(parallel_calls, parallel_results)` 寫回原始 idx；[`_format_function_results`](backend/app/api/routes/chat.py#L1084) 改用 `result.get("function")` 顯示真實 name，不一致時 log warning
+    **問題 5：function name validate 不容忍 LLM 偶爾的 trailing/leading 空白**
+      - LLM 偶爾輸出 `"detect_smc_structure "`（含尾隨空白）→ `name not in ALLOWED_FUNCTIONS` → reject
+      - **修法**：[executor.py:validate_function_call](backend/app/core/llm/executor.py#L122) 加 `name.strip()` 容忍空白後再比對；caller 端把 stripped name 寫回 fc dict 確保所有後續比對（`_PARALLEL_FUNCS` 等）都用乾淨 name；case mismatch 仍拒絕（屬於 API contract 應該嚴格）
+    **問題 6：HMM 分析模組缺失**
+      - log 顯示 `HMM 分析失敗: No module named 'hmmlearn'` — 量化研究跳過 HMM 狀態轉移層
+      - **修法**：`.venv/bin/pip install hmmlearn` (0.3.3)，補上 HMM 模組讓 quant_research 完整跑
+    **問題 7：function call 階段 progress 心跳頻率太低**
+      - quant_research 等重型 function call 可能跑數分鐘，期間每 6 秒一次 progress event，client 端某層偶爾誤判 idle
+      - **修法**：[chat.py](backend/app/api/routes/chat.py) function call progress 迴圈每 2 秒強制 yield SSE event（從 6s 提高），確保 SSE 連線在長 function call 期間頻繁有 byte 流動
+    **問題 8（已知殘留，未根治）：LLM 二輪 streaming 期間 client 真斷線**
+      - log 確認某些情境下 client 真的關了 HTTP 連線（`Cancelled by RequestResponseCycle.run_asgi`，anyio cancel scope from ASGI）
+      - 嘗試過 `_stream_with_heartbeat` 包裝（含 `asyncio.shield`），但 anyio cancel scope 是 task tree 整體 cancel，shield 擋不住 → 已**回退**該 helper（保留定義但 3 個 caller 都改回 raw `async for adapter.chat_stream_events()`）
+      - **替代措施**：[chat.py CancelledError handler](backend/app/api/routes/chat.py#L2781) 加詳細狀態 log（`round2_started` / `r2_text_len` / `r2_function_calls` / `has_response`），下次中斷可精準定位斷點；[adapter.py:1591](backend/app/core/llm/adapter.py#L1591) `[client_disconnect]` 訊息中性化避免誤導（CancelledError 來源除了 client 真斷還可能是 wait_for cancel 或正常 generator close）
+    **設計鐵律**：問題 1-7 是真 bug 必修；問題 8 真因仍待精準診斷（可能是前端切換保護沒生效、prompt 過大導致 TTFT 超時、browser fetch 內部行為等），加 log 等下次重現有更完整資訊
+    **完成後系統能力**：分析 streaming 不再被切換 symbol 等動作無聲打斷；連線異常斷開有明確錯誤訊息給使用者；executor function call 結果按原始順序對應，不再誤標未授權；validate 容忍空白；HMM 分析補回；function call 階段 SSE 流量更密集
 
 ### 待開發功能
 

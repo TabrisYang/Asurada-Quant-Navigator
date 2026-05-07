@@ -489,6 +489,31 @@ export default function ChartView() {
   const symbol = useChartStore((s) => s.symbol);
   const timeframe = useChartStore((s) => s.timeframe);
   const loading = useChartStore((s) => s.loading);
+  const setTimeframe = useChartStore((s) => s.setTimeframe);
+
+  // v110：「尚無數據」時顯示「該標的其他週期」可用清單，避免使用者切到無資料週期就放棄
+  const [otherTimeframes, setOtherTimeframes] = useState<string[]>([]);
+  useEffect(() => {
+    if (ohlcvData.length > 0) {
+      setOtherTimeframes([]);  // 有資料就清空
+      return;
+    }
+    let cancelled = false;
+    fetch('/api/chart/available/list')
+      .then(r => r.ok ? r.json() : { data: [] })
+      .then((res: { data: Array<{ symbol: string; timeframe: string }> }) => {
+        if (cancelled) return;
+        const sameSymbolTfs = (res.data || [])
+          .filter(d => d.symbol === symbol && d.timeframe !== timeframe)
+          .map(d => d.timeframe);
+        // 按常用順序排序
+        const order = ['15m', '1h', '4h', '1d', '1w'];
+        sameSymbolTfs.sort((a, b) => order.indexOf(a) - order.indexOf(b));
+        setOtherTimeframes(sameSymbolTfs);
+      })
+      .catch(() => { /* fail silently */ });
+    return () => { cancelled = true; };
+  }, [symbol, timeframe, ohlcvData.length]);
   const activeIndicators = useChartStore((s) => s.activeIndicators);
   const annotations = useChartStore((s) => s.annotations);
   const clearAnnotations = useChartStore((s) => s.clearAnnotations);
@@ -1364,6 +1389,26 @@ export default function ChartView() {
               <p className="text-xs mt-3" style={{ color: '#8b949e' }}>
                 或點擊頂部的「同步數據」按鈕
               </p>
+              {/* v110：該標的其他週期已有資料 → 提示快速切換 */}
+              {otherTimeframes.length > 0 && (
+                <div className="mt-4 pt-3" style={{ borderTop: '1px solid #30363d' }}>
+                  <p className="text-xs mb-2" style={{ color: '#8b949e' }}>
+                    💡 此標的其他週期已有資料：
+                  </p>
+                  <div className="flex gap-1 justify-center flex-wrap">
+                    {otherTimeframes.map((tf) => (
+                      <button
+                        key={tf}
+                        onClick={() => setTimeframe(tf)}
+                        className="px-2 py-1 rounded text-xs cursor-pointer transition-opacity hover:opacity-80"
+                        style={{ background: '#30363d', color: '#58a6ff' }}
+                      >
+                        切到 {tf}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}

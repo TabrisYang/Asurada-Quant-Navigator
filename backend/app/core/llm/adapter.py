@@ -1589,7 +1589,10 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
             yield StreamEvent(type="stop", stop_reason="end_turn")
 
         except (asyncio.CancelledError, GeneratorExit):
-            pass
+            # v110 修正：之前訊息 [client_disconnect] 誤導 — CancelledError 來源除了 client 真的斷
+            # 還包括「上層 wait_for timeout」「正常 generator close」等情況。改中性訊息。
+            logger.debug("Claude CLI stream 被取消（可能：client 斷線 / wait_for timeout / generator close）")
+            raise
         except Exception as e:
             logger.error(f"Claude CLI streaming events 失敗: {e}")
             yield StreamEvent(type="text_delta", text=f"\n\n[Claude 訂閱版串流錯誤] {str(e)}")

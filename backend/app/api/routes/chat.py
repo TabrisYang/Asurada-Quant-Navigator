@@ -1093,7 +1093,14 @@ def _format_function_results(function_calls: list[dict], exec_result: dict) -> s
         fargs = fc.get("arguments", {})
         result = results[i] if i < len(results) else {}
 
-        parts.append(f"### 函式 {i+1}: {fname}")
+        # v110：顯示 result 內的 function name 而非 fc.name
+        # 主因：executor v110 之前 results 順序跟 function_calls 不對應，會把 error 訊息掛到別的 function 上
+        # v110 已改 by-index 但顯示層也用 result.function 雙重保險
+        actual_name = result.get("function") if isinstance(result, dict) and result.get("function") else fname
+        if actual_name != fname:
+            logger.warning(f"[fc_results] 函式 {i+1} fc.name={fname!r} 但 result.function={actual_name!r} (順序對應錯)")
+
+        parts.append(f"### 函式 {i+1}: {actual_name}")
         parts.append(f"參數: {json.dumps(fargs, ensure_ascii=False, default=_json_safe_default)}")
 
         if "error" in result:
@@ -1554,6 +1561,62 @@ def _json_safe_default(o):
 def _sse_event(event_type: str, data: dict) -> str:
     """格式化 SSE event"""
     return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False, default=_json_safe_default)}\n\n"
+
+
+# v110：SSE 心跳機制 — 防止 LLM 思考期間（無 token）SSE 連線被 OS / browser / proxy 任何層判定 idle 而斷
+# 業界標準：long-lived SSE 連線每 N 秒送 heartbeat 維持 active
+# 演進：15s（首版）→ 5s（實測仍會斷）→ 2s（v110 final）
+# 實測 5s 仍不夠：v108 後 system prompt 變大（含 bilateral_plan / indicators_snapshot / 各規則段）
+# 加上對話歷史累積 → LLM TTFT 達 4-5 秒，5s timeout「剛好」太晚 → client 在第 5 秒已斷
+# 2s 給最積極保護：每 2 秒至少一個心跳，遠低於任何 OS / browser / fetch 內部 idle 偵測
+_HEARTBEAT_INTERVAL = 2.0  # 秒
+_HEARTBEAT_SENTINEL = object()  # 用 sentinel 物件標記心跳事件
+
+
+async def _stream_with_heartbeat(stream_iter, interval: float = _HEARTBEAT_INTERVAL):
+    """包裝 LLM adapter 的 async iterator，無事件達 interval 秒 → yield 心跳 sentinel。
+
+    使用方式：
+        async for evt in _stream_with_heartbeat(adapter.chat_stream_events(...)):
+            if evt is _HEARTBEAT_SENTINEL:
+                # 心跳：呼叫端應 yield SSE heartbeat event 給 client
+                continue
+            # 處理真實 evt（既有邏輯）
+
+    ★★★ 關鍵設計（v110 fix）：用 asyncio.shield 保護 pending task ★★★
+    舊版直接 `await asyncio.wait_for(_iter.__anext__(), timeout=interval)` 在 timeout 時
+    會 cancel inner coroutine（即 LLM adapter 的 __anext__），導致 adapter generator 內部
+    state（subprocess / readline 等）被破壞。下次 __anext__ 立刻 StopAsyncIteration → 主
+    流程看到 streaming 結束 → _r2_text_buf 為空 → 走「未能產生文字報告」 fallback。
+
+    正確做法：把 pending task 存起來，每輪 wait_for 用 asyncio.shield 包它。timeout 取消
+    的是 shield wrapper 不是 pending 本身，pending 繼續活著等 LLM 下一個 event。
+    """
+    _iter = stream_iter.__aiter__() if hasattr(stream_iter, "__aiter__") else stream_iter
+    pending: asyncio.Task | None = None
+    try:
+        while True:
+            if pending is None:
+                pending = asyncio.ensure_future(_iter.__anext__())
+            try:
+                evt = await asyncio.wait_for(asyncio.shield(pending), timeout=interval)
+                # 拿到 event，pending 已 done，下輪重新建立
+                pending = None
+                yield evt
+            except asyncio.TimeoutError:
+                # pending 仍活著（被 shield 保護），下輪迴圈繼續 await 同一個 pending
+                yield _HEARTBEAT_SENTINEL
+            except StopAsyncIteration:
+                pending = None
+                return
+    finally:
+        # 確保 pending 在 generator 結束時被清理（避免 task leak）
+        if pending is not None and not pending.done():
+            pending.cancel()
+            try:
+                await pending
+            except (asyncio.CancelledError, StopAsyncIteration, Exception):
+                pass
 
 
 # ─── v100/v103 1B：結論卡「📈 系統參考」自動注入歷史命中率 ────────
@@ -2255,17 +2318,17 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                         _hb_sec += 2
                         _pct = _fc_progress.percentage
                         _status = _fc_progress.status_text
-                        # 只在進度有變化或每 6 秒發送一次心跳
-                        if _pct != _last_pct or _hb_sec % 6 == 0:
-                            _last_pct = _pct
-                            yield _sse_event("progress", {
-                                "percentage": _pct,
-                                "completed": _fc_progress.completed,
-                                "total": _fc_progress.total,
-                                "current_task": _fc_progress.current_task,
-                                "message": _status,
-                            })
-                            yield _sse_event("status", {"message": _status})
+                        # v110：每 2 秒就強制發 progress（從 6s 提高），確保 SSE 連線在長 function call 期間
+                        # 也不會因 idle 被 OS / browser 任何層判定假死而斷
+                        _last_pct = _pct
+                        yield _sse_event("progress", {
+                            "percentage": _pct,
+                            "completed": _fc_progress.completed,
+                            "total": _fc_progress.total,
+                            "current_task": _fc_progress.current_task,
+                            "message": _status,
+                        })
+                        yield _sse_event("status", {"message": _status})
                     exec_result = _fc_task.result()
                     yield _sse_event("progress", {
                         "percentage": 100,
@@ -2394,6 +2457,8 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                     # KEY_INSIGHTS / PREDICTIONS / SYSTEM_DISTILL 標記偵測（不 yield 給使用者）
                     _MARKER_RE = re.compile(r'\n---(?:KEY_INSIGHTS|PREDICTIONS|SYSTEM_DISTILL)---')
 
+                    # v110 回退：移除 _stream_with_heartbeat 包裝，回到 v107 之前的 raw streaming
+                    # 心跳機制經實測對 client 真斷線（cancel scope）無效，反而曾因 wait_for cancel 殺死 LLM
                     async for _evt in adapter.chat_stream_events(
                         round2_messages, chart_state=request.chart_state,
                         system_prompt=_dynamic_prompt,
@@ -2533,6 +2598,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                         _r3_marker_seen = False
                         _r2_streamed = True  # 標記第二/三輪文字已即時 yield，避免後段重複
 
+                        # v110 回退：raw streaming
                         async for _evt in adapter.chat_stream_events(
                             round3_messages, chart_state=request.chart_state,
                             force_text=True, system_prompt=_dynamic_prompt,
@@ -2608,6 +2674,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                         _cont_yielded_until = 0
                         _cont_marker_seen = False
 
+                        # v110 回退：raw streaming
                         async for _evt in adapter.chat_stream_events(
                             _cont_messages, chart_state=request.chart_state,
                             force_text=True, system_prompt=_dynamic_prompt,
@@ -2713,7 +2780,24 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
 
                 except (Exception, asyncio.CancelledError) as e:
                     import traceback
-                    logger.error(f"Function call 執行或二輪回應失敗: {e}\n{traceback.format_exc()}")
+                    # v110：CancelledError 通常是 client 斷線（cancel scope by RequestResponseCycle）
+                    # 加詳細狀態 log：被 cancel 時已收到多少 LLM 文字、是否在 function call 階段等
+                    if isinstance(e, asyncio.CancelledError):
+                        _r2_len = len(locals().get("_r2_text_buf", "") or "")
+                        _r2_fc_count = len(locals().get("_r2_function_calls", []) or [])
+                        _has_response = "response" in locals()
+                        _round2_started = "round2_messages" in locals()
+                        logger.warning(
+                            f"[client_disconnect] HTTP 連線在 stream_gen 內被 cancel\n"
+                            f"  狀態：round2_started={_round2_started}, "
+                            f"r2_text_len={_r2_len}, r2_function_calls={_r2_fc_count}, "
+                            f"has_response={_has_response}\n"
+                            f"  常見原因：(1) 用戶切換 symbol/timeframe (2) browser tab 斷連 "
+                            f"(3) 前端 abort 其他原因\n"
+                            f"{traceback.format_exc()}"
+                        )
+                    else:
+                        logger.error(f"Function call 執行或二輪回應失敗: {e}\n{traceback.format_exc()}")
                     err_msg = str(e) or "未知錯誤"
                     yield _sse_event("token", {
                         "content": f"\n\n⚠️ 分析報告產生失敗: {err_msg}\n請嘗試重新提問，若持續發生請檢查後端日誌。"

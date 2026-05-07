@@ -459,6 +459,19 @@ export default function ChatInterface() {
     setTimeout(() => { abortRef.current = false; }, 500);
   };
 
+  // v110：監聽 TopBar 廣播的「強制中斷」事件（streaming 中切換 symbol/timeframe/日期時觸發）
+  // 走既有 handleAbort 路徑保證所有清理（佇列、SSE、UI 狀態、終止訊息）一致
+  useEffect(() => {
+    const onForceAbort = () => {
+      if (useChartStore.getState().chatLoading) {
+        handleAbort();
+      }
+    };
+    window.addEventListener('force-abort-streaming', onForceAbort);
+    return () => window.removeEventListener('force-abort-streaming', onForceAbort);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // 普通函式（非 useCallback）— 每次呼叫時讀取最新的 store 狀態
   const _executeSend = async (trimmed: string, sendMode?: string, addUserMsg: boolean = true) => {
     const store = useChartStore.getState();

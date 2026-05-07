@@ -1,10 +1,10 @@
 {
   "_meta": {
     "version": 3,
-    "last_updated": "2026-05-06",
+    "last_updated": "2026-05-07",
     "maintainer": "auto-synced (FOMC scraper + NFP rule); manual entries kept if source_strategy=manual",
     "instructions": "v109 改為純自動同步：FOMC 由 scraper_fed 從 federalreserve.gov 抓、NFP 由 rule_first_friday 規則計算；CPI/PPI/GDP/PCE 等不收錄（改 system prompt 通用提醒）。手動加事件請設 source_strategy=manual + unverified:true，自動同步不會覆寫。",
-    "last_auto_sync": "2026-05-06T16:50:46.613391",
+    "last_auto_sync": "2026-05-07T16:51:03.348159",
     "auto_sync_status": {
       "fomc_scraper_fed": "fetched 8",
       "nfp_rule_first_friday": "computed 6"
@@ -20,7 +20,7 @@
       "scope": "all_crypto,equities",
       "source_strategy": "rule_first_friday",
       "note": "first Friday of June 2026",
-      "auto_synced_at": "2026-05-06T16:50:46.613391"
+      "auto_synced_at": "2026-05-07T16:51:03.348159"
     },
     {
       "date": "2026-06-17",
@@ -31,7 +31,7 @@
       "scope": "all_crypto,equities",
       "source_strategy": "scraper_fed",
       "note": "meeting June 16-17, rate decision 14:00 ET on day 17 + SEP/Dot Plot",
-      "auto_synced_at": "2026-05-06T16:50:46.613391"
+      "auto_synced_at": "2026-05-07T16:51:03.348159"
     },
     {
       "date": "2026-07-06",
@@ -42,7 +42,7 @@
       "scope": "all_crypto,equities",
       "source_strategy": "rule_first_friday",
       "note": "first Friday of July 2026; shifted from 2026-07-03 due to US federal holiday",
-      "auto_synced_at": "2026-05-06T16:50:46.613391"
+      "auto_synced_at": "2026-05-07T16:51:03.348159"
     },
     {
       "date": "2026-07-29",
@@ -53,7 +53,7 @@
       "scope": "all_crypto,equities",
       "source_strategy": "scraper_fed",
       "note": "meeting July 28-29, rate decision 14:00 ET on day 29",
-      "auto_synced_at": "2026-05-06T16:50:46.613391"
+      "auto_synced_at": "2026-05-07T16:51:03.348159"
     },
     {
       "date": "2026-08-07",
@@ -64,7 +64,7 @@
       "scope": "all_crypto,equities",
       "source_strategy": "rule_first_friday",
       "note": "first Friday of August 2026",
-      "auto_synced_at": "2026-05-06T16:50:46.613391"
+      "auto_synced_at": "2026-05-07T16:51:03.348159"
     },
     {
       "date": "2026-09-04",
@@ -75,7 +75,7 @@
       "scope": "all_crypto,equities",
       "source_strategy": "rule_first_friday",
       "note": "first Friday of September 2026",
-      "auto_synced_at": "2026-05-06T16:50:46.613391"
+      "auto_synced_at": "2026-05-07T16:51:03.348159"
     },
     {
       "date": "2026-09-16",
@@ -86,7 +86,7 @@
       "scope": "all_crypto,equities",
       "source_strategy": "scraper_fed",
       "note": "meeting September 15-16, rate decision 14:00 ET on day 16 + SEP/Dot Plot",
-      "auto_synced_at": "2026-05-06T16:50:46.613391"
+      "auto_synced_at": "2026-05-07T16:51:03.348159"
     },
     {
       "date": "2026-10-02",
@@ -97,7 +97,7 @@
       "scope": "all_crypto,equities",
       "source_strategy": "rule_first_friday",
       "note": "first Friday of October 2026",
-      "auto_synced_at": "2026-05-06T16:50:46.613391"
+      "auto_synced_at": "2026-05-07T16:51:03.348159"
     },
     {
       "date": "2026-10-28",
@@ -108,7 +108,7 @@
       "scope": "all_crypto,equities",
       "source_strategy": "scraper_fed",
       "note": "meeting October 27-28, rate decision 14:00 ET on day 28",
-      "auto_synced_at": "2026-05-06T16:50:46.613391"
+      "auto_synced_at": "2026-05-07T16:51:03.348159"
     },
     {
       "date": "2026-11-06",
@@ -119,7 +119,7 @@
       "scope": "all_crypto,equities",
       "source_strategy": "rule_first_friday",
       "note": "first Friday of November 2026",
-      "auto_synced_at": "2026-05-06T16:50:46.613391"
+      "auto_synced_at": "2026-05-07T16:51:03.348159"
     },
     {
       "date": "2026-12-09",
@@ -130,7 +130,7 @@
       "scope": "all_crypto,equities",
       "source_strategy": "scraper_fed",
       "note": "meeting December 8-9, rate decision 14:00 ET on day 9 + SEP/Dot Plot",
-      "auto_synced_at": "2026-05-06T16:50:46.613391"
+      "auto_synced_at": "2026-05-07T16:51:03.348159"
     },
     {
       "date": "2027-01-27",
@@ -141,7 +141,7 @@
       "scope": "all_crypto,equities",
       "source_strategy": "scraper_fed",
       "note": "meeting January 26-27, rate decision 14:00 ET on day 27",
-      "auto_synced_at": "2026-05-06T16:50:46.613391"
+      "auto_synced_at": "2026-05-07T16:51:03.348159"
     },
     {
       "date": "2027-03-17",
@@ -152,7 +152,7 @@
       "scope": "all_crypto,equities",
       "source_strategy": "scraper_fed",
       "note": "meeting March 16-17, rate decision 14:00 ET on day 17 + SEP/Dot Plot",
-      "auto_synced_at": "2026-05-06T16:50:46.613391"
+      "auto_synced_at": "2026-05-07T16:51:03.348159"
     },
     {
       "date": "2027-04-28",
@@ -163,7 +163,7 @@
       "scope": "all_crypto,equities",
       "source_strategy": "scraper_fed",
       "note": "meeting April 27-28, rate decision 14:00 ET on day 28",
-      "auto_synced_at": "2026-05-06T16:50:46.613391"
+      "auto_synced_at": "2026-05-07T16:51:03.348159"
     }
   ]
 }
