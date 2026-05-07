@@ -1254,7 +1254,7 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
             full_text = ""
             usage = None
             result_data = None
-            _line_timeout = 60
+            _line_timeout = 300
 
             while True:
                 try:
@@ -1262,7 +1262,7 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
                         proc.stdout.readline(), timeout=_line_timeout,
                     )
                 except asyncio.TimeoutError:
-                    logger.warning("Claude CLI stream 逐行讀取超時（60s 無新輸出）")
+                    logger.warning(f"Claude CLI stream 逐行讀取超時（{_line_timeout}s 無新輸出）")
                     break
 
                 if not line:
@@ -1368,7 +1368,7 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
             await proc.stdin.drain()
             proc.stdin.close()
 
-            _line_timeout = 60
+            _line_timeout = 300
 
             while True:
                 try:
@@ -1478,7 +1478,7 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
             await proc.stdin.drain()
             proc.stdin.close()
 
-            _line_timeout = 60
+            _line_timeout = 300
 
             while True:
                 try:
@@ -1486,7 +1486,7 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
                         proc.stdout.readline(), timeout=_line_timeout,
                     )
                 except asyncio.TimeoutError:
-                    logger.warning("Claude CLI stream 逐行讀取超時（60s 無新輸出）")
+                    logger.warning(f"Claude CLI stream 逐行讀取超時（{_line_timeout}s 無新輸出）")
                     break
                 if not line:
                     break
