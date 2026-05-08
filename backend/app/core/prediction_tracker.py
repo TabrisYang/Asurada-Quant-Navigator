@@ -1107,6 +1107,85 @@ class PredictionTracker:
         }
 
 
+    @staticmethod
+    def classify_regime(regime: str) -> str:
+        """v118：把自由文字 regime 字串 normalize 成 4 類，供命中率聚合用。
+
+        系統歷史 regime 字串高度發散（94 種），LLM 會給「trending_up」、
+        「趨勢上行」、「強趨勢上行+時框衝突」等。直接 group by raw string 樣本
+        散得太細，無法建立統計顯著的 per-regime 命中率。改 normalize 成
+        BULLISH / BEARISH / RANGE / OTHER 4 類聚合。
+        """
+        if not regime:
+            return "OTHER"
+        s = regime.lower()
+        # bearish 比 bullish 先判（「趨勢下行」要先 match down 不能 match up）
+        if any(k in s for k in ["down", "下行", "空頭", "下降", "偏空", "bearish"]):
+            return "BEARISH"
+        if any(k in s for k in ["up", "上行", "多頭", "上升", "bullish"]):
+            return "BULLISH"
+        if any(k in s for k in ["rang", "盤整", "均值", "震盪", "波動壓縮"]):
+            return "RANGE"
+        return "OTHER"
+
+    def get_regime_class_stats(
+        self, symbol: Optional[str] = None, days: int = 30,
+    ) -> dict[str, dict]:
+        """v118：聚合過去 N 天該 symbol 在 4 個 regime class（BULLISH/BEARISH/RANGE/OTHER）
+        的命中率 + 多空分布。
+
+        Returns:
+            {
+              "BULLISH": {"samples": N, "win_rate": X, "long": L, "short": S, "long_pct": P},
+              "BEARISH": {...},
+              "RANGE": {...},
+              "OTHER": {...},
+            }
+            （只回傳 samples > 0 的 class）
+        """
+        with self._lock:
+            self._ensure_db()
+            cutoff = (taipei_now() - timedelta(days=days)).isoformat()
+            query = (
+                "SELECT regime, direction, status FROM predictions "
+                "WHERE status NOT IN ('active', 'invalidated') AND created_at > ?"
+            )
+            params: list = [cutoff]
+            if symbol:
+                query += " AND symbol = ?"
+                params.append(symbol)
+            rows = self._conn.execute(query, params).fetchall()
+
+            class_buckets: dict[str, dict] = {
+                "BULLISH": {"long": 0, "short": 0, "wins": 0, "total": 0},
+                "BEARISH": {"long": 0, "short": 0, "wins": 0, "total": 0},
+                "RANGE": {"long": 0, "short": 0, "wins": 0, "total": 0},
+                "OTHER": {"long": 0, "short": 0, "wins": 0, "total": 0},
+            }
+            for r in rows:
+                cls = self.classify_regime(r["regime"])
+                bucket = class_buckets[cls]
+                bucket["total"] += 1
+                if r["direction"] == "long":
+                    bucket["long"] += 1
+                elif r["direction"] == "short":
+                    bucket["short"] += 1
+                if r["status"] == "hit_target":
+                    bucket["wins"] += 1
+
+            result: dict[str, dict] = {}
+            for cls, d in class_buckets.items():
+                if d["total"] == 0:
+                    continue
+                result[cls] = {
+                    "samples": d["total"],
+                    "win_rate": round(d["wins"] / d["total"] * 100, 1),
+                    "long": d["long"],
+                    "short": d["short"],
+                    "long_pct": round(d["long"] / d["total"] * 100, 1),
+                }
+            return result
+
     def get_direction_stats(
         self, symbol: Optional[str] = None, days: int = 90,
     ) -> dict[str, dict]:

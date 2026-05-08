@@ -814,6 +814,56 @@ def _build_messages(
                             "best_indicators": _best_inds,
                             "worst_indicators": _worst_inds,
                         }
+
+                        # ★ v118：注入 regime_warning + direction_balance（修「看漲說漲」bias）
+                        # Diagnose 發現：BULLISH regime 100% 看多但命中率僅 21.7%（賠錢領域），
+                        # 系統有強烈順勢 bias 反而最差。注入這兩個欄位讓 LLM 強制權衡 contrarian。
+                        try:
+                            _regime_class_stats = prediction_tracker.get_regime_class_stats(
+                                symbol=chart_symbol, days=90,
+                            )
+                            # regime_warning：當前 regime class 命中率 < 50% 且 n >= 10
+                            if _current_regime:
+                                _current_class = prediction_tracker.classify_regime(_current_regime)
+                                _class_data = _regime_class_stats.get(_current_class)
+                                if (
+                                    _class_data
+                                    and _class_data.get("samples", 0) >= 10
+                                    and _class_data.get("win_rate", 0) < 50
+                                ):
+                                    _wr = _class_data["win_rate"]
+                                    _n = _class_data["samples"]
+                                    _lp = _class_data.get("long_pct", 0)
+                                    request.chart_state["recent_accuracy"]["regime_warning"] = {
+                                        "regime_class": _current_class,
+                                        "win_rate": _wr,
+                                        "samples": _n,
+                                        "long_pct": _lp,
+                                        "warning_text": (
+                                            f"⚠️ 該 symbol 在 {_current_class} regime 過去 90 天歷史命中率僅 "
+                                            f"{_wr}% (n={_n}，過去多空比 {_lp}% long)。禁止盲目順勢；"
+                                            f"必須權衡 contrarian 視角，最高給 medium 信心，或改建議觀望。"
+                                        ),
+                                    }
+                            # direction_balance：過去 30 天該 symbol 多空分布
+                            _dir_stats = prediction_tracker.get_direction_stats(
+                                symbol=chart_symbol, days=30,
+                            )
+                            if _dir_stats:
+                                _long_n = _dir_stats.get("long", {}).get("samples", 0)
+                                _short_n = _dir_stats.get("short", {}).get("samples", 0)
+                                _total_dir = _long_n + _short_n
+                                if _total_dir >= 10:
+                                    _long_pct = round(_long_n / _total_dir * 100, 1)
+                                    request.chart_state["recent_accuracy"]["direction_balance"] = {
+                                        "long_n": _long_n,
+                                        "short_n": _short_n,
+                                        "long_pct": _long_pct,
+                                        "biased_long": _long_pct > 75,
+                                        "biased_short": _long_pct < 25,
+                                    }
+                        except Exception as _v118_err:
+                            logger.debug(f"v118 regime_warning/direction_balance 注入失敗: {_v118_err}")
                 except Exception as _ra_err:
                     logger.debug(f"recent_accuracy 注入失敗: {_ra_err}")
             except Exception as e:

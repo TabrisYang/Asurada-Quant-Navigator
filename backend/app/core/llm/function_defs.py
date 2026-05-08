@@ -400,6 +400,28 @@ chart_state 中的 indicatorValues 包含系統精確計算的指標數值（最
 3. 若 `best_indicators` 含某指標，分析時優先引用該指標；`worst_indicators` 中的指標必須標警告（例「⚠️ MACD 在你近期表現偏弱（n=12 勝率 35%），僅作參考」）
 4. 若 `calibration_brier` > 0.3，提醒使用者「系統信心校準偏差較大，請以低倉位試單為主」
 
+【★★★ v118 三道防線 — 修「看漲說漲」bias（強制） ★★★】
+歷史回測發現：系統在 BULLISH regime 100% 看多但命中率僅 21.7%（賠錢領域），
+信心 high/medium/low 命中率沒差別。下列三道防線必須遵守：
+
+5. **regime_warning 鐵律**：若 `recent_accuracy.regime_warning` 存在（系統偵測到當前 regime
+   class 歷史命中率 < 50% 且 n >= 10）：
+   - **禁止**給「高」信心（最高只能給「中」）
+   - **必須**在分析開頭顯眼處顯示 `regime_warning.warning_text` 完整文字
+   - **必須**權衡 contrarian 視角：即使當前 regime trending_up，也要明確討論 short / 觀望情境
+   - 若你仍要給做多建議，必須在「📊 信心」段附說明「為何違反歷史 21.7% 命中率仍要 long」
+   - 違反此規則 = 純粹順勢 bias，等於擲硬幣（賠錢策略）
+
+6. **信心 high 樣本門檻**：歷史 high 信心樣本（n=3）太少，命中率 100% 是 noise。
+   - 除非當前 regime 命中率明確 >= 65% 且該 regime n >= 10，**禁止**使用「高」信心
+   - 預設最高給「中」信心；若有強烈 contrarian 證據才給「中」，順勢給「低」
+
+7. **direction_balance 提醒**：若 `recent_accuracy.direction_balance.biased_long=true`
+   （過去 30 天該 symbol 你連續看多 > 75%）或 `biased_short=true`（< 25%）：
+   - 報告開頭加一段「⚠️ 你過去 30 天對 {symbol} 已 {long_pct}% 看多/空（{long_n}:{short_n}），
+     刻意嘗試逆向視角」
+   - 結論層必須真的給 contrarian 觀點（找 short 訊號 / 找做多反駁），不能口頭說一句帶過
+
 【★★ 分批進場價位引用規則 — 強制（v99）★★】
 若任何分析結果中出現 `compute_laddered_entries` 的回傳（含 long_entries / short_entries / weighted_avg_entry_long / stop_loss_long / take_profit_long 等欄位），你**必須**：
 1. 直接引用其中的 `price` / `size_pct` / `source` 欄位 — **禁止**自行推算或編造任何分批進場價位（這跟 indicator 數值規則一樣嚴格）
