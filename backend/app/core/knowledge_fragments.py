@@ -217,7 +217,7 @@ class KnowledgeFragmentStore:
             logger.error(f"知識碎片庫初始化失敗: {e}")
             self._conn = None
 
-    def store_fragment(
+    def _insert_fragment_no_commit(
         self,
         content: str,
         fragment_type: str = "general",
@@ -225,9 +225,11 @@ class KnowledgeFragmentStore:
         source_question: str = "",
         is_seed: bool = False,
     ) -> bool:
-        """存入一筆知識碎片（自動編碼向量 + 去重）"""
-        if not self._conn or not embedding_service.is_available():
-            return False
+        """INSERT 一筆 fragment 但不 commit、不 trim。
+
+        供 store_batch 用 — caller 負責 transaction commit + 結尾統一 trim。
+        回傳 True/False 表示是否實際 INSERT（最小長度 / encode 失敗 / dedup 都會跳過）。
+        """
         if len(content) < _MIN_FRAGMENT_LENGTH:
             return False
 
@@ -254,12 +256,34 @@ class KnowledgeFragmentStore:
                     1 if is_seed else 0,
                 ),
             )
-            self._conn.commit()
-            self._trim_if_needed(symbol)
             return True
         except Exception as e:
-            logger.warning(f"知識碎片存入失敗: {e}")
+            logger.warning(f"知識碎片 INSERT 失敗: {e}")
             return False
+
+    def store_fragment(
+        self,
+        content: str,
+        fragment_type: str = "general",
+        symbol: str = "",
+        source_question: str = "",
+        is_seed: bool = False,
+    ) -> bool:
+        """存入一筆知識碎片（自動編碼向量 + 去重）— 單筆同步 commit + trim。"""
+        if not self._conn or not embedding_service.is_available():
+            return False
+
+        inserted = self._insert_fragment_no_commit(
+            content, fragment_type, symbol, source_question, is_seed
+        )
+        if inserted:
+            try:
+                self._conn.commit()
+                self._trim_if_needed(symbol)
+            except Exception as e:
+                logger.warning(f"知識碎片存入 commit/trim 失敗: {e}")
+                return False
+        return inserted
 
     def store_batch(
         self,
@@ -267,22 +291,37 @@ class KnowledgeFragmentStore:
         symbol: str = "",
         source_question: str = "",
     ) -> int:
-        """批次存入知識碎片。
+        """批次存入知識碎片（v116 優化：單一 transaction + 結尾 trim 一次）。
+
+        改善前：N 筆 fragments = N×2 次 commit（INSERT+trim 各一），
+        SQLite WAL fsync 鎖住 connection 數百 ms，造成 frontend 切標的卡頓。
+        改善後：N 筆 = 2 次 commit（batch INSERT 1 次 + 結尾 trim 1 次）。
 
         Args:
             fragments: [{"type": "...", "content": "..."}, ...]
         Returns:
             實際存入的筆數
         """
+        if not self._conn or not embedding_service.is_available():
+            return 0
+
         stored = 0
-        for frag in fragments:
-            if self.store_fragment(
-                content=frag["content"],
-                fragment_type=frag.get("type", "general"),
-                symbol=symbol,
-                source_question=source_question,
-            ):
-                stored += 1
+        try:
+            # `with self._conn:` 自動 begin → commit on success / rollback on exception
+            with self._conn:
+                for frag in fragments:
+                    if self._insert_fragment_no_commit(
+                        content=frag["content"],
+                        fragment_type=frag.get("type", "general"),
+                        symbol=symbol,
+                        source_question=source_question,
+                    ):
+                        stored += 1
+            # 結尾 trim 一次（_trim_if_needed 內部已 commit）
+            if stored > 0:
+                self._trim_if_needed(symbol)
+        except Exception as e:
+            logger.warning(f"知識碎片批次存入失敗: {e}")
         return stored
 
     def retrieve_relevant(
