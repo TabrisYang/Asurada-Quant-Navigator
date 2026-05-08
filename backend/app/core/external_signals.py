@@ -260,6 +260,71 @@ def _fetch_coinglass_liquidation(client: httpx.Client, sym: str) -> Optional[dic
         return None
 
 
+# ─── v119.4：Coinbase Premium ─────────────────
+
+def _fetch_coinbase_premium(client: httpx.Client, sym: str) -> Optional[dict]:
+    """v119.4：Coinbase（美國機構主場）vs Binance（全球散戶）即時價差。
+
+    正溢價 → 美國機構主動承接 → 偏多訊號
+    負溢價 → 美國散戶或原生加密拋售 → 中性 / 短空訊號（但若同時 ETF 流入仍偏多）
+
+    需要主流幣才有意義（Coinbase Spot 上架的）：BTC / ETH / SOL / XRP / ADA / DOGE /
+    AVAX / DOT / LINK / LTC / BCH / UNI / ATOM 等。
+
+    sym 格式：BTCUSDT（Binance perp 格式），自動 derive base = BTC → coinbase 用 BTC-USD
+    """
+    if not sym.endswith("USDT"):
+        return None
+    base = sym[:-4]  # ETHUSDT → ETH
+
+    try:
+        # Coinbase spot price（無 key，公開 API）
+        r1 = client.get(
+            f"https://api.coinbase.com/v2/prices/{base}-USD/spot",
+            timeout=5.0,
+        )
+        r1.raise_for_status()
+        cb_data = r1.json().get("data") or {}
+        cb_price = float(cb_data.get("amount") or 0)
+        if cb_price <= 0:
+            return None
+
+        # Binance perp price（fapi）— 跟 fund/OI 同個 source 保持一致
+        r2 = client.get(
+            "https://fapi.binance.com/fapi/v1/ticker/price",
+            params={"symbol": sym},
+            timeout=5.0,
+        )
+        r2.raise_for_status()
+        bn_price = float(r2.json().get("price") or 0)
+        if bn_price <= 0:
+            return None
+
+        premium_pct = round((cb_price - bn_price) / bn_price * 100, 4)
+
+        # Classify label（用百分位門檻，後續 v120 bucket 用同樣門檻）
+        if premium_pct >= 0.05:
+            label = "positive_high"  # 美國機構強烈承接
+        elif premium_pct >= 0.01:
+            label = "positive"
+        elif premium_pct >= -0.01:
+            label = "neutral"
+        elif premium_pct >= -0.05:
+            label = "negative"
+        else:
+            label = "negative_high"  # 美國拋售壓力強
+
+        return {
+            "coinbase_price": cb_price,
+            "binance_perp_price": bn_price,
+            "coinbase_premium_pct": premium_pct,
+            "coinbase_premium_label": label,
+        }
+    except Exception as e:
+        logger.debug(f"[external] coinbase_premium fetch 失敗 ({sym}): {e}")
+        return None
+
+
 # ─── 情緒指標 ─────────────────────────
 
 def _fetch_fear_greed(client: httpx.Client) -> Optional[dict]:
@@ -386,6 +451,7 @@ def get_signals_snapshot(symbol: str, include_macro: bool = True) -> dict:
                 _fetch_long_short_ratio,
                 _fetch_coinglass_liquidation,
                 _fetch_order_book,
+                _fetch_coinbase_premium,  # v119.4
             ):
                 res = _fetch_with_retry(fn, client, sym)
                 if res:

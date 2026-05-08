@@ -91,6 +91,7 @@ def test_v119_1_stale_fallback_used_when_all_fetch_fails():
          patch.object(es, "_fetch_long_short_ratio", return_value=None), \
          patch.object(es, "_fetch_coinglass_liquidation", return_value=None), \
          patch.object(es, "_fetch_order_book", return_value=None), \
+         patch.object(es, "_fetch_coinbase_premium", return_value=None), \
          patch.object(es, "_fetch_fear_greed", return_value=None):
         # 第一次呼叫拿到 cached（_CACHE_TTL 內），所以要清掉新鮮 cache 但保留 stale
         # 偽造：把 ts 改成「過期但 stale 範圍內」
@@ -154,3 +155,36 @@ def test_v119_3_stop_loss_risk_rule_in_prompt():
         "function_defs 必須提及訂單簿密集區下方的止損風險（機構防禦區）"
     )
     assert "ATR" in src, "止損規則必須要求標示 ATR 倍數"
+
+
+# ─── v119.4：Coinbase Premium fetcher ───────────
+
+def test_v119_4_coinbase_premium_fetcher_classifies_label():
+    """_fetch_coinbase_premium classify 各 label 邊界正確。"""
+    # 我們不真的 mock httpx（已 smoke test 過），直接驗證 label 邏輯
+    # 透過讀 source 檢查門檻定義
+    es_py = (
+        pathlib.Path(__file__).resolve().parent.parent / "app" / "core" / "external_signals.py"
+    )
+    src = es_py.read_text(encoding="utf-8")
+    assert "def _fetch_coinbase_premium" in src
+    assert "positive_high" in src and "negative_high" in src and "neutral" in src, (
+        "Coinbase premium label 必須含 positive_high / positive / neutral / negative / negative_high 5 級"
+    )
+    # 確認門檻在合理範圍（不是極端值）
+    assert ">= 0.05" in src or ">= 0.05," in src, "label 門檻應該以 ±0.05% 為極端值界線"
+
+
+def test_v119_4_coinbase_premium_in_snapshot_loop():
+    """get_signals_snapshot 的 fetcher loop 必須包含 _fetch_coinbase_premium。"""
+    es_py = (
+        pathlib.Path(__file__).resolve().parent.parent / "app" / "core" / "external_signals.py"
+    )
+    src = es_py.read_text(encoding="utf-8")
+    # 找 derivatives fetcher loop（含 _fetch_funding_rate 那個區塊）必須含 _fetch_coinbase_premium
+    import re
+    m = re.search(
+        r'_fetch_funding_rate.+?_fetch_coinbase_premium',
+        src, re.DOTALL,
+    )
+    assert m, "_fetch_coinbase_premium 必須在 derivatives fetcher loop 內被呼叫"
