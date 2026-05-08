@@ -784,14 +784,67 @@ class PredictionTracker:
             return "long"
         return "medium"
 
+    def _capture_signals(self, pid: int, chart_state: dict) -> None:
+        """v120.3：從 chart_state.external_signals capture 當下訊號值 + bucket 分類，
+        UPDATE 進剛 INSERT 的 prediction 行。
+
+        所有失敗都 silent（不影響主流程）。
+        """
+        if not chart_state or not isinstance(chart_state, dict):
+            return
+        ext = chart_state.get("external_signals") or {}
+        derivatives = ext.get("derivatives") or {}
+        sentiment = ext.get("sentiment") or {}
+        try:
+            from app.core.signal_buckets import classify_all_signals
+            buckets = classify_all_signals(derivatives, sentiment)
+            # 完整 raw 訊號值存 JSON（彈性容器）
+            signals_json = json.dumps(
+                {"derivatives": derivatives, "sentiment": sentiment},
+                ensure_ascii=False,
+            )
+            buckets_json = json.dumps(buckets, ensure_ascii=False)
+            self._conn.execute(
+                """UPDATE predictions
+                   SET funding_at_entry = ?,
+                       oi_24h_change_at_entry = ?,
+                       premium_at_entry = ?,
+                       long_short_at_entry = ?,
+                       etf_flow_7d_at_entry = ?,
+                       ob_imbalance_at_entry = ?,
+                       fear_greed_at_entry = ?,
+                       signals_json = ?,
+                       buckets_json = ?
+                   WHERE id = ?""",
+                (
+                    derivatives.get("funding_rate_pct"),
+                    derivatives.get("open_interest_24h_change_pct"),
+                    derivatives.get("coinbase_premium_pct"),
+                    derivatives.get("global_long_short_ratio"),
+                    derivatives.get("etf_flow_7d_usd"),
+                    derivatives.get("ob_imbalance_ratio"),
+                    sentiment.get("fear_greed_value"),
+                    signals_json,
+                    buckets_json,
+                    pid,
+                ),
+            )
+        except Exception as e:
+            logger.debug(f"[v120] _capture_signals 失敗（不影響主流程）pid={pid}: {e}")
+
     def store(
         self,
         symbol: str,
         timeframe: str,
         prediction: dict,
         source_question: str = "",
+        chart_state: Optional[dict] = None,  # v120：給 _capture_signals 用
     ) -> int:
-        """存入一筆預測，返回 id。"""
+        """存入一筆預測，返回 id。
+
+        v120：可選傳入 chart_state — 會自動 capture external_signals 當下值
+        + bucket 分類進 signal_at_entry 欄位（修「看漲說漲」用）。
+        """
         with self._lock:
             self._ensure_db()
             now = taipei_now()
@@ -882,8 +935,11 @@ class PredictionTracker:
                     prediction.get("position_size_multiplier", 1.0),
                 ),
             )
-            self._conn.commit()
             pid = cursor.lastrowid
+            # v120.3：capture external_signals 進新欄位（必須在 commit 之前同 transaction 內）
+            if chart_state and pid:
+                self._capture_signals(pid, chart_state)
+            self._conn.commit()
             logger.info(
                 f"預測已儲存 #{pid}: {symbol} {prediction['direction']} "
                 f"entry={prediction['entry_price']} target={prediction['target_price']} "

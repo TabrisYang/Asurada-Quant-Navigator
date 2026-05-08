@@ -1859,6 +1859,7 @@ def _post_process_chat_message(
                         timeframe=pred_tf,
                         prediction=pred,
                         source_question=request_message,
+                        chart_state=chart_state,  # v120.3: capture external_signals
                     )
                     # ★ Phase 2.0c：即時記錄 39 個特徵快照（feature flag 保護）
                     if pred_id and settings.feature_recording_enabled:
@@ -1904,6 +1905,7 @@ def _post_process_chat_message(
                 _ml_pid = prediction_tracker.store(
                     symbol=_ml_symbol, timeframe=_ml_tf,
                     prediction=ml_pred_data, source_question="ml_auto",
+                    chart_state=chart_state,  # v120.3
                 )
                 prediction_tracker._ensure_db()
                 prediction_tracker._conn.execute(

@@ -146,3 +146,91 @@ def test_v120_2_classify_unknown_when_none():
                classify_long_short, classify_ob_imbalance,
                classify_fear_greed, classify_etf_flow):
         assert fn(None) == "UNKNOWN"
+
+
+# ─── v120.3：store() capture signals ───────────
+
+def test_v120_3_store_captures_signals_from_chart_state():
+    """store() 帶 chart_state → DB 行寫入 signal_at_entry 欄位。"""
+    import json as _json
+    chart_state = {
+        "external_signals": {
+            "derivatives": {
+                "funding_rate_pct": -0.03,
+                "open_interest_24h_change_pct": 8.5,
+                "coinbase_premium_pct": 0.02,
+                "global_long_short_ratio": 1.0,
+                "ob_imbalance_ratio": 1.7,
+            },
+            "sentiment": {"fear_greed_value": 35},
+        },
+    }
+    pred = {
+        "direction": "long",
+        "entry_price": 100.0,
+        "target_price": 110.0,
+        "stop_price": 95.0,
+        "timeframe_hours": 24,
+        "confidence": "medium",
+        "regime": "trending_up",
+        "indicators": "test",
+    }
+    # 用獨特 symbol 避免汙染
+    test_symbol = f"V120_TEST_{__import__('uuid').uuid4().hex[:8]}/USDT"
+    pid = prediction_tracker.store(
+        symbol=test_symbol, timeframe="4h",
+        prediction=pred, source_question="v120.3 test",
+        chart_state=chart_state,
+    )
+    try:
+        assert pid > 0, "store 應回傳 valid pid"
+        row = prediction_tracker._conn.execute(
+            "SELECT funding_at_entry, premium_at_entry, fear_greed_at_entry, "
+            "buckets_json, signals_json FROM predictions WHERE id=?",
+            (pid,),
+        ).fetchone()
+        assert row["funding_at_entry"] == -0.03
+        assert row["premium_at_entry"] == 0.02
+        assert row["fear_greed_at_entry"] == 35
+        # bucket 應該有
+        buckets = _json.loads(row["buckets_json"])
+        assert buckets["funding"] == "NEGATIVE"
+        assert buckets["premium"] == "POSITIVE"
+        assert buckets["fear_greed"] == "FEAR"
+        # raw signals 也存了
+        signals = _json.loads(row["signals_json"])
+        assert signals["derivatives"]["funding_rate_pct"] == -0.03
+    finally:
+        # cleanup
+        prediction_tracker._conn.execute(
+            "DELETE FROM predictions WHERE symbol=?", (test_symbol,)
+        )
+        prediction_tracker._conn.commit()
+
+
+def test_v120_3_store_without_chart_state_works():
+    """不傳 chart_state 時 store 仍能正常運作（向後相容）。"""
+    pred = {
+        "direction": "long", "entry_price": 100.0, "target_price": 110.0,
+        "stop_price": 95.0, "timeframe_hours": 24, "confidence": "low",
+        "regime": "trending_up", "indicators": "test",
+    }
+    test_symbol = f"V120_NOCS_{__import__('uuid').uuid4().hex[:8]}/USDT"
+    pid = prediction_tracker.store(
+        symbol=test_symbol, timeframe="4h",
+        prediction=pred, source_question="no chart_state test",
+    )
+    try:
+        assert pid > 0
+        row = prediction_tracker._conn.execute(
+            "SELECT funding_at_entry, signals_json FROM predictions WHERE id=?",
+            (pid,),
+        ).fetchone()
+        # 沒 chart_state → 新欄位都是 None
+        assert row["funding_at_entry"] is None
+        assert row["signals_json"] is None
+    finally:
+        prediction_tracker._conn.execute(
+            "DELETE FROM predictions WHERE symbol=?", (test_symbol,)
+        )
+        prediction_tracker._conn.commit()
