@@ -1718,7 +1718,7 @@ def _execute_function_calls_in_thread(*args, **kwargs):
         loop.close()
 
 
-async def _post_process_chat_message(
+def _post_process_chat_message(
     *,
     final_text: str,
     request_message: str,
@@ -1727,7 +1727,14 @@ async def _post_process_chat_message(
     conversation_id: str,
     total_usage,  # TokenUsage | None — 不嚴格型別避免循環 import
 ) -> None:
-    """串流結束後的所有 DB 寫入和知識提取，跑在背景不阻塞 SSE。
+    """串流結束後的所有 DB 寫入和知識提取（v117：純 sync 跑在 thread pool）。
+
+    ★ v117 改動：本函式內部全是 sync 操作（chat_history / analysis_cache /
+       semantic_cache / fragment_store / prediction_tracker 都是 sync SQLite），
+       原本 `async def` 但內部沒 `await` → 仍跑在主 event loop 上。當 SQLite
+       fsync / embedding encode 慢時，會阻塞所有其他 endpoints，造成 backend
+       hang（已實測 reproduce）。改成 sync function 由 caller 用
+       `asyncio.create_task(asyncio.to_thread(...))` 丟到 thread pool 跑。
 
     ★ 設計理由：原本這段同步跑在 stream_gen 內，會造成 30-300 秒沉默
        （embedding 計算、predictions 驗證、OHLCV 重抓），導致前端誤判
@@ -2932,12 +2939,18 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
             logger.error(f"Streaming chat 錯誤: {e}")
             yield _sse_event("error", {"error": str(e)})
         finally:
+            # v117：加 timeout 防 event loop 卡死
+            # 原 `await t` 沒 timeout，若 task 內部是 asyncio.to_thread(...) 包的
+            # CPU-bound sync 操作（pandas backtest / SHAP / Monte Carlo），cancel
+            # 訊號等到 thread 跑完才生效。期間整個 event loop 卡住，所有 endpoint
+            # 都 timeout（已實測 reproduce）。改成 2 秒 timeout 強制略過。
             for t in _active_tasks:
                 if not t.done():
                     t.cancel()
                     try:
-                        await t
-                    except (asyncio.CancelledError, Exception):
+                        await asyncio.wait_for(t, timeout=2.0)
+                    except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                        # task 不理 cancel（thread 內死循環）也要放手，避免拖死整個 loop
                         pass
 
         # 4c. v100：結論卡「📈 系統參考」自動注入歷史命中率（必須在 done 之前，讓前端能即時替換）
@@ -3055,8 +3068,11 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
             pass
         yield _sse_event("done", done_data)
 
-        # 6. Post-processing 在背景任務跑（detach from generator，SSE 連線關閉不會被取消）
-        asyncio.create_task(_post_process_chat_message(
+        # 6. Post-processing 在 thread pool 跑（v117：避免 sync DB ops 阻塞主 event loop）
+        # 原本 async def 但內部沒 await → 仍在主 loop 上跑 sync SQLite/embedding，
+        # 會阻塞其他 endpoints。改用 to_thread 丟 thread pool。
+        asyncio.create_task(asyncio.to_thread(
+            _post_process_chat_message,
             final_text=final_text,
             request_message=request.message,
             chart_state=request.chart_state,
