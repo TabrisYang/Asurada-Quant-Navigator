@@ -865,6 +865,56 @@ def _build_messages(
                                     }
                         except Exception as _v118_err:
                             logger.debug(f"v118 regime_warning/direction_balance 注入失敗: {_v118_err}")
+
+                        # ★ v120.5：注入 signal_history（訊號組合歷史命中率）
+                        # 把當下 chart_state.external_signals.derivatives 訊號 classify 成 buckets，
+                        # 查歷史「相同 bucket 組合」命中率，讓 LLM 判斷此次訊號組合是否有 alpha。
+                        try:
+                            _ext_sig = (request.chart_state or {}).get("external_signals") or {}
+                            _ext_deriv = _ext_sig.get("derivatives") or {}
+                            _ext_sentiment = _ext_sig.get("sentiment") or {}
+                            if _ext_deriv or _ext_sentiment:
+                                from app.core.signal_buckets import classify_all_signals
+                                _current_buckets = classify_all_signals(_ext_deriv, _ext_sentiment)
+                                # 過濾 UNKNOWN，只留實際有資料的訊號
+                                _active_buckets = {
+                                    k: v for k, v in _current_buckets.items()
+                                    if v and v != "UNKNOWN"
+                                }
+                                if _active_buckets:
+                                    _combo = prediction_tracker.get_signal_combo_stats(
+                                        symbol=chart_symbol,
+                                        current_buckets=_active_buckets,
+                                        days=90,
+                                    )
+                                    # 單一訊號 stats（給 LLM 看每個訊號的個別命中率）
+                                    _single_stats = {}
+                                    for _sig_name, _sig_bucket in _active_buckets.items():
+                                        _ss = prediction_tracker.get_single_signal_stats(
+                                            symbol=chart_symbol,  # 該 symbol 樣本可能不夠，後續可加 None fallback
+                                            signal_name=_sig_name,
+                                            bucket=_sig_bucket,
+                                            days=90,
+                                        )
+                                        # 樣本太少（< 5）改用全 symbol 統計
+                                        if _ss.get("samples", 0) < 5:
+                                            _ss = prediction_tracker.get_single_signal_stats(
+                                                symbol=None,
+                                                signal_name=_sig_name,
+                                                bucket=_sig_bucket,
+                                                days=180,  # 拉長窗口
+                                            )
+                                            _ss["scope"] = "all_symbols_180d"
+                                        else:
+                                            _ss["scope"] = "this_symbol_90d"
+                                        _single_stats[f"{_sig_name}_{_sig_bucket}"] = _ss
+                                    request.chart_state["recent_accuracy"]["signal_history"] = {
+                                        "current_buckets": _active_buckets,
+                                        "combo_stats": _combo,
+                                        "single_signal_stats": _single_stats,
+                                    }
+                        except Exception as _v120_err:
+                            logger.debug(f"v120.5 signal_history 注入失敗: {_v120_err}")
                 except Exception as _ra_err:
                     logger.debug(f"recent_accuracy 注入失敗: {_ra_err}")
             except Exception as e:

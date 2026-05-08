@@ -1262,6 +1262,112 @@ class PredictionTracker:
                 }
             return result
 
+    def get_single_signal_stats(
+        self,
+        symbol: Optional[str],
+        signal_name: str,
+        bucket: str,
+        direction: Optional[str] = None,
+        days: int = 90,
+    ) -> dict:
+        """v120.5：查單一訊號 bucket 的歷史命中率（可選帶方向過濾）。
+
+        用 SQLite json_extract 從 buckets_json 抓 bucket 值精確 match。
+
+        Args:
+            signal_name: 'funding' / 'fear_greed' / 'premium' / ... 對應 buckets_json key
+            bucket: 'POSITIVE' / 'NEGATIVE' / 'EXTREME_FEAR' / ... 對應 bucket value
+            direction: 'long' / 'short' / None（None = 不限）
+
+        Returns:
+            {"win_rate": float, "samples": int, "wins": int, "losses": int}
+        """
+        with self._lock:
+            self._ensure_db()
+            cutoff = (taipei_now() - timedelta(days=days)).isoformat()
+            params: list = [signal_name, bucket, cutoff]
+            sql = (
+                "SELECT status, direction FROM predictions "
+                "WHERE buckets_json IS NOT NULL "
+                "  AND json_extract(buckets_json, '$.' || ?) = ? "
+                "  AND created_at > ? "
+                "  AND status NOT IN ('active', 'invalidated')"
+            )
+            if symbol:
+                sql += " AND symbol = ?"
+                params.append(symbol)
+            if direction:
+                sql += " AND direction = ?"
+                params.append(direction)
+
+            rows = self._conn.execute(sql, params).fetchall()
+            total = len(rows)
+            if total == 0:
+                return {"win_rate": 0, "samples": 0, "wins": 0, "losses": 0}
+            wins = sum(1 for r in rows if r["status"] == "hit_target")
+            losses = sum(1 for r in rows if r["status"] == "hit_stop")
+            return {
+                "win_rate": round(wins / total * 100, 1),
+                "samples": total,
+                "wins": wins,
+                "losses": losses,
+            }
+
+    def get_signal_combo_stats(
+        self,
+        symbol: Optional[str],
+        current_buckets: dict[str, str],
+        direction: Optional[str] = None,
+        days: int = 90,
+    ) -> dict:
+        """v120.5：查訊號組合（多個 buckets 同時 match）的歷史命中率。
+
+        Args:
+            current_buckets: 例 {"funding": "POSITIVE", "fear_greed": "FEAR"}
+                忽略 'UNKNOWN' bucket（沒 fetch 到的訊號不參與 match）
+            direction: 'long' / 'short' / None（None = 不限）
+
+        Returns:
+            {"win_rate": float, "samples": int, "matched_signals": [...]}
+            樣本不足（< 5）會 graceful 回 0 命中率 + samples=N
+        """
+        # 過濾 UNKNOWN
+        filtered = {k: v for k, v in current_buckets.items() if v and v != "UNKNOWN"}
+        if not filtered:
+            return {"win_rate": 0, "samples": 0, "matched_signals": []}
+
+        with self._lock:
+            self._ensure_db()
+            cutoff = (taipei_now() - timedelta(days=days)).isoformat()
+            sql = (
+                "SELECT status FROM predictions "
+                "WHERE buckets_json IS NOT NULL "
+                "  AND created_at > ? "
+                "  AND status NOT IN ('active', 'invalidated')"
+            )
+            params: list = [cutoff]
+            for sig_name, sig_bucket in filtered.items():
+                sql += " AND json_extract(buckets_json, '$.' || ?) = ?"
+                params.extend([sig_name, sig_bucket])
+            if symbol:
+                sql += " AND symbol = ?"
+                params.append(symbol)
+            if direction:
+                sql += " AND direction = ?"
+                params.append(direction)
+
+            rows = self._conn.execute(sql, params).fetchall()
+            total = len(rows)
+            if total == 0:
+                return {"win_rate": 0, "samples": 0, "matched_signals": list(filtered.keys())}
+            wins = sum(1 for r in rows if r["status"] == "hit_target")
+            return {
+                "win_rate": round(wins / total * 100, 1),
+                "samples": total,
+                "wins": wins,
+                "matched_signals": list(filtered.keys()),
+            }
+
     def get_direction_stats(
         self, symbol: Optional[str] = None, days: int = 90,
     ) -> dict[str, dict]:

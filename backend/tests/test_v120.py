@@ -208,6 +208,53 @@ def test_v120_3_store_captures_signals_from_chart_state():
         prediction_tracker._conn.commit()
 
 
+# ─── v120.5：get_signal_combo_stats + chat.py 注入 ─────
+
+def test_v120_5_get_single_signal_stats_returns_correct_structure():
+    """get_single_signal_stats 回 {win_rate, samples, wins, losses}。"""
+    result = prediction_tracker.get_single_signal_stats(
+        symbol=None, signal_name="funding", bucket="POSITIVE", days=180,
+    )
+    assert "win_rate" in result
+    assert "samples" in result
+    assert "wins" in result
+    assert isinstance(result["win_rate"], (int, float))
+    assert isinstance(result["samples"], int)
+
+
+def test_v120_5_get_signal_combo_stats_filters_unknown():
+    """current_buckets 中的 UNKNOWN 應該被過濾，不參與 SQL match。"""
+    result = prediction_tracker.get_signal_combo_stats(
+        symbol=None,
+        current_buckets={"funding": "UNKNOWN", "fear_greed": "FEAR"},
+        days=180,
+    )
+    # 只剩 fear_greed 一個訊號被 match
+    assert result["matched_signals"] == ["fear_greed"]
+
+
+def test_v120_5_get_signal_combo_stats_empty_buckets():
+    """全部 UNKNOWN → 回 samples=0 不 raise。"""
+    result = prediction_tracker.get_signal_combo_stats(
+        symbol=None,
+        current_buckets={"funding": "UNKNOWN", "fear_greed": "UNKNOWN"},
+        days=180,
+    )
+    assert result["samples"] == 0
+    assert result["win_rate"] == 0
+
+
+def test_v120_5_chat_py_injects_signal_history():
+    """chat.py 必須在 recent_accuracy 注入後加 signal_history。"""
+    chat_py = (
+        pathlib.Path(__file__).resolve().parent.parent / "app" / "api" / "routes" / "chat.py"
+    )
+    src = chat_py.read_text(encoding="utf-8")
+    assert "signal_history" in src, "chat.py 必須注入 signal_history（v120.5）"
+    assert "get_signal_combo_stats" in src, "chat.py 必須呼叫 get_signal_combo_stats"
+    assert "classify_all_signals" in src, "chat.py 必須呼叫 classify_all_signals"
+
+
 def test_v120_3_store_without_chart_state_works():
     """不傳 chart_state 時 store 仍能正常運作（向後相容）。"""
     pred = {
