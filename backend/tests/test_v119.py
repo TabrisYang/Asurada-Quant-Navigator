@@ -136,3 +136,21 @@ def test_v119_2_function_defs_requires_external_citation():
         "function_defs 必須要求引用 order book imbalance"
     )
     assert "external_signals" in src, "function_defs 必須有 external_signals 強制引用區塊"
+
+
+# ─── v119.3：止損位風險評估 prompt ───────────────
+
+def test_v119_3_stop_loss_risk_rule_in_prompt():
+    """function_defs 必須含止損位風險評估規則（含『流動性獵取』警告）。"""
+    fd = (
+        pathlib.Path(__file__).resolve().parent.parent / "app" / "core" / "llm" / "function_defs.py"
+    )
+    src = fd.read_text(encoding="utf-8")
+    assert "流動性獵取" in src or "liquidity sweep" in src.lower(), (
+        "function_defs 必須含『流動性獵取 / liquidity sweep』警告"
+    )
+    assert "止損" in src, "function_defs 必須含『止損』風險評估"
+    assert "ob_top_5_bids" in src or "機構防禦區" in src, (
+        "function_defs 必須提及訂單簿密集區下方的止損風險（機構防禦區）"
+    )
+    assert "ATR" in src, "止損規則必須要求標示 ATR 倍數"
