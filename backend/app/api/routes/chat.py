@@ -395,17 +395,18 @@ def _auto_calc_indicator_values(
         except Exception as _rg_err:
             logger.debug(f"regime 分類失敗（不影響主流程）: {_rg_err}")
 
-        # v104 Q1：注入外部訊號快照（funding / OI / 多空比 / Fear&Greed / FRED 總體）
+        # v104 Q1 + v119.2：注入外部訊號快照（funding / OI / 多空比 / Fear&Greed / FRED 總體）
+        # v119.2 修法：條件放寬為「永遠注入」（即使部分欄位空），讓 LLM 知道「系統有嘗試
+        # 抓資料」。配合 v119.1 的 stale cache fallback，現在「無衍生品快照」應該很少見。
         try:
             from app.core.external_signals import get_signals_snapshot, format_signals_summary
-            from app.utils.symbol import is_tw_stock as _is_tw_q1
-            # 只對加密 symbol 抓衍生品；情緒 / 總體對所有資產都適用
             _signals = get_signals_snapshot(chart_symbol)
-            if _signals and (_signals.get("derivatives") or _signals.get("sentiment") or _signals.get("macro")):
+            if _signals:
                 chart_state["external_signals"] = _signals
                 chart_state["external_signals_summary"] = format_signals_summary(_signals)
+                _stale_tag = " STALE" if _signals.get("stale") else ""
                 logger.info(
-                    f"[external_signals] {chart_symbol} "
+                    f"[external_signals]{_stale_tag} {chart_symbol} "
                     f"deriv={len(_signals.get('derivatives') or {})} "
                     f"sentiment={len(_signals.get('sentiment') or {})} "
                     f"macro={len(_signals.get('macro') or {})}"

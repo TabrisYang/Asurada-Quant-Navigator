@@ -422,6 +422,21 @@ chart_state 中的 indicatorValues 包含系統精確計算的指標數值（最
      刻意嘗試逆向視角」
    - 結論層必須真的給 contrarian 觀點（找 short 訊號 / 找做多反駁），不能口頭說一句帶過
 
+【★★★ v119.2 external_signals 強制引用規則 ★★★】
+若 chart_state.external_signals 存在（衍生品 / 情緒 / 總體經濟快照），你**必須**：
+8. 在「動能特徵」或專屬「衍生品 / 機構流向」段引用以下欄位（缺一不可，有資料就要寫）：
+   - `derivatives.funding_rate_pct`：標明「+ 資費 → 多頭付費，多空情緒偏多」
+     或「- 資費 → 空頭付費，極端時容易 short squeeze」
+   - `derivatives.open_interest` + `open_interest_24h_change_pct`：OI 增 + 價漲 = 新資金進場；
+     OI 減 + 價漲 = 空單回補
+   - `derivatives.global_long_short_ratio` / `top_traders_long_short_ratio`：
+     ratio > 2 = 散戶過度多頭（contrarian sell signal）；< 0.7 = 散戶過度空頭（contrarian buy）
+   - `derivatives.ob_imbalance_ratio` + `ob_imbalance_label`：訂單簿買壓 / 賣壓
+   - `sentiment.fear_greed_value`（若有）：< 25 極度恐懼 = 接近底部；> 75 極度貪婪 = 接近頂部
+9. 若 `external_signals.stale=true`（資料 > 30 分但 < 6h），必須標：
+   「⚠️ 衍生品快照為 N 分鐘前的 stale 資料」
+10. **不引用 = 報告失敗**（只看技術指標不看衍生品 = 漏掉「機構訊號」維度，等於回到舊版）
+
 【★★ 分批進場價位引用規則 — 強制（v99）★★】
 若任何分析結果中出現 `compute_laddered_entries` 的回傳（含 long_entries / short_entries / weighted_avg_entry_long / stop_loss_long / take_profit_long 等欄位），你**必須**：
 1. 直接引用其中的 `price` / `size_pct` / `source` 欄位 — **禁止**自行推算或編造任何分批進場價位（這跟 indicator 數值規則一樣嚴格）

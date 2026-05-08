@@ -107,4 +107,32 @@ def test_v119_1_stale_fallback_used_when_all_fetch_fails():
     es._cache.clear()
 
 
-# ─── v119.2-5 tests：實作該 sub-task 時加入 ─
+# ─── v119.2：chat.py 強制注入 + prompt 強制引用 ──────
+
+def test_v119_2_chat_py_inject_condition_relaxed():
+    """chat.py 注入條件放寬：只要 _signals 不空就注入（不再要求 derivatives 必須有）。"""
+    chat_py = (
+        pathlib.Path(__file__).resolve().parent.parent / "app" / "api" / "routes" / "chat.py"
+    )
+    src = chat_py.read_text(encoding="utf-8")
+    # v119.2 之後不再有「if _signals and (derivatives or sentiment or macro)」這種強限制
+    # 應該是簡單的「if _signals」
+    assert 'if _signals and (_signals.get("derivatives")' not in src, (
+        "chat.py 不該再有「derivatives 必須有才注入」的舊條件（v119.2）"
+    )
+
+
+def test_v119_2_function_defs_requires_external_citation():
+    """function_defs 必須含 external_signals 強制引用規則。"""
+    fd = (
+        pathlib.Path(__file__).resolve().parent.parent / "app" / "core" / "llm" / "function_defs.py"
+    )
+    src = fd.read_text(encoding="utf-8")
+    # 必須含「funding_rate」+ 「open_interest」+ 「ob_imbalance」+ 強制字眼
+    assert "funding_rate" in src and "open_interest" in src, (
+        "function_defs 必須要求引用 funding_rate + open_interest"
+    )
+    assert "ob_imbalance" in src or "order_book" in src, (
+        "function_defs 必須要求引用 order book imbalance"
+    )
+    assert "external_signals" in src, "function_defs 必須有 external_signals 強制引用區塊"
