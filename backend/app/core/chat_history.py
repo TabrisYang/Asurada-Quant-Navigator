@@ -60,9 +60,19 @@ class ChatHistoryStore(BaseDBStore):
                     content TEXT NOT NULL,
                     timestamp TEXT NOT NULL,
                     token_usage TEXT,
+                    status TEXT NOT NULL DEFAULT 'completed',
                     FOREIGN KEY (conversation_id) REFERENCES conversations(id)
                 )
             """)
+
+            # v115 schema migration: 既有 DB 加 status column（既有訊息預設 completed）
+            try:
+                self._conn.execute(
+                    "ALTER TABLE messages ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'"
+                )
+                logger.info("[v115] messages 表加 status column（既有訊息預設 completed）")
+            except Exception:
+                pass
 
             # 索引
             self._conn.execute("""
@@ -169,6 +179,143 @@ class ChatHistoryStore(BaseDBStore):
             logger.warning(f"保存對話訊息失敗（不影響主流程）: {e}")
             return conversation_id
 
+    # ─── v115：Producer/Consumer 解耦支援 ──────────────────
+
+    def create_streaming_message(
+        self,
+        conversation_id: str,
+        role: str = "assistant",
+        initial_content: str = "",
+        symbol: Optional[str] = None,
+        timeframe: Optional[str] = None,
+    ) -> Optional[int]:
+        """建立 status='streaming' 的空訊息，回傳 message_id。
+
+        Producer 用此 message_id 增量 append 內容，
+        Consumer 從同一 message_id tail 讀並 yield SSE。
+        """
+        if not self._conn:
+            return None
+
+        try:
+            now = datetime.utcnow().isoformat()
+
+            # 確保對話存在（複製 save_message 的 upsert 邏輯）
+            existing = self._conn.execute(
+                "SELECT id FROM conversations WHERE id = ?", (conversation_id,)
+            ).fetchone()
+            if not existing:
+                self._conn.execute(
+                    """INSERT INTO conversations (id, title, symbol, timeframe, created_at, updated_at, message_count)
+                       VALUES (?, ?, ?, ?, ?, ?, 0)""",
+                    (conversation_id, "新對話", symbol, timeframe, now, now),
+                )
+
+            cursor = self._conn.execute(
+                """INSERT INTO messages (conversation_id, role, content, timestamp, status)
+                   VALUES (?, ?, ?, ?, 'streaming')""",
+                (conversation_id, role, initial_content, now),
+            )
+            message_id = cursor.lastrowid
+
+            self._conn.execute(
+                """UPDATE conversations
+                   SET updated_at = ?, message_count = message_count + 1,
+                       symbol = COALESCE(?, symbol),
+                       timeframe = COALESCE(?, timeframe)
+                   WHERE id = ?""",
+                (now, symbol, timeframe, conversation_id),
+            )
+
+            self._conn.commit()
+            return message_id
+        except Exception as e:
+            logger.warning(f"建立 streaming message 失敗: {e}")
+            return None
+
+    def append_message_content(self, message_id: int, additional_content: str) -> bool:
+        """增量 append 文字到指定訊息（producer 用）。"""
+        if not self._conn or not additional_content:
+            return False
+        try:
+            self._conn.execute(
+                "UPDATE messages SET content = content || ? WHERE id = ?",
+                (additional_content, message_id),
+            )
+            self._conn.commit()
+            return True
+        except Exception as e:
+            logger.warning(f"append message content 失敗: {e}")
+            return False
+
+    def update_message_status(
+        self,
+        message_id: int,
+        status: str,
+        final_content: Optional[str] = None,
+        token_usage: Optional[dict] = None,
+    ) -> bool:
+        """更新 message status（streaming → completed / error）。
+
+        若同時提供 final_content 會 overwrite content（producer 在結束時可一次性
+        用 strip 後的 clean text 覆寫，避免 partial token 殘留中段 markup）。
+        """
+        if not self._conn:
+            return False
+        try:
+            if final_content is not None:
+                usage_json = json.dumps(token_usage, ensure_ascii=False) if token_usage else None
+                self._conn.execute(
+                    "UPDATE messages SET content = ?, status = ?, token_usage = ? WHERE id = ?",
+                    (final_content, status, usage_json, message_id),
+                )
+            else:
+                self._conn.execute(
+                    "UPDATE messages SET status = ? WHERE id = ?",
+                    (status, message_id),
+                )
+            self._conn.commit()
+            return True
+        except Exception as e:
+            logger.warning(f"update message status 失敗: {e}")
+            return False
+
+    def get_message_content_after(
+        self, message_id: int, offset: int = 0
+    ) -> tuple[str, str]:
+        """從 message_id 的 content 讀取 offset 之後的部分 + 當前 status。
+
+        Consumer 用此 method tail DB：
+            new_content, status = chat_history.get_message_content_after(mid, offset)
+            if new_content:
+                yield SSE token
+                offset += len(new_content)
+            if status in ('completed', 'error'):
+                break
+
+        Returns:
+            (new_content_after_offset, current_status)
+            找不到 message 時回傳 ('', 'error')
+        """
+        if not self._conn:
+            return ("", "error")
+        try:
+            row = self._conn.execute(
+                "SELECT content, status FROM messages WHERE id = ?",
+                (message_id,),
+            ).fetchone()
+            if not row:
+                return ("", "error")
+            content, status = row[0] or "", row[1] or "completed"
+            if offset >= len(content):
+                return ("", status)
+            return (content[offset:], status)
+        except Exception as e:
+            logger.warning(f"get message content after 失敗: {e}")
+            return ("", "error")
+
+    # ─── 既有 method ──────────────────────────────
+
     def list_conversations(self, limit: int = 20, offset: int = 0) -> list[dict]:
         """列出最近的對話（按更新時間倒序）"""
         if not self._conn:
@@ -207,7 +354,7 @@ class ChatHistoryStore(BaseDBStore):
 
         try:
             cursor = self._conn.execute(
-                """SELECT role, content, timestamp, token_usage
+                """SELECT id, role, content, timestamp, token_usage, status
                    FROM messages
                    WHERE conversation_id = ?
                    ORDER BY id ASC
@@ -217,13 +364,15 @@ class ChatHistoryStore(BaseDBStore):
             messages = []
             for row in cursor.fetchall():
                 msg = {
-                    "role": row[0],
-                    "content": row[1],
-                    "timestamp": row[2],
+                    "id": row[0],
+                    "role": row[1],
+                    "content": row[2],
+                    "timestamp": row[3],
+                    "status": row[5] or "completed",
                 }
-                if row[3]:
+                if row[4]:
                     try:
-                        msg["usage"] = json.loads(row[3])
+                        msg["usage"] = json.loads(row[4])
                     except json.JSONDecodeError:
                         pass
                 messages.append(msg)
