@@ -604,6 +604,26 @@ class PredictionTracker:
             except sqlite3.OperationalError:
                 pass  # 欄位已存在
 
+        # v120：訊號層回測 — 每筆 prediction 記錄當下的衍生品 / 機構訊號值
+        # 這些欄位讓我們能算「funding 為負 + 看多」的歷史命中率，配合 v118
+        # regime_warning 一起警告 LLM「該訊號組合過去無 alpha」。
+        # signals_json / buckets_json 是彈性容器，未來新訊號不用再 migration。
+        for _col_def in (
+            "funding_at_entry REAL DEFAULT NULL",            # funding rate %
+            "oi_24h_change_at_entry REAL DEFAULT NULL",      # OI 24h 變化 %
+            "premium_at_entry REAL DEFAULT NULL",            # Coinbase Premium %
+            "long_short_at_entry REAL DEFAULT NULL",         # global long/short ratio
+            "etf_flow_7d_at_entry REAL DEFAULT NULL",        # ETF 7 天累積流入 USD（v119.5 跳過，欄位先留）
+            "ob_imbalance_at_entry REAL DEFAULT NULL",       # 訂單簿 bid/ask depth 比
+            "fear_greed_at_entry INTEGER DEFAULT NULL",      # Fear & Greed 0-100
+            "signals_json TEXT DEFAULT NULL",                # 完整 raw 訊號值 JSON
+            "buckets_json TEXT DEFAULT NULL",                # bucket classification JSON
+        ):
+            try:
+                self._conn.execute(f"ALTER TABLE predictions ADD COLUMN {_col_def}")
+            except sqlite3.OperationalError:
+                pass  # 欄位已存在
+
         # 覆盤報告紀錄表
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS review_log (
