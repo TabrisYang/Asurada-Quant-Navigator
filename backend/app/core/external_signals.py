@@ -26,12 +26,16 @@ from typing import Any, Optional
 import httpx
 from loguru import logger
 
-# 30 分鐘快取（外部訊號變動不快，省 API 額度）
+# 30 分鐘新鮮快取（外部訊號變動不快，省 API 額度）
 _CACHE_TTL = 1800
+# v119.1：6 小時 stale limit — 新 fetch 全失敗時用過期 cache 比沒有好
+# （funding rate 8h 才換一次 / OI / order_book 6h 內變化通常 < 5%，仍 informative）
+_STALE_LIMIT = 6 * 3600
 _cache: dict[str, tuple[float, dict]] = {}
 
 
 def _cached(key: str) -> Optional[dict]:
+    """新鮮 cache（< _CACHE_TTL = 30 分）"""
     if key in _cache:
         ts, payload = _cache[key]
         if time.time() - ts < _CACHE_TTL:
@@ -39,8 +43,42 @@ def _cached(key: str) -> Optional[dict]:
     return None
 
 
+def _stale_cached(key: str) -> Optional[tuple[float, dict]]:
+    """過期但仍在 _STALE_LIMIT（6h）內的 cache，fallback 用。
+
+    Returns (age_seconds, payload) 或 None。
+    """
+    if key in _cache:
+        ts, payload = _cache[key]
+        age = time.time() - ts
+        if age < _STALE_LIMIT:
+            return age, payload
+    return None
+
+
 def _store(key: str, payload: dict) -> None:
     _cache[key] = (time.time(), payload)
+
+
+def _fetch_with_retry(fn, *args, max_retries: int = 3, base_backoff: float = 0.5):
+    """v119.1：重試包裝 — 失敗時 0.5s / 1.0s / 2.0s 指數 backoff 重試。
+
+    Binance / Coinbase / SoSoValue 等 API 偶爾 rate limit 或瞬斷，
+    重試一兩次幾乎都能成功。
+    """
+    last_err: Optional[Exception] = None
+    for attempt in range(max_retries):
+        try:
+            result = fn(*args)
+            if result:
+                return result
+        except Exception as e:
+            last_err = e
+        if attempt < max_retries - 1:
+            time.sleep(base_backoff * (2 ** attempt))
+    if last_err:
+        logger.debug(f"[external] retry exhausted ({fn.__name__}): {last_err}")
+    return None
 
 
 def _to_binance_symbol(symbol: str) -> str:
@@ -340,37 +378,40 @@ def get_signals_snapshot(symbol: str, include_macro: bool = True) -> dict:
 
     with httpx.Client() as client:
         # 衍生品（USDT 永續才有意義；台股 / 非 perp 跳過）
+        # v119.1：每個 fetcher 用 retry 包，三次失敗才放棄
         if "USDT" in sym or "USD" in sym:
-            for fn, key in [
-                (_fetch_funding_rate, None),
-                (_fetch_open_interest, None),
-                (_fetch_long_short_ratio, None),
-                (_fetch_coinglass_liquidation, None),
-                (_fetch_order_book, None),
-            ]:
-                try:
-                    res = fn(client, sym)
-                    if res:
-                        out["derivatives"].update(res)
-                except Exception:
-                    continue
+            for fn in (
+                _fetch_funding_rate,
+                _fetch_open_interest,
+                _fetch_long_short_ratio,
+                _fetch_coinglass_liquidation,
+                _fetch_order_book,
+            ):
+                res = _fetch_with_retry(fn, client, sym)
+                if res:
+                    out["derivatives"].update(res)
 
         # 情緒（與 symbol 無關，全市場一個值）
-        try:
-            fg = _fetch_fear_greed(client)
-            if fg:
-                out["sentiment"].update(fg)
-        except Exception:
-            pass
+        fg = _fetch_with_retry(_fetch_fear_greed, client)
+        if fg:
+            out["sentiment"].update(fg)
 
         # 總體（FRED key 有設才抓）
         if include_macro and _FRED_KEY:
-            try:
-                m = _fetch_macro_snapshot(client)
-                if m:
-                    out["macro"].update(m)
-            except Exception:
-                pass
+            m = _fetch_with_retry(_fetch_macro_snapshot, client)
+            if m:
+                out["macro"].update(m)
+
+    # v119.1：若整個 fetch 都失敗（derivatives + sentiment 都空）→ 用 stale cache fallback
+    # 比「無衍生品快照」好太多，明確標 stale_seconds 讓 LLM 知道資料新鮮度
+    if not out["derivatives"] and not out["sentiment"] and not out["macro"]:
+        stale = _stale_cached(cache_key)
+        if stale:
+            age, payload = stale
+            logger.warning(
+                f"[external] 全部 fetch 失敗，用 stale cache（age={int(age)}s, key={cache_key}）"
+            )
+            return {**payload, "cached": True, "stale": True, "stale_seconds": int(age)}
 
     _store(cache_key, out)
     return out
