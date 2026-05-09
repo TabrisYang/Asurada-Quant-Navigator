@@ -102,6 +102,10 @@ interface ChartStore {
 
   // ===== 取得圖表狀態摘要（給 LLM 用）=====
   getChartStateSummary: () => Record<string, unknown>;
+
+  // ===== v111：指標使用偏好（給「推薦載入」按鈕用，不主動覆蓋使用者選擇）=====
+  /** 取得過去 7 天最常用指標 type 清單（無偏好則回核心預設 ['ema', 'bb']） */
+  getPreferredIndicatorTypes: (maxN?: number) => string[];
 }
 
 // 從 localStorage 載入持久化的 LLM session（含模型名稱）
@@ -116,6 +120,64 @@ function _loadInitialLLMConfig(): LLMConfig {
   }
   return { provider: 'openai' };
 }
+
+// ═══════════════════════════════════════════════════════════════
+// v111：指標使用偏好追蹤（localStorage）
+// ═══════════════════════════════════════════════════════════════
+// 記錄使用者過去 7 天最常開的指標，給「推薦載入」按鈕等 UI 用。
+// 不主動覆蓋使用者已選的指標 — 只在使用者主動呼叫 loadCoreIndicators 時用。
+const _INDICATOR_USAGE_KEY = 'asura.indicator-usage';
+const _USAGE_RETENTION_DAYS = 7;
+
+interface IndicatorUsageRecord {
+  count: number;
+  last_used_at: number;  // unix ms
+}
+
+function _loadIndicatorUsage(): Record<string, IndicatorUsageRecord> {
+  try {
+    const raw = localStorage.getItem(_INDICATOR_USAGE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function _saveIndicatorUsage(data: Record<string, IndicatorUsageRecord>): void {
+  try {
+    localStorage.setItem(_INDICATOR_USAGE_KEY, JSON.stringify(data));
+  } catch { /* localStorage 滿 / 無權限等錯誤靜默忽略 */ }
+}
+
+function _recordIndicatorUsage(indicatorType: string): void {
+  if (!indicatorType) return;
+  const usage = _loadIndicatorUsage();
+  const now = Date.now();
+  const cutoff = now - _USAGE_RETENTION_DAYS * 86400_000;
+  // 順手清過期 record
+  const cleaned: Record<string, IndicatorUsageRecord> = {};
+  for (const [k, v] of Object.entries(usage)) {
+    if (v.last_used_at >= cutoff) cleaned[k] = v;
+  }
+  const cur = cleaned[indicatorType] || { count: 0, last_used_at: now };
+  cleaned[indicatorType] = { count: cur.count + 1, last_used_at: now };
+  _saveIndicatorUsage(cleaned);
+}
+
+/** v111：取得使用者過去 7 天最常用指標 ids，按使用次數降序，最多 maxN 個 */
+function _getPreferredIndicatorTypes(maxN: number = 3): string[] {
+  const usage = _loadIndicatorUsage();
+  const now = Date.now();
+  const cutoff = now - _USAGE_RETENTION_DAYS * 86400_000;
+  return Object.entries(usage)
+    .filter(([, v]) => v.last_used_at >= cutoff)
+    .sort((a, b) => b[1].count - a[1].count)
+    .slice(0, maxN)
+    .map(([id]) => id);
+}
+
+/** v111：核心指標預設組合 — 新使用者 / 沒偏好時的初始建議 */
+const _CORE_INDICATOR_TYPES: string[] = ['ema', 'bb'];
 
 export const useChartStore = create<ChartStore>((set, get) => ({
   // ===== 初始狀態 =====
@@ -212,10 +274,13 @@ export const useChartStore = create<ChartStore>((set, get) => ({
   },
 
   // ===== 指標操作（雙軌同步核心）=====
-  addIndicator: (indicator) =>
+  addIndicator: (indicator) => {
+    // v111：記錄使用者偏好（給推薦載入用，不影響當前流程）
+    _recordIndicatorUsage(indicator.indicator_type);
     set((state) => ({
       activeIndicators: [...state.activeIndicators.filter((i) => i.id !== indicator.id), indicator],
-    })),
+    }));
+  },
 
   removeIndicator: (id) =>
     set((state) => ({
@@ -467,5 +532,13 @@ export const useChartStore = create<ChartStore>((set, get) => ({
     }
 
     return summary;
+  },
+
+  // ===== v111：指標使用偏好查詢 =====
+  getPreferredIndicatorTypes: (maxN: number = 3) => {
+    const preferred = _getPreferredIndicatorTypes(maxN);
+    // 偏好不足時用核心預設補齊（EMA + BB）
+    if (preferred.length === 0) return [..._CORE_INDICATOR_TYPES];
+    return preferred;
   },
 }));
