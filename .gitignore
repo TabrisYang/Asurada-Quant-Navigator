@@ -62,3 +62,14 @@ FINAL-*.png
 量化條件庫.xlsx
 models/*.pkl
 data/db_pre_v101_*/
+
+# ===== 量化系統資料庫（運行時產生 / 手動備份）=====
+# quant.db 系統運行寫入，每次跑會變
+backend/app/data/*.db
+# DB 備份目錄（用 backup_databases.py 手動備份產生）
+backend/data/db_pre_v101_*/
+
+# ===== 訓練流程自動產生的模型權重 =====
+# imitation_v* 系列由 retrain_imitation.py 每週自動覆寫，不適合 git diff
+backend/models/imitation_v*.pkl
+backend/models/imitation_v*_plain.pkl
