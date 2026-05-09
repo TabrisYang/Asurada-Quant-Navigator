@@ -20,6 +20,75 @@ _LLM_TIMEOUT = settings.llm_timeout
 _LLM_STREAM_TIMEOUT = settings.llm_stream_timeout
 
 
+def _minimal_r2_chart_state(chart_state: Optional[dict]) -> Optional[dict]:
+    """R1：round2 用的精簡 chart_state。
+
+    Round 1 已用過完整 chart_state（含 indicators / signal_history /
+    external_signals 等 ~200KB 內容）；round 2 僅做文字綜合，重傳完整資料是
+    冗餘且讓 Claude CLI TTFT 過長（v118-v120 累積疊加導致 4 分鐘無回應的根因）。
+
+    保留：核心識別欄位 + Round 1 已參考的關鍵統計摘要
+    移除：indicators 完整 JSON、signal_history、external_signals 詳情、
+          recent_accuracy 內 regime_warning/direction_balance/combo_stats 細節
+          （改成單行摘要注入）
+    """
+    if not chart_state:
+        return chart_state
+
+    keep_keys = (
+        "symbol", "timeframe", "currentPrice", "currentRegime",
+        "regime", "regimeConfidence", "regimeSubtype",
+    )
+    minimal: dict = {k: chart_state[k] for k in keep_keys if k in chart_state}
+
+    # 摘要 recent_accuracy（Round 1 已詳讀，這裡只保留判讀提示）
+    ra = chart_state.get("recent_accuracy") or {}
+    if ra:
+        ra_summary: dict = {}
+        for k in ("win_rate_30d", "win_rate", "total_predictions"):
+            if k in ra:
+                ra_summary[k] = ra[k]
+        # regime_warning / direction_balance / combo_stats 各取一行 verdict（不複製細節）
+        rw = ra.get("regime_warning") or {}
+        if rw and rw.get("win_rate") is not None:
+            ra_summary["regime_warning_summary"] = (
+                f"win_rate={rw.get('win_rate')}% n={rw.get('samples', 0)}"
+            )
+        db = ra.get("direction_balance") or {}
+        if db:
+            ra_summary["direction_balance_summary"] = (
+                f"long_pct={db.get('long_pct', 0)}% biased_long={db.get('biased_long', False)} "
+                f"biased_short={db.get('biased_short', False)}"
+            )
+        sh = ra.get("signal_history") or {}
+        cs = (sh.get("combo_stats") or {})
+        if cs and cs.get("win_rate") is not None:
+            ra_summary["combo_stats_summary"] = (
+                f"win_rate={cs.get('win_rate')}% n={cs.get('samples', 0)}"
+            )
+        if ra_summary:
+            minimal["recent_accuracy"] = ra_summary
+
+    # external_signals 改放摘要（不傳 macro / orderbook / etf 等大欄位）
+    ext = chart_state.get("external_signals") or {}
+    if ext:
+        ext_summary: dict = {}
+        deriv = ext.get("derivatives") or {}
+        if "funding_rate_pct" in deriv:
+            ext_summary["funding_rate_pct"] = deriv["funding_rate_pct"]
+        sent = ext.get("sentiment") or {}
+        if "fear_greed_value" in sent:
+            ext_summary["fear_greed_value"] = sent["fear_greed_value"]
+        if ext_summary:
+            minimal["external_signals_summary"] = ext_summary
+
+    minimal["_r2_note"] = (
+        "Round 2 精簡狀態：完整 indicators / signal_history / external_signals 已在 Round 1 提供，"
+        "此處僅保留核心識別與摘要。請依對話歷史中的 Round 1 結果做綜合分析。"
+    )
+    return minimal
+
+
 class TokenUsage:
     """Token 用量統計（含 Anthropic prompt caching 細項）"""
 
@@ -1153,8 +1222,12 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
         include_tools: bool = True,
         r2_mode: bool = False,
     ) -> str:
-        """覆寫父類：附加工具定義文字。r2_mode=True 時只附加繪圖函式。"""
-        prompt = super()._build_system_message(chart_state, system_prompt)
+        """覆寫父類：附加工具定義文字。r2_mode=True 時只附加繪圖函式 + 精簡 chart_state。"""
+        # R1: r2_mode=True 時用精簡 chart_state（移除 signal_history 等已在 round1 用過的欄位）
+        effective_chart_state = (
+            _minimal_r2_chart_state(chart_state) if r2_mode and chart_state else chart_state
+        )
+        prompt = super()._build_system_message(effective_chart_state, system_prompt)
         if include_tools:
             prompt += self._format_tools_for_prompt(r2_mode=r2_mode)
         else:
@@ -1163,6 +1236,16 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
                 "\n\n【重要提示】所有工具呼叫已在前面的步驟中執行完畢，數據結果已包含在對話歷史中。"
                 "你現在的任務是：根據已獲得的數據和計算結果，用文字詳細回答使用者的問題。"
                 "不要再嘗試呼叫任何工具或函式，直接提供分析結論、關鍵數據解讀和交易建議。"
+            )
+        # P2: log prompt size 便於追蹤 chart_state 是否再次膨脹
+        sys_kb = len(prompt.encode("utf-8")) / 1024
+        cs_kb = (
+            len(json.dumps(effective_chart_state, ensure_ascii=False).encode("utf-8")) / 1024
+            if effective_chart_state else 0
+        )
+        if sys_kb >= 50:  # >50KB 才印，避免無關 log 噪音
+            logger.info(
+                f"[prompt_size] sys={sys_kb:.1f}KB chart_state={cs_kb:.1f}KB r2_mode={r2_mode}"
             )
         return prompt
 
@@ -1254,7 +1337,7 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
             full_text = ""
             usage = None
             result_data = None
-            _line_timeout = 300
+            _line_timeout = 600  # P1：與前端 STREAM_TIMEOUT_MS=600 對齊，避免後端先掛
 
             while True:
                 try:
@@ -1368,7 +1451,7 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
             await proc.stdin.drain()
             proc.stdin.close()
 
-            _line_timeout = 300
+            _line_timeout = 600  # P1：與前端 STREAM_TIMEOUT_MS=600 對齊，避免後端先掛
 
             while True:
                 try:
@@ -1478,7 +1561,7 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
             await proc.stdin.drain()
             proc.stdin.close()
 
-            _line_timeout = 300
+            _line_timeout = 600  # P1：與前端 STREAM_TIMEOUT_MS=600 對齊，避免後端先掛
 
             while True:
                 try:

@@ -127,6 +127,10 @@ export interface ChatMessage {
     total: number;
     current_task: string;
   };
+  // S3: 分段輸出（「全部分析」會分成 1=核心結論 / 2=完整詳細分析）
+  segment?: 1 | 2;
+  segmentComplete?: boolean;  // 該段是否已完成
+  segmentLabel?: string;       // 段落標題（例「第 1 段：核心結論」）
 }
 
 export interface FunctionCall {

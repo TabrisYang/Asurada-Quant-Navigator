@@ -169,6 +169,12 @@ export interface StreamCallbacks {
     n_failures: number;
     summary: string;
   }) => void;
+  // S3：分段輸出 — 第 N 段完成時通知前端
+  onSegmentComplete?: (data: {
+    segment: number;
+    next_segment: number;
+    next_label: string;
+  }) => void;
 }
 
 /** SSE 串流回傳值：promise 等待完成，abort 可主動斷開連線 */
@@ -426,6 +432,9 @@ function _handleSSEEvent(
       break;
     case 'audit':
       callbacks.onAudit?.(data as unknown as Parameters<NonNullable<StreamCallbacks['onAudit']>>[0]);
+      break;
+    case 'segment_complete':
+      callbacks.onSegmentComplete?.(data as unknown as Parameters<NonNullable<StreamCallbacks['onSegmentComplete']>>[0]);
       break;
     case 'heartbeat':
       // v110：心跳事件，無 callback，僅維持 SSE 連線 active 防中間層判 idle 而斷

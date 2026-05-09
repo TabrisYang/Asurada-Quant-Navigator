@@ -1650,6 +1650,91 @@ _PROMPT_MODULES["comprehensive_analysis"] = """
 [接著貼 v100 結構化結論卡 — 詳見 CORE prompt 規則。低信心 → 改用「⚠️ 建議觀望」格式]
 """
 
+_PROMPT_MODULES["comprehensive_analysis_seg1"] = """
+【★★★ 全部分析 — 第 1 段（30 秒結論卡 + 倉位建議）★★★】
+
+你被要求做「對 X 進行全部分析」，但**這次只輸出第 1 段**：30 秒結論 + 分批進場建議。
+完整詳細分析（市場結構、動能、回測、量化研究、風險教學）會在第 2 段自動接續，**不要在這段輸出**。
+
+★ 第 1 段必須只含以下兩塊（不可多、不可少）：
+
+1. ⚡ 30 秒結論卡（依 chart_state.regime + Round 1 已執行的 detect_smc_structure / generate_scenarios / analyze_momentum 結果）：
+
+═══════════════════════════════════════════════
+⚡ 30 秒結論：
+  方向：[做多/做空/雙向計劃/觀望]｜信心：[高/中/低]｜建議倉位：[X-Y%]
+  關鍵：[一句話：等什麼觸發，不超過 30 字]
+  失效：[一句話：何時退場，不超過 30 字]
+═══════════════════════════════════════════════
+
+2. 📋 分批進場建議（呼叫 compute_laddered_entries 取得，不可推算）：
+   - 直接引用 long_entries / short_entries 的 price + size_pct + source 欄位
+   - 含 weighted_avg_entry / stop_loss / take_profit / rr
+   - 引用 ratio_strategy 說明配比邏輯
+   - 若 enabled=false → 改為「regime 信心 X% 過低，建議單一進場 + 小倉位試單」並省略表格
+
+★ 第 1 段結尾必須加固定句（讓使用者知道有第 2 段）：
+
+📌 完整分析（市場結構、動能、回測、量化研究、風險教學）即將自動接續，請稍候...
+
+★ 嚴格禁止在第 1 段輸出：
+  - 任何「市場環境」「結構分析」「動能特徵」「策略回測」「量化研究」「跨維度結論」「風險教學」「延伸學習」「摘要表」段落
+  - 任何超過 30 字的論述
+  - 結論卡之後除「分批進場 + 接續說明」之外的任何文字
+
+★ 第 1 段預期字數：300-500 字（含結論卡 + 分批表 + 接續句）。寫完即停。
+"""
+
+
+_PROMPT_MODULES["comprehensive_analysis_seg2"] = """
+【★★★ 全部分析 — 第 2 段（完整詳細分析）★★★】
+
+你被要求做「對 X 進行全部分析」第 2 段。第 1 段已輸出 30 秒結論 + 分批進場，
+這段是**完整詳細分析**（市場結構、動能、回測、量化研究、風險教學等）。
+
+★ 嚴格規則：
+
+  ❌ 禁止重複「⚡ 30 秒結論卡」段（已在第 1 段輸出，重複會讓使用者混亂）
+  ❌ 禁止重複「📋 分批進場建議」表格（已在第 1 段輸出）
+  ✅ 必須在開頭加「（接續第 1 段）」標示
+  ✅ 第 2 段方向 / 信心 / 倉位等結論必須與第 1 段完全一致
+
+★ 第 2 段必須輸出（嚴格依此順序）：
+
+  1. 📊 市場環境（regime 分類 + currentRegime + sector/basket breadth + crossStockSignals）
+  2. 🏛 結構分析（SMC + 趨勢方向 + STL 分解結果）
+  3. ⚡ 動能特徵（多週期動量 + 加速度 + 相對強弱 + RSI 背離）
+  4. 🧪 多策略回測比較（系統已預跑 8 策略；引用 per_regime_metrics + Wilson CI）
+  5. 🔬 量化研究（IC + Walk Forward + Monte Carlo + 因子有效性）
+  6. 🎯 跨維度結論（綜合 #1-5 交叉驗證；不重述前段，只做「跨維度交叉驗證」）
+
+  6.5 🤖 RL 戰略結論（依 chart_state.rl_strategic_insight，若有）：
+       - 模型推論機率 / 模式 / SHAP 主要驅動因子 / 歷史相似情境 / 衝突警示 / 倉位調整
+
+  7. 📋 正式結論卡（v100 結構化結論卡 — 詳見 CORE prompt）— 但**不重複 30 秒結論**
+  8. ⚠️ 策略風險與前提假設（教學重點）
+  9. 🎓 延伸學習建議（1-2 個可進一步探索的相關主題）
+  10. 📊 完整分析摘要表（綜合 #1-9 的結論）
+
+★ 字數預算（避免超長）：
+  - #1 / #2 / #3：各 200-300 字
+  - #4：300-400 字（含 8 策略對比表 + Wilson CI）
+  - #5：300-400 字（IC + WF + MC 交叉驗證）
+  - #6 / #6.5：合計 200-300 字
+  - #7-#10：合計 400-600 字
+  - 總計：1500-2300 字
+
+★ 函式呼叫（按需呼叫，不重複；compare_strategies 已由系統預跑，不再呼叫）：
+  - detect_smc_structure / generate_scenarios / analyze_momentum
+  - scan_conditional_probability → 給 #4
+  - run_quant_research → 給 #5
+  - 已在第 1 段呼叫過的不必重呼
+
+★ 結尾格式：
+  以「📊 完整分析摘要表」結束，不再加任何結論卡（已在 #7 寫過）。
+"""
+
+
 _PROMPT_MODULES["teaching"] = """
 【教學模式 — 面向學習者的解說】
 你目前處於教學模式。除了正常分析，你必須額外做到：
@@ -1889,12 +1974,19 @@ _DOMINANCE: dict[str, list[str]] = {
 }
 
 
-def assemble_system_prompt(intents: set[str], teaching_mode: bool = False) -> str:
+def assemble_system_prompt(
+    intents: set[str], teaching_mode: bool = False, segment: int = 0,
+) -> str:
     """根據偵測到的意圖集合，組裝最終的 SYSTEM_PROMPT。
 
     Args:
         intents: 偵測到的使用者意圖集合
         teaching_mode: 啟用教學模式（解釋指標意義、信號邏輯、策略風險）
+        segment: 分段輸出指定（S2 新增）
+            0 = 預設單段（向後相容）
+            1 = 全部分析第 1 段（30 秒結論卡 + 倉位）
+            2 = 全部分析第 2 段（完整詳細分析）
+            僅在 intents 含 "comprehensive_analysis" 時生效
     """
     modules_needed: set[str] = set()
     for intent in intents:
@@ -1916,6 +2008,11 @@ def assemble_system_prompt(intents: set[str], teaching_mode: bool = False) -> st
     if teaching_mode:
         modules_needed.add("teaching")
 
+    # S2: 分段輸出 — 替換 comprehensive_analysis 為 seg1 / seg2
+    if segment in (1, 2) and "comprehensive_analysis" in modules_needed:
+        modules_needed.discard("comprehensive_analysis")
+        modules_needed.add(f"comprehensive_analysis_seg{segment}")
+
     static, dynamic = assemble_system_prompt_split(modules_needed)
     return static + dynamic
 
@@ -1928,6 +2025,8 @@ _MODULE_ORDER = (
     "output_lite", "output_full",
     "output_deep_phase1", "output_deep_phase2", "output_deep_phase3",
     "comprehensive_analysis",  # ★ 全部分析統合 prompt（位置在三階段之後、其他細節之前）
+    "comprehensive_analysis_seg1",  # S2: 全部分析第 1 段（30 秒結論卡 + 倉位）
+    "comprehensive_analysis_seg2",  # S2: 全部分析第 2 段（完整詳細分析）
     "drawing", "event_analysis", "conditional_prob", "scenario", "smc",
     "quant_research", "calibrate", "backtest",
     "sector_analysis",

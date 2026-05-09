@@ -472,6 +472,27 @@ export default function ChatInterface() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // P3：visibilitychange 保護
+  // 切到瀏覽器分頁不主動 abort（既有行為）。切回 visible 時若仍在 streaming，
+  // 在當前 streaming bubble 顯示「分析仍在進行中」狀態，避免使用者誤以為系統卡死。
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        const store = useChartStore.getState();
+        if (store.chatLoading && streamingMsgIdRef.current) {
+          const currentMsg = store.messages.find(m => m.id === streamingMsgIdRef.current);
+          if (currentMsg?.isStreaming) {
+            store.updateMessage(streamingMsgIdRef.current, {
+              statusText: currentMsg.statusText || '分析仍在進行中（您剛切回此分頁）...',
+            });
+          }
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+  }, []);
+
   // 普通函式（非 useCallback）— 每次呼叫時讀取最新的 store 狀態
   const _executeSend = async (trimmed: string, sendMode?: string, addUserMsg: boolean = true) => {
     const store = useChartStore.getState();
@@ -770,6 +791,25 @@ export default function ChatInterface() {
           }
           const note = '\n\n---\n' + lines.join('\n');
           updateMessage(assistantMsgId, { content: String(currentMsg.content || '') + note });
+        },
+
+        // S3：分段輸出 — 第 1 段完成時插入分隔符，讓用戶明確看到第 2 段即將接續
+        onSegmentComplete: (data) => {
+          const nextLabel = data.next_label || '完整詳細分析';
+          const divider = (
+            `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+            `✅ **第 ${data.segment} 段完成**\n` +
+            `📌 第 ${data.next_segment} 段「${nextLabel}」即將自動接續...\n` +
+            `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`
+          );
+          accumulatedText += divider;
+          updateMessage(assistantMsgId, {
+            content: accumulatedText,
+            isStreaming: true,
+            segment: data.segment as 1 | 2,
+            segmentComplete: true,
+            statusText: `第 ${data.segment} 段完成 ｜ 生成第 ${data.next_segment} 段中...`,
+          });
         },
       },
       currentConversationId || undefined,

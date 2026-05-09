@@ -2574,39 +2574,107 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                     # KEY_INSIGHTS / PREDICTIONS / SYSTEM_DISTILL 標記偵測（不 yield 給使用者）
                     _MARKER_RE = re.compile(r'\n---(?:KEY_INSIGHTS|PREDICTIONS|SYSTEM_DISTILL)---')
 
-                    # v110 回退：移除 _stream_with_heartbeat 包裝，回到 v107 之前的 raw streaming
-                    # 心跳機制經實測對 client 真斷線（cancel scope）無效，反而曾因 wait_for cancel 殺死 LLM
-                    async for _evt in adapter.chat_stream_events(
-                        round2_messages, chart_state=request.chart_state,
-                        system_prompt=_dynamic_prompt,
-                        r2_mode=True,
-                    ):
-                        if _evt.type == "text_delta":
-                            _r2_text_buf += _evt.text
-                            if not _r2_marker_seen:
-                                _m = _MARKER_RE.search(_r2_text_buf, _r2_yielded_until)
-                                if _m:
-                                    # yield 標記之前的文字，然後停止 yield
-                                    if _m.start() > _r2_yielded_until:
-                                        yield _sse_event("token", {"content": _r2_text_buf[_r2_yielded_until:_m.start()]})
-                                    _r2_yielded_until = len(_r2_text_buf)
-                                    _r2_marker_seen = True
-                                else:
-                                    # 保留尾端 30 字（可能正在形成標記）
-                                    _safe = max(_r2_yielded_until, len(_r2_text_buf) - 30)
-                                    if _safe > _r2_yielded_until:
-                                        yield _sse_event("token", {"content": _r2_text_buf[_r2_yielded_until:_safe]})
-                                        _r2_yielded_until = _safe
-                        elif _evt.type == "function_call":
-                            _r2_function_calls.append(_evt.function_call)
-                        elif _evt.type == "usage":
-                            _r2_usage = _evt.usage
-                        elif _evt.type == "stop":
-                            _r2_stop_reason = _evt.stop_reason
+                    # S1: 分段判定 — 「全部分析」拆成兩段（30 秒結論卡 + 完整詳細分析）
+                    # 其他 intent 走原單段邏輯（segment=0）
+                    _is_comprehensive = "comprehensive_analysis" in _intents
+                    _segments_to_run: list[int] = [1, 2] if _is_comprehensive else [0]
+                    _seg_labels = {
+                        0: "完整分析",
+                        1: "第 1 段（核心結論）",
+                        2: "第 2 段（完整詳細分析）",
+                    }
 
-                    # Flush 剩餘文字（若沒看過標記）
-                    if not _r2_marker_seen and _r2_yielded_until < len(_r2_text_buf):
-                        yield _sse_event("token", {"content": _r2_text_buf[_r2_yielded_until:]})
+                    for _seg_idx, _seg_no in enumerate(_segments_to_run):
+                        # 每段重組 system_prompt（segment=1/2 會替換 comprehensive_analysis 模組）
+                        if _seg_no == 0:
+                            _seg_prompt = _dynamic_prompt
+                        else:
+                            _seg_prompt = assemble_system_prompt(
+                                _intents, teaching_mode=_teaching, segment=_seg_no,
+                            )
+
+                        # 第 2 段加「接續」hint，讓 LLM 知道這是 continuation
+                        if _seg_no == 2:
+                            _seg_messages = list(round2_messages) + [{
+                                "role": "user",
+                                "content": (
+                                    "（系統提示）請輸出第 2 段：完整詳細分析。"
+                                    "在開頭加「（接續第 1 段）」標示。"
+                                    "**不可重複 30 秒結論卡與分批進場表**（已在第 1 段輸出）。"
+                                    "依序輸出市場環境 → 結構分析 → 動能特徵 → 多策略回測 → 量化研究 → 跨維度結論 → 結論卡 → 風險教學 → 延伸學習 → 摘要表。"
+                                ),
+                            }]
+                        else:
+                            _seg_messages = round2_messages
+
+                        # 進度事件 — 每段啟動時通知前端
+                        # R2: 立即 emit，避免用戶看長時間空白誤觸發 abort（v118-v120 chart_state 增大後 TTFT 拉長的根因）
+                        yield _sse_event("status", {
+                            "message": f"完整分析生成中（{_seg_labels[_seg_no]}）...",
+                        })
+
+                        # 每段重置 marker_seen，避免第一段意外標記吞掉第二段內容
+                        _r2_marker_seen = False
+
+                        # v110 回退：移除 _stream_with_heartbeat 包裝，回到 v107 之前的 raw streaming
+                        # 心跳機制經實測對 client 真斷線（cancel scope）無效，反而曾因 wait_for cancel 殺死 LLM
+                        async for _evt in adapter.chat_stream_events(
+                            _seg_messages, chart_state=request.chart_state,
+                            system_prompt=_seg_prompt,
+                            r2_mode=True,
+                        ):
+                            if _evt.type == "text_delta":
+                                _r2_text_buf += _evt.text
+                                if not _r2_marker_seen:
+                                    _m = _MARKER_RE.search(_r2_text_buf, _r2_yielded_until)
+                                    if _m:
+                                        # yield 標記之前的文字，然後停止 yield（本段內）
+                                        if _m.start() > _r2_yielded_until:
+                                            yield _sse_event("token", {
+                                                "content": _r2_text_buf[_r2_yielded_until:_m.start()],
+                                                "segment": _seg_no,
+                                            })
+                                        _r2_yielded_until = len(_r2_text_buf)
+                                        _r2_marker_seen = True
+                                    else:
+                                        # 保留尾端 30 字（可能正在形成標記）
+                                        _safe = max(_r2_yielded_until, len(_r2_text_buf) - 30)
+                                        if _safe > _r2_yielded_until:
+                                            yield _sse_event("token", {
+                                                "content": _r2_text_buf[_r2_yielded_until:_safe],
+                                                "segment": _seg_no,
+                                            })
+                                            _r2_yielded_until = _safe
+                            elif _evt.type == "function_call":
+                                _r2_function_calls.append(_evt.function_call)
+                            elif _evt.type == "usage":
+                                # 跨段累積 usage
+                                if _r2_usage:
+                                    _r2_usage.prompt_tokens += _evt.usage.prompt_tokens
+                                    _r2_usage.completion_tokens += _evt.usage.completion_tokens
+                                    _r2_usage.total_tokens += _evt.usage.total_tokens
+                                else:
+                                    _r2_usage = _evt.usage
+                            elif _evt.type == "stop":
+                                _r2_stop_reason = _evt.stop_reason
+
+                        # 每段結束 flush 剩餘文字（若沒看過標記）
+                        if not _r2_marker_seen and _r2_yielded_until < len(_r2_text_buf):
+                            yield _sse_event("token", {
+                                "content": _r2_text_buf[_r2_yielded_until:],
+                                "segment": _seg_no,
+                            })
+                            _r2_yielded_until = len(_r2_text_buf)
+
+                        # 段間：emit segment_complete（除最後一段）
+                        # 前端可據此插入「【第 N 段：xxx】」分隔或新建 message bubble
+                        if _seg_no >= 1 and _seg_idx < len(_segments_to_run) - 1:
+                            _next_seg = _segments_to_run[_seg_idx + 1]
+                            yield _sse_event("segment_complete", {
+                                "segment": _seg_no,
+                                "next_segment": _next_seg,
+                                "next_label": _seg_labels.get(_next_seg, ""),
+                            })
 
                     # 建構 response2 物件相容後續既有邏輯
                     class _StreamedResponse:
