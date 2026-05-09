@@ -18,7 +18,7 @@ import {
   type ISeriesApi,
 } from 'lightweight-charts';
 import { useChartStore } from '../../stores/chartStore';
-import type { ActiveIndicator, OHLCVData } from '../../types';
+import type { ActiveIndicator, OHLCVData, Timeframe } from '../../types';
 
 // 時間範圍同步用（基於時間戳而非索引，確保不同數據量的圖表也能精確對齊）
 interface TimeBasedRange {
@@ -90,6 +90,45 @@ const HARMONIC_SERIES_CONFIG: Record<string, { color: string; lineWidth: number;
 function getSeriesColor(indicatorId: string, seriesIndex: number): string {
   const colors = INDICATOR_COLORS[indicatorId] || ['#ffffff'];
   return colors[seriesIndex % colors.length];
+}
+
+// v111：指標視覺權重 — 與 backend technical.py 的 _VISUAL_WEIGHT_OVERRIDES 對應
+// primary：核心趨勢線（粗 + 強色）；secondary：輔助確認；minor：背景參考（細 + 半透明）
+const VISUAL_WEIGHT_MAP: Record<string, 'primary' | 'secondary' | 'minor'> = {
+  ichimoku: 'minor',
+  psar: 'minor',
+  trailing_stop: 'minor',
+  session: 'minor',
+  keltner: 'secondary',
+  donchian: 'secondary',
+  market_structure: 'secondary',
+  harmonic: 'secondary',
+  // 其餘 default primary
+};
+
+function getVisualWeight(id: string): 'primary' | 'secondary' | 'minor' {
+  return VISUAL_WEIGHT_MAP[id] || 'primary';
+}
+
+function visualWeightStyle(weight: 'primary' | 'secondary' | 'minor'): { lineWidth: number; opacity: number } {
+  switch (weight) {
+    case 'minor':     return { lineWidth: 1, opacity: 0.5 };
+    case 'secondary': return { lineWidth: 1, opacity: 1.0 };
+    case 'primary':
+    default:          return { lineWidth: 2, opacity: 1.0 };
+  }
+}
+
+function applyOpacity(color: string, opacity: number): string {
+  if (opacity >= 1.0) return color;
+  // hex (#RRGGBB) → rgba
+  if (color.startsWith('#') && color.length === 7) {
+    const r = parseInt(color.slice(1, 3), 16);
+    const g = parseInt(color.slice(3, 5), 16);
+    const b = parseInt(color.slice(5, 7), 16);
+    return `rgba(${r}, ${g}, ${b}, ${opacity})`;
+  }
+  return color;
 }
 
 // ─── 共用圖表選項 ──────────────────────────────────
@@ -982,9 +1021,17 @@ export default function ChartView() {
 
         let series = overlaySeriesRef.current.get(key);
         if (!series) {
+          // v111：套用 visual_weight 視覺分層 — primary 粗 + 強色，secondary 普通，minor 細 + 半透明
+          // ms / harmonic 已有特殊 conf，跳過 visual_weight（保留原有特殊樣式）
+          const baseColor = conf ? conf.color : getSeriesColor(indicator.id, idx);
+          const baseLineWidth = conf ? conf.lineWidth : 1;
+          const useVisualWeight = !conf;  // 沒 conf 才套 visual_weight
+          const vwStyle = useVisualWeight ? visualWeightStyle(getVisualWeight(indicator.id)) : null;
+          const finalColor = vwStyle ? applyOpacity(baseColor, vwStyle.opacity) : baseColor;
+          const finalLineWidth = vwStyle ? vwStyle.lineWidth : baseLineWidth;
           series = chart.addSeries(LineSeries, {
-            color: conf ? conf.color : getSeriesColor(indicator.id, idx),
-            lineWidth: (conf ? conf.lineWidth : 1) as any,
+            color: finalColor,
+            lineWidth: finalLineWidth as any,
             lineStyle: conf ? conf.lineStyle : 0,
             priceScaleId: 'right',
             lastValueVisible: false,
@@ -1399,7 +1446,7 @@ export default function ChartView() {
                     {otherTimeframes.map((tf) => (
                       <button
                         key={tf}
-                        onClick={() => setTimeframe(tf)}
+                        onClick={() => setTimeframe(tf as Timeframe)}
                         className="px-2 py-1 rounded text-xs cursor-pointer transition-opacity hover:opacity-80"
                         style={{ background: '#30363d', color: '#58a6ff' }}
                       >

@@ -23,6 +23,9 @@ class IndicatorDefinition:
     warmup_periods_func: Callable[[dict], int]  # 根據參數計算暖機期
     calculate_func: Callable[[pd.DataFrame, dict], dict[str, list]]
     pro_tip: str = ""
+    # v111：視覺權重 — 給 frontend 渲染時用來區分主次（避免主圖一堆線一樣粗）
+    # primary：核心趨勢線（粗 + 強色）；secondary：輔助確認（普通）；minor：背景參考（細 + 半透明）
+    visual_weight: str = "primary"
 
 
 class IndicatorRegistry:
@@ -42,6 +45,7 @@ class IndicatorRegistry:
         data_source: str = "ohlcv",
         warmup_func: Optional[Callable] = None,
         pro_tip: str = "",
+        visual_weight: str = "primary",  # v111：primary / secondary / minor
     ):
         """裝飾器：註冊指標計算函式"""
         def decorator(func: Callable):
@@ -56,6 +60,7 @@ class IndicatorRegistry:
                 warmup_periods_func=warmup_func or (lambda p: 0),
                 calculate_func=func,
                 pro_tip=pro_tip,
+                visual_weight=visual_weight,
             )
             return func
         return decorator
@@ -138,6 +143,7 @@ class IndicatorRegistry:
                 "data_source": ind.data_source,
                 "warmup_periods": ind.warmup_periods_func(default_params),
                 "pro_tip": ind.pro_tip,
+                "visual_weight": ind.visual_weight,  # v111：給前端渲染分層用
             })
         return result
 

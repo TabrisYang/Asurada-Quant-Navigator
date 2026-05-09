@@ -1859,3 +1859,38 @@ def calc_stl_oscillator(df: pd.DataFrame, params: dict) -> dict[str, list]:
         "Seasonal": _align(seasonal_arr),
         "Residual": _align(residual_arr),
     }
+
+
+# ═══════════════════════════════════════════════════════════════
+# v111：指標視覺權重 patch（在所有 @registry.register 跑完後執行）
+# ═══════════════════════════════════════════════════════════════
+# 三級：
+# - primary：核心趨勢線（粗 + 強色），預設值
+# - secondary：輔助確認（普通粗細，原色）
+# - minor：背景參考（細 + 半透明 0.5）
+# 保守原則：只標明顯雜亂 / 點狀 / 背景型；多數維持 primary 向下相容
+_VISUAL_WEIGHT_OVERRIDES: dict[str, str] = {
+    # 雲層 / 多線重疊型 → minor（用戶實測截圖中最礙眼）
+    "ichimoku": "minor",
+    # 點狀型 / 背景型 → minor
+    "psar": "minor",
+    "trailing_stop": "minor",
+    "session": "minor",
+    # 通道類 → secondary（提供範圍但非主訊號）
+    "keltner": "secondary",
+    "donchian": "secondary",
+    # 形態辨識類 → secondary（marker 多）
+    "market_structure": "secondary",
+    "harmonic": "secondary",
+}
+
+
+def _apply_visual_weights() -> None:
+    """v111：在 module load 時 patch 既有 IndicatorDefinition 的 visual_weight。"""
+    for indicator_id, weight in _VISUAL_WEIGHT_OVERRIDES.items():
+        ind = registry.get(indicator_id)
+        if ind is not None:
+            ind.visual_weight = weight
+
+
+_apply_visual_weights()
