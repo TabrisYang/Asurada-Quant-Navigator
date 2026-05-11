@@ -1396,39 +1396,65 @@ async def _exec_quant_research(args: dict, default_symbol: str, default_tf: str,
         pass
 
     # ── 5c. GMM Regime 分類 + GARCH 波動率 + HMM ──
+    # 每個 ML 子步驟加 timing + 完成 log，便於診斷卡點
+    import time as _time
     if len(df) >= 100:
         _sub("GMM 市場體制分類中...")
         logger.info(f"量化研究 [{symbol}]: GMM Regime 分類中...")
+        _t0 = _time.time()
         try:
             from app.core.ml.regime_model import regime_model
-            regime_result = regime_model.fit_predict(df)
+            regime_result = await asyncio.wait_for(
+                asyncio.to_thread(regime_model.fit_predict, df),
+                timeout=60,
+            )
             if regime_result.get("status") == "success":
                 report["gmm_regime"] = regime_result
+            logger.info(f"量化研究 [{symbol}]: GMM 完成 ({_time.time()-_t0:.1f}s)")
+        except asyncio.TimeoutError:
+            logger.warning(f"量化研究 [{symbol}]: GMM 逾時 (60s)，跳過")
         except Exception as e:
             logger.warning(f"GMM Regime 分類失敗: {e}")
 
         # GARCH 波動率預測
         _sub("GARCH 波動率預測中...")
+        logger.info(f"量化研究 [{symbol}]: GARCH 波動率預測中...")
+        _t0 = _time.time()
         try:
-            garch_result = regime_model.predict_volatility(df)
+            garch_result = await asyncio.wait_for(
+                asyncio.to_thread(regime_model.predict_volatility, df),
+                timeout=60,
+            )
             if garch_result.get("status") == "success":
                 report["garch_volatility"] = garch_result
+            logger.info(f"量化研究 [{symbol}]: GARCH 完成 ({_time.time()-_t0:.1f}s)")
+        except asyncio.TimeoutError:
+            logger.warning(f"量化研究 [{symbol}]: GARCH 逾時 (60s)，跳過")
         except Exception as e:
             logger.warning(f"GARCH 預測失敗: {e}")
 
         # HMM 狀態轉移（數據 ≥ 200 根才跑）
         if len(df) >= 200:
             _sub("HMM 狀態轉移分析中...")
+            logger.info(f"量化研究 [{symbol}]: HMM 狀態轉移分析中...")
+            _t0 = _time.time()
             try:
-                hmm_result = regime_model.fit_hmm(df)
+                hmm_result = await asyncio.wait_for(
+                    asyncio.to_thread(regime_model.fit_hmm, df),
+                    timeout=60,
+                )
                 if hmm_result.get("status") == "success":
                     report["hmm_regime"] = hmm_result
+                logger.info(f"量化研究 [{symbol}]: HMM 完成 ({_time.time()-_t0:.1f}s)")
+            except asyncio.TimeoutError:
+                logger.warning(f"量化研究 [{symbol}]: HMM 逾時 (60s)，跳過")
             except Exception as e:
                 logger.warning(f"HMM 分析失敗: {e}")
 
     # ── 6. 動態倉位建議（MC 回饋調控 Kelly） ──
     _sub("動態倉位計算中...")
     logger.info(f"量化研究 [{symbol}]: 動態倉位計算中...")
+    _t0 = _time.time()
     try:
         win_rate = report.get("backtest", {}).get("win_rate", 50) / 100
         avg_win = report.get("backtest", {}).get("avg_win_pct", 1.5)
@@ -1437,16 +1463,22 @@ async def _exec_quant_research(args: dict, default_symbol: str, default_tf: str,
 
         # MC → Kelly cap: P5 最大回撤 > 30% 時按比例縮減
         mc_kelly_cap = 1.0
+        mc_p5_dd = 0.0
         mc_result = report.get("monte_carlo", {})
         if mc_result.get("status") == "success":
             mc_p5_dd = abs(mc_result.get("max_drawdown", {}).get("worst_5pct", 0))
             if mc_p5_dd > 30:
                 mc_kelly_cap = 30.0 / mc_p5_dd
 
-        pos = calculate_dynamic_positions(
-            df, method="kelly_dynamic",
-            win_rate=win_rate, avg_win_loss_ratio=wl_ratio,
-            kelly_fraction=0.25 * mc_kelly_cap,
+        # 用 asyncio.wait_for + to_thread 包同步函式，30 秒 timeout 防 hang
+        pos = await asyncio.wait_for(
+            asyncio.to_thread(
+                calculate_dynamic_positions,
+                df, method="kelly_dynamic",
+                win_rate=win_rate, avg_win_loss_ratio=wl_ratio,
+                kelly_fraction=0.25 * mc_kelly_cap,
+            ),
+            timeout=30,
         )
         report["position_sizing"] = {
             "summary": pos.get("summary"),
@@ -1458,14 +1490,34 @@ async def _exec_quant_research(args: dict, default_symbol: str, default_tf: str,
                 else "無需調整",
             },
         }
+        logger.info(f"量化研究 [{symbol}]: 動態倉位完成 ({_time.time()-_t0:.1f}s)")
+    except asyncio.TimeoutError:
+        logger.warning(f"量化研究 [{symbol}]: 動態倉位逾時 (30s)，跳過")
+        report["position_sizing"] = {"error": "計算逾時（30 秒）"}
     except Exception as e:
+        logger.warning(f"量化研究 [{symbol}]: 動態倉位失敗: {e}")
         report["position_sizing"] = {"error": str(e)}
 
     # ── 7. 整合結論 ──
     _sub("整合結論中...")
-    report["conclusion"] = _generate_conclusion(report)
-    report["status"] = "success"
+    logger.info(f"量化研究 [{symbol}]: 整合結論中...")
+    _t0 = _time.time()
+    try:
+        # _generate_conclusion 是純 dict 處理，理論很快，但加 timeout 保險
+        report["conclusion"] = await asyncio.wait_for(
+            asyncio.to_thread(_generate_conclusion, report),
+            timeout=15,
+        )
+        logger.info(f"量化研究 [{symbol}]: 整合結論完成 ({_time.time()-_t0:.1f}s)")
+    except asyncio.TimeoutError:
+        logger.warning(f"量化研究 [{symbol}]: 整合結論逾時 (15s)，跳過")
+        report["conclusion"] = {"error": "結論生成逾時"}
+    except Exception as e:
+        logger.warning(f"量化研究 [{symbol}]: 整合結論失敗: {e}")
+        report["conclusion"] = {"error": str(e)}
 
+    report["status"] = "success"
+    logger.info(f"量化研究 [{symbol}]: 全部完成")
     return report
 
 

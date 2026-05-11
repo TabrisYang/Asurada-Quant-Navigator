@@ -2430,6 +2430,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                     _active_tasks.append(_fc_task)
                     _hb_sec = 0
                     _last_pct = -1
+                    _last_status_text = ""
                     while not _fc_task.done():
                         await asyncio.sleep(2)
                         _hb_sec += 2
@@ -2438,14 +2439,21 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                         # v110：每 2 秒就強制發 progress（從 6s 提高），確保 SSE 連線在長 function call 期間
                         # 也不會因 idle 被 OS / browser 任何層判定假死而斷
                         _last_pct = _pct
+                        # v121：心跳訊息附加累積耗時，且若 status_text 卡在同一句 ≥ 10 秒就加「⏳ 計算中」標記
+                        # → 用戶能明確看到「系統還在跑」，避免誤以為畫面凍結而切標的
+                        if _status == _last_status_text and _hb_sec > 0 and _hb_sec % 10 == 0:
+                            _status_with_time = f"⏳ {_status} ({_hb_sec}s — 系統仍在計算中)"
+                        else:
+                            _status_with_time = f"{_status} ({_hb_sec}s)" if _status else f"分析中... ({_hb_sec}s)"
+                        _last_status_text = _status
                         yield _sse_event("progress", {
                             "percentage": _pct,
                             "completed": _fc_progress.completed,
                             "total": _fc_progress.total,
                             "current_task": _fc_progress.current_task,
-                            "message": _status,
+                            "message": _status_with_time,
                         })
-                        yield _sse_event("status", {"message": _status})
+                        yield _sse_event("status", {"message": _status_with_time})
                     exec_result = _fc_task.result()
                     yield _sse_event("progress", {
                         "percentage": 100,
