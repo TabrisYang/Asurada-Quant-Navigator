@@ -400,13 +400,13 @@ def _auto_calc_indicator_values(
         # 抓資料」。配合 v119.1 的 stale cache fallback，現在「無衍生品快照」應該很少見。
         try:
             from app.core.external_signals import get_signals_snapshot, format_signals_summary
-            _signals = get_signals_snapshot(chart_symbol)
+            _signals = get_signals_snapshot(symbol)
             if _signals:
                 chart_state["external_signals"] = _signals
                 chart_state["external_signals_summary"] = format_signals_summary(_signals)
                 _stale_tag = " STALE" if _signals.get("stale") else ""
                 logger.info(
-                    f"[external_signals]{_stale_tag} {chart_symbol} "
+                    f"[external_signals]{_stale_tag} {symbol} "
                     f"deriv={len(_signals.get('derivatives') or {})} "
                     f"sentiment={len(_signals.get('sentiment') or {})} "
                     f"macro={len(_signals.get('macro') or {})}"
@@ -451,12 +451,12 @@ def _auto_calc_indicator_values(
             from app.core.social_sentiment import get_social_sentiment
             from app.utils.symbol import is_tw_stock as _is_tw_a3
             # 只對加密 symbol 抓社群情緒（台股的 Reddit 沒參考價值）
-            if not _is_tw_a3(chart_symbol):
-                _sent = get_social_sentiment(chart_symbol)
+            if not _is_tw_a3(symbol):
+                _sent = get_social_sentiment(symbol)
                 if _sent and not _sent.get("stale_warning"):
                     chart_state["social_sentiment"] = _sent
                     logger.info(
-                        f"[social_sentiment] {chart_symbol}: "
+                        f"[social_sentiment] {symbol}: "
                         f"overall={_sent.get('overall_label')} "
                         f"({_sent.get('overall_sentiment', 0):+.2f})"
                     )
@@ -470,7 +470,7 @@ def _auto_calc_indicator_values(
             if _portfolio.get("total_positions", 0) > 0:
                 chart_state["portfolio_summary"] = _portfolio
                 logger.info(
-                    f"[portfolio_summary] {chart_symbol}: "
+                    f"[portfolio_summary] {symbol}: "
                     f"{_portfolio.get('total_positions')} positions, "
                     f"${_portfolio.get('total_exposure_usd', 0):.0f}"
                 )
@@ -483,11 +483,11 @@ def _auto_calc_indicator_values(
             _ri = chart_state.get("currentRegime") or {}
             if _ri.get("regime") in ("ranging", "unknown"):
                 from app.core.regime_subtype import classify_ranging_subtype
-                _sub = classify_ranging_subtype(df, _ri, chart_state, symbol=chart_symbol)
+                _sub = classify_ranging_subtype(df, _ri, chart_state, symbol=symbol)
                 if _sub and _sub.get("subtype"):
                     chart_state["regime_subtype"] = _sub
                     logger.info(
-                        f"[regime_subtype] {chart_symbol} {timeframe}: "
+                        f"[regime_subtype] {symbol} {timeframe}: "
                         f"{_sub['subtype']} (conf={_sub.get('confidence',0):.2f}) — {_sub.get('reason','')}"
                     )
         except Exception as _sub_err:
@@ -546,11 +546,11 @@ def _auto_calc_indicator_values(
             from app.core.strategy_insights import get_insights_for
             _ri_insight = chart_state.get("currentRegime") or {}
             _regime_label = _ri_insight.get("regime", "unknown")
-            _insight = get_insights_for(chart_symbol, timeframe, _regime_label)
+            _insight = get_insights_for(symbol, timeframe, _regime_label)
             if _insight:
                 chart_state["historical_insights"] = _insight
                 logger.info(
-                    f"[strategy_insights] {chart_symbol} {timeframe} {_regime_label}: "
+                    f"[strategy_insights] {symbol} {timeframe} {_regime_label}: "
                     f"n={_insight['n_samples']} winrate={_insight['winrate']*100:.1f}%"
                 )
         except Exception as _ins_err:
