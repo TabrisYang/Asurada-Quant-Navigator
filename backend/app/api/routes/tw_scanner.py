@@ -17,8 +17,11 @@ from fastapi.responses import StreamingResponse
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from fastapi.responses import Response
+
 from app.core.tw_bb_scanner import tw_bb_scanner
 from app.core.tw_scan_history import tw_scan_history
+from app.core.tw_track_range import export_to_csv, tw_track_range
 from app.data.fetchers.tw_stock_engine import TwStockEngine
 
 
@@ -175,3 +178,85 @@ async def revisit_scan(scan_id: str):
         "total_revisited": len(enriched),
         "results": enriched,
     }
+
+
+# ─── 跨日追蹤 API ────────────────────────────────
+
+@router.get("/tw-bb-width/range")
+async def stream_tw_bb_range(
+    start_date: str,
+    end_date: str,
+    scope: str = "recent_scan",
+    pctile_threshold: float = 20.0,
+):
+    """跨日追蹤：對「最近一次掃描標的池」或「全市場」執行：
+    - 撈 OHLCV
+    - 逐日重算 4 個指標（close / bb_pctile / change_20d / vol_5d）
+    - 標出該日是否符合 BB% < pctile_threshold
+
+    SSE 流：progress / result / error
+    """
+    if scope not in ("recent_scan", "full_market"):
+        raise HTTPException(status_code=400, detail="scope 必須是 recent_scan 或 full_market")
+
+    async def event_stream():
+        last_result: Optional[dict] = None
+        try:
+            async for evt in tw_track_range.stream(
+                start_date=start_date,
+                end_date=end_date,
+                scope=scope,
+                pctile_threshold=pctile_threshold,
+            ):
+                evt_type = evt.pop("type")
+                if evt_type == "result":
+                    last_result = evt
+                yield _sse_event(evt_type, evt)
+        except Exception as e:
+            logger.exception("跨日追蹤過程發生未預期錯誤")
+            yield _sse_event("error", {"error": f"追蹤錯誤: {e}"})
+
+        # 將 last_result 快取到記憶體，供 export 端點使用（用 query string params 重抓也可，但成本高）
+        # 註：目前不做快取，export 端點重新跑一次 stream 取結果。
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@router.get("/tw-bb-width/range/export")
+async def export_tw_bb_range(
+    start_date: str,
+    end_date: str,
+    scope: str = "recent_scan",
+    pctile_threshold: float = 20.0,
+):
+    """跨日追蹤結果 CSV 匯出。
+
+    回傳 text/csv（含 BOM，Excel 開不亂碼）。
+    重新跑一次追蹤聚合（不依賴 SSE 快照）。
+    """
+    if scope not in ("recent_scan", "full_market"):
+        raise HTTPException(status_code=400, detail="scope 必須是 recent_scan 或 full_market")
+
+    final_result: Optional[dict] = None
+    async for evt in tw_track_range.stream(
+        start_date=start_date,
+        end_date=end_date,
+        scope=scope,
+        pctile_threshold=pctile_threshold,
+    ):
+        if evt.get("type") == "result":
+            final_result = evt
+            break
+
+    if final_result is None:
+        raise HTTPException(status_code=500, detail="追蹤未產生結果")
+
+    csv_text = export_to_csv(final_result)
+    filename = f"tw_bb_track_{start_date}_to_{end_date}_{scope}.csv"
+    return Response(
+        content=csv_text,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
+    )

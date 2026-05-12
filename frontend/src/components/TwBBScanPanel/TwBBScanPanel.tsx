@@ -12,6 +12,8 @@ import { useChartStore } from '../../stores/chartStore';
 import { addSymbolsToList } from '../TopBar';
 import {
   streamTwScan,
+  streamTwScanRange,
+  downloadTwScanRangeCSV,
   listTwScanHistory,
   getTwScanResult,
   revisitTwScan,
@@ -22,11 +24,17 @@ import {
   type TwScanFailure,
   type TwScanSummary,
   type TwScanRevisitItem,
+  type TwTrackRangeResult,
+  type TwTrackProgress,
+  type TwTrackSymbol,
+  type TwDailyFeatures,
 } from '../../services/api';
 import { toast } from '../Toast';
 
 type SortKey = 'bb_width_pctile' | 'change_20d' | 'volume_5d_avg' | 'code';
-type PanelTab = 'scan' | 'history';
+type PanelTab = 'scan' | 'history' | 'track';
+type TrackMetric = 'bb_pctile' | 'close' | 'change_20d' | 'vol_5d';
+type TrackScope = 'recent_scan' | 'full_market';
 
 const PCTILE_OPTIONS = [
   { value: 10, label: '強壓縮 (<10%)' },
@@ -279,6 +287,7 @@ export default function TwBBScanPanel() {
             <div className="flex gap-1">
               <TabButton label="本次掃描" active={tab === 'scan'} onClick={() => { setTab('scan'); setViewingScan(null); }} />
               <TabButton label="📜 歷史" active={tab === 'history'} onClick={() => setTab('history')} />
+              <TabButton label="📊 跨日追蹤" active={tab === 'track'} onClick={() => setTab('track')} />
             </div>
           </div>
           <button
@@ -303,6 +312,8 @@ export default function TwBBScanPanel() {
             onAnalyze={handleAnalyze}
           />
         )}
+
+        {tab === 'track' && <TrackView pctileThreshold={pctile} />}
 
         {tab === 'scan' && <>
         {/* ===== 控制區 ===== */}
@@ -612,6 +623,319 @@ function TabButton({ label, active, onClick }: { label: string; active: boolean;
     >
       {label}
     </button>
+  );
+}
+
+// ─── 跨日追蹤視圖 ────────────────────────────
+
+const METRIC_OPTIONS: { value: TrackMetric; label: string }[] = [
+  { value: 'bb_pctile', label: 'BB 百分位' },
+  { value: 'close', label: '收盤價' },
+  { value: 'change_20d', label: '20 日漲跌幅' },
+  { value: 'vol_5d', label: '5 日均量（張）' },
+];
+
+function _todayISO(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+function _daysAgoISO(days: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() - days);
+  return d.toISOString().slice(0, 10);
+}
+
+function _formatMetric(metric: TrackMetric, feats: TwDailyFeatures | null | undefined): string {
+  if (!feats) return '—';
+  const val = feats[metric];
+  if (val === null || val === undefined) return '—';
+  if (metric === 'vol_5d') return Number(val).toLocaleString();
+  if (metric === 'change_20d') {
+    const n = Number(val);
+    return `${n > 0 ? '+' : ''}${n.toFixed(2)}%`;
+  }
+  if (metric === 'close') return Number(val).toFixed(2);
+  return `${Number(val).toFixed(1)}%`;
+}
+
+function _metricColor(metric: TrackMetric, feats: TwDailyFeatures | null | undefined): string | undefined {
+  if (!feats) return undefined;
+  if (metric === 'bb_pctile' && feats.bb_pctile !== null && feats.bb_pctile !== undefined) {
+    if (feats.bb_pctile < 5) return '#dc2626';
+    if (feats.bb_pctile < 10) return '#f59e0b';
+  }
+  if (metric === 'change_20d' && feats.change_20d !== null && feats.change_20d !== undefined) {
+    return feats.change_20d > 0 ? 'var(--accent-green, #10b981)' : feats.change_20d < 0 ? '#dc2626' : undefined;
+  }
+  return undefined;
+}
+
+function Sparkline({ symbol, metric, scanDates }: {
+  symbol: TwTrackSymbol;
+  metric: TrackMetric;
+  scanDates: string[];
+}) {
+  const values: (number | null)[] = scanDates.map((d) => {
+    const f = symbol.daily_features[d];
+    if (!f) return null;
+    const v = f[metric];
+    return v === null || v === undefined ? null : Number(v);
+  });
+  const numeric = values.filter((v): v is number => v !== null);
+  if (numeric.length < 2) return <span style={{ color: 'var(--text-secondary)' }}>—</span>;
+  const min = Math.min(...numeric);
+  const max = Math.max(...numeric);
+  const range = max - min || 1;
+  const w = 80;
+  const h = 24;
+  const step = values.length > 1 ? w / (values.length - 1) : 0;
+
+  let path = '';
+  values.forEach((v, i) => {
+    if (v === null) return;
+    const x = i * step;
+    const y = h - ((v - min) / range) * h;
+    path += (path === '' ? 'M' : 'L') + x.toFixed(1) + ',' + y.toFixed(1) + ' ';
+  });
+
+  const trend = numeric[numeric.length - 1] - numeric[0];
+  const color = trend > 0 ? 'var(--accent-green, #10b981)' : trend < 0 ? '#dc2626' : 'var(--text-secondary)';
+  return (
+    <svg width={w} height={h} style={{ display: 'block' }}>
+      <path d={path} fill="none" stroke={color} strokeWidth="1.2" />
+    </svg>
+  );
+}
+
+function TrackView({ pctileThreshold }: { pctileThreshold: number }) {
+  const [startDate, setStartDate] = useState(() => _daysAgoISO(7));
+  const [endDate, setEndDate] = useState(() => _todayISO());
+  const [scope, setScope] = useState<TrackScope>('recent_scan');
+  const [metric, setMetric] = useState<TrackMetric>('bb_pctile');
+
+  const [running, setRunning] = useState(false);
+  const [progress, setProgress] = useState<TwTrackProgress | null>(null);
+  const [result, setResult] = useState<TwTrackRangeResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [csvLoading, setCsvLoading] = useState(false);
+
+  const abortRef = useRef<(() => void) | null>(null);
+
+  const handleStart = useCallback(() => {
+    if (!startDate || !endDate) { toast('請選擇日期範圍', 'warning'); return; }
+    if (startDate > endDate) { toast('起始日期不能晚於結束日期', 'warning'); return; }
+
+    if (scope === 'full_market') {
+      const ok = confirm('全市場追蹤約 1938 檔，預估耗時 1-2 小時。\n確定執行嗎？');
+      if (!ok) return;
+    }
+
+    setRunning(true);
+    setProgress(null);
+    setResult(null);
+    setError(null);
+
+    const handle = streamTwScanRange(
+      { start_date: startDate, end_date: endDate, scope, pctile_threshold: pctileThreshold },
+      {
+        onProgress: (p) => setProgress(p),
+        onResult: (r) => {
+          setResult(r);
+          setRunning(false);
+          abortRef.current = null;
+          toast(`追蹤完成：${r.total_matched}/${r.total_scanned} 檔符合，耗時 ${r.duration_sec}s`, 'success');
+        },
+        onError: (e) => {
+          setError(e);
+          setRunning(false);
+          abortRef.current = null;
+          toast(`追蹤錯誤：${e}`, 'error');
+        },
+      },
+    );
+    abortRef.current = handle.abort;
+  }, [startDate, endDate, scope, pctileThreshold]);
+
+  const handleCancel = useCallback(() => {
+    abortRef.current?.();
+    abortRef.current = null;
+    setRunning(false);
+    toast('已取消追蹤', 'info');
+  }, []);
+
+  const handleExportCsv = useCallback(async () => {
+    if (!startDate || !endDate) return;
+    setCsvLoading(true);
+    try {
+      await downloadTwScanRangeCSV({ start_date: startDate, end_date: endDate, scope, pctile_threshold: pctileThreshold });
+      toast('CSV 下載完成', 'success');
+    } catch (e) {
+      toast(`匯出失敗：${(e as Error).message}`, 'error');
+    } finally {
+      setCsvLoading(false);
+    }
+  }, [startDate, endDate, scope, pctileThreshold]);
+
+  const progressPct = progress ? Math.floor((progress.current / progress.total) * 100) : 0;
+
+  return (
+    <>
+      <div className="px-6 py-4 space-y-3 border-b" style={{ borderColor: 'var(--border-color)' }}>
+        <div className="flex flex-wrap items-center gap-4">
+          <div className="flex items-center gap-2">
+            <label className="text-sm" style={{ color: 'var(--text-secondary)' }}>標的池</label>
+            <select
+              value={scope}
+              onChange={(e) => setScope(e.target.value as TrackScope)}
+              disabled={running}
+              className="px-3 py-1 rounded text-sm border-none outline-none cursor-pointer"
+              style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)' }}
+            >
+              <option value="recent_scan">最近一次掃描結果（~30 檔，~30 秒）</option>
+              <option value="full_market">全市場 1938 檔（~2 小時）</option>
+            </select>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <label className="text-sm" style={{ color: 'var(--text-secondary)' }}>顯示指標</label>
+            <select
+              value={metric}
+              onChange={(e) => setMetric(e.target.value as TrackMetric)}
+              className="px-3 py-1 rounded text-sm border-none outline-none cursor-pointer"
+              style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)' }}
+            >
+              {METRIC_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <label className="text-sm" style={{ color: 'var(--text-secondary)' }}>日期範圍</label>
+            <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} disabled={running}
+              className="px-2 py-1 rounded text-sm border-none outline-none"
+              style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)' }} />
+            <span style={{ color: 'var(--text-secondary)' }}>~</span>
+            <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} disabled={running}
+              className="px-2 py-1 rounded text-sm border-none outline-none"
+              style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)' }} />
+          </div>
+
+          <div className="ml-auto flex gap-2">
+            {!running ? (
+              <button
+                onClick={handleStart}
+                className="px-4 py-1.5 rounded text-sm font-medium cursor-pointer hover:opacity-90"
+                style={{ background: 'var(--accent-blue)', color: '#fff' }}
+              >
+                ▶ 執行追蹤
+              </button>
+            ) : (
+              <button
+                onClick={handleCancel}
+                className="px-4 py-1.5 rounded text-sm font-medium cursor-pointer hover:opacity-90"
+                style={{ background: '#dc2626', color: '#fff' }}
+              >
+                ⛔ 取消
+              </button>
+            )}
+            <button
+              onClick={handleExportCsv}
+              disabled={running || csvLoading}
+              className="px-4 py-1.5 rounded text-sm cursor-pointer hover:opacity-90"
+              style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', opacity: (running || csvLoading) ? 0.6 : 1 }}
+            >
+              {csvLoading ? '匯出中…' : '📥 匯出 CSV'}
+            </button>
+          </div>
+        </div>
+
+        <div className="text-xs" style={{ color: 'var(--text-secondary)' }}>
+          ✅ 表示該日 BB% &lt; {pctileThreshold}%（即符合本次掃描的「壓縮強度」條件）；指標值即使未符合也會依 OHLCV 重算顯示
+        </div>
+
+        {progress && running && (
+          <div>
+            <div className="flex justify-between text-xs mb-1" style={{ color: 'var(--text-secondary)' }}>
+              <span>進度：{progress.current} / {progress.total}（{progress.phase}）</span>
+              <span>{progressPct}%</span>
+            </div>
+            <div className="rounded-full overflow-hidden" style={{ height: 6, background: 'rgba(88,166,255,0.15)' }}>
+              <div className="h-full rounded-full transition-all duration-300" style={{ width: `${progressPct}%`, background: 'var(--accent-blue)' }} />
+            </div>
+          </div>
+        )}
+
+        {error && (
+          <div className="text-xs px-3 py-1.5 rounded"
+            style={{ background: 'rgba(220,38,38,0.15)', color: '#dc2626' }}>
+            {error}
+          </div>
+        )}
+
+        {result && !running && (
+          <div className="text-sm" style={{ color: 'var(--text-secondary)' }}>
+            ✅ 追蹤完成：掃 <b style={{ color: 'var(--text-primary)' }}>{result.total_scanned}</b> 檔，
+            符合 <b style={{ color: 'var(--accent-blue)' }}>{result.total_matched}</b> 檔，
+            日期數 <b style={{ color: 'var(--text-primary)' }}>{result.scan_dates.length}</b>，
+            耗時 {result.duration_sec}s
+          </div>
+        )}
+      </div>
+
+      <div className="flex-1 overflow-auto px-6 py-4">
+        {!result ? (
+          <div className="text-center py-12" style={{ color: 'var(--text-secondary)' }}>
+            {running ? '追蹤中… 結果會在完成後一次顯示' : '尚未追蹤。選好日期範圍 + 標的池後按「執行追蹤」'}
+          </div>
+        ) : result.symbols.length === 0 ? (
+          <div className="text-center py-12" style={{ color: 'var(--text-secondary)' }}>
+            此區間內無任何標的符合 BB% &lt; {pctileThreshold}% 條件
+          </div>
+        ) : (
+          <table className="text-sm" style={{ minWidth: '100%' }}>
+            <thead style={{ color: 'var(--text-secondary)' }}>
+              <tr className="border-b" style={{ borderColor: 'var(--border-color)' }}>
+                <th className="text-left py-2 px-2 sticky left-0 z-10" style={{ background: 'var(--bg-secondary)' }}>代號</th>
+                <th className="text-left py-2 px-2 sticky z-10" style={{ background: 'var(--bg-secondary)', left: '60px' }}>名稱</th>
+                <th className="text-left py-2 px-2">首次符合</th>
+                <th className="text-center py-2 px-2">符合天數</th>
+                <th className="text-center py-2 px-2">走勢</th>
+                {result.scan_dates.map((d) => (
+                  <th key={d} className="text-right py-2 px-2 whitespace-nowrap">{d.slice(5)}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody style={{ color: 'var(--text-primary)' }}>
+              {result.symbols.map((s) => (
+                <tr key={s.code} className="border-b hover:brightness-110" style={{ borderColor: 'var(--border-color)' }}>
+                  <td className="py-1.5 px-2 font-mono sticky left-0" style={{ color: 'var(--accent-blue)', background: 'var(--bg-secondary)' }}>{s.code}</td>
+                  <td className="py-1.5 px-2 sticky whitespace-nowrap" style={{ background: 'var(--bg-secondary)', left: '60px' }}>{s.name}</td>
+                  <td className="py-1.5 px-2 whitespace-nowrap text-xs">
+                    {s.first_match_date}
+                    {s.first_match_date === result.scan_dates[0] && <span title="範圍內首日就符合"> ✨</span>}
+                  </td>
+                  <td className="py-1.5 px-2 text-center">{s.match_count}</td>
+                  <td className="py-1.5 px-2 text-center">
+                    <Sparkline symbol={s} metric={metric} scanDates={result.scan_dates} />
+                  </td>
+                  {result.scan_dates.map((d) => {
+                    const feats = s.daily_features[d];
+                    const text = _formatMetric(metric, feats);
+                    const color = _metricColor(metric, feats);
+                    return (
+                      <td key={d} className="py-1.5 px-2 text-right whitespace-nowrap" style={{ color }}>
+                        {feats?.matched && <span style={{ color: 'var(--accent-green, #10b981)' }}>✅</span>}
+                        {feats?.matched ? ' ' : ''}{text}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </>
   );
 }
 

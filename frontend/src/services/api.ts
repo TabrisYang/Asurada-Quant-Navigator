@@ -651,6 +651,158 @@ export async function revisitTwScan(scanId: string): Promise<{
   return res.data;
 }
 
+// ===== 台股跨日追蹤 API =====
+
+export interface TwDailyFeatures {
+  close: number | null;
+  bb_pctile: number | null;
+  change_20d: number | null;
+  vol_5d: number | null;
+  matched: boolean;
+}
+
+export interface TwTrackSymbol {
+  code: string;
+  name: string;
+  market: string;
+  industry: string;
+  first_match_date: string;
+  last_match_date: string;
+  match_count: number;
+  daily_features: Record<string, TwDailyFeatures | null>;
+}
+
+export interface TwTrackRangeResult {
+  scan_dates: string[];
+  symbols: TwTrackSymbol[];
+  total_scanned: number;
+  total_matched: number;
+  duration_sec: number;
+  scope: 'recent_scan' | 'full_market';
+  source_scan_id: string | null;
+  pctile_threshold: number;
+}
+
+export interface TwTrackProgress {
+  phase: string;
+  current: number;
+  total: number;
+  scope?: string;
+  source_scan_id?: string | null;
+}
+
+export interface TwTrackCallbacks {
+  onProgress?: (p: TwTrackProgress) => void;
+  onResult?: (r: TwTrackRangeResult) => void;
+  onError?: (error: string) => void;
+}
+
+export function streamTwScanRange(
+  params: {
+    start_date: string;
+    end_date: string;
+    scope?: 'recent_scan' | 'full_market';
+    pctile_threshold?: number;
+  },
+  callbacks: TwTrackCallbacks,
+): StreamHandle {
+  const controller = new AbortController();
+
+  const qs = new URLSearchParams({
+    start_date: params.start_date,
+    end_date: params.end_date,
+    scope: params.scope ?? 'recent_scan',
+    pctile_threshold: String(params.pctile_threshold ?? 20.0),
+  }).toString();
+
+  const promise = (async () => {
+    try {
+      const response = await fetch(`/api/scanner/tw-bb-width/range?${qs}`, {
+        method: 'GET',
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const errText = await response.text();
+        callbacks.onError?.(`伺服器錯誤 (${response.status}): ${errText}`);
+        return;
+      }
+      const reader = response.body?.getReader();
+      if (!reader) {
+        callbacks.onError?.('瀏覽器不支援 Streaming');
+        return;
+      }
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let currentEvent = '';
+      try {
+        while (true) {
+          if (controller.signal.aborted) break;
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+          for (const line of lines) {
+            if (line.startsWith('event: ')) {
+              currentEvent = line.slice(7).trim();
+            } else if (line.startsWith('data: ')) {
+              try {
+                const data = JSON.parse(line.slice(6));
+                if (currentEvent === 'progress') {
+                  callbacks.onProgress?.(data as TwTrackProgress);
+                } else if (currentEvent === 'result') {
+                  callbacks.onResult?.(data as TwTrackRangeResult);
+                } else if (currentEvent === 'error') {
+                  callbacks.onError?.((data.error as string) || '未知錯誤');
+                }
+              } catch { /* ignore */ }
+              currentEvent = '';
+            }
+          }
+        }
+      } finally {
+        reader.cancel().catch(() => {});
+      }
+    } catch (err: unknown) {
+      if ((err as Error)?.name === 'AbortError') return;
+      callbacks.onError?.((err as Error)?.message || '網路連線失敗');
+    }
+  })();
+
+  return { promise, abort: () => controller.abort() };
+}
+
+export async function downloadTwScanRangeCSV(params: {
+  start_date: string;
+  end_date: string;
+  scope?: 'recent_scan' | 'full_market';
+  pctile_threshold?: number;
+}): Promise<void> {
+  const qs = new URLSearchParams({
+    start_date: params.start_date,
+    end_date: params.end_date,
+    scope: params.scope ?? 'recent_scan',
+    pctile_threshold: String(params.pctile_threshold ?? 20.0),
+  }).toString();
+
+  const response = await fetch(`/api/scanner/tw-bb-width/range/export?${qs}`, {
+    method: 'GET',
+  });
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`匯出失敗 (${response.status}): ${errText}`);
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `tw_bb_track_${params.start_date}_to_${params.end_date}_${params.scope ?? 'recent_scan'}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 // ===== 設定 API =====
 
 export async function configureLLM(
