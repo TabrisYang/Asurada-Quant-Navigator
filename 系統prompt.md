@@ -1,6 +1,6 @@
 # 阿斯拉量化系統 — 完整系統 Prompt 與架構規格書
 
-> **最後更新：2026-05-07** — 與實際程式碼同步（v110）
+> **最後更新：2026-05-12** — 與實際程式碼同步（v122）
 
 ## 系統定位
 
@@ -1247,3 +1247,103 @@ GET    /api/health                   # 系統健康狀態
 - ⬜ CI/CD 流程建立
 - ⬜ 鏈上數據整合（地址分析、大戶持倉等）
 - ⬜ Google 趨勢整合
+
+---
+
+## v110 → v122 變更紀錄
+
+> 自 2026-05-07 起新增的修復與功能。原本章節未動，僅在末尾追加紀錄，避免破壞既有結構。
+
+### v118 — 修「看漲說漲」bias（三道 prompt 防線）
+
+- `regime_warning`：trending_up + RSI 超買 + StochRSI 過熱時注入「警戒回調」訊號，避免追高
+- `direction_balance`：統計近 30 日方向預測的多空比例，過度偏多時提示重新檢視
+- 三道 prompt 防線（[chat.py:817-866](backend/app/api/routes/chat.py#L817-L866)）：注入到 chart_state，LLM 必須在輸出前檢視
+- 對應 commit：`4fdb966 v118`
+
+### v119 系列 — external_signals 永遠注入
+
+- v119.1：external_signals 加 retry + stale cache fallback（修「無衍生品快照」）
+- v119.2：external_signals **永遠注入**（[chat.py:395-415](backend/app/api/routes/chat.py#L395-L415)）+ prompt 強制 LLM 引用
+- v119.3：止損位風險評估 prompt（流動性獵取警告）
+- v119.4：Coinbase Premium fetcher（美國機構承接訊號）
+
+### v120 系列 — signal bucket 分類 + 訊號歷史回填
+
+- v120.1：predictions schema 加 `signal_at_entry` 欄位 + JSON 彈性容器
+- v120.2：signal bucket classifier（funding / OI / premium / long_short / ob / fear_greed / etf）
+- v120.3：prediction_tracker.store 改寫 capture external_signals 進新欄位
+- v120.4：歷史回填腳本（fear_greed + funding，免費全歷史 API）
+- v120.5：`get_signal_combo_stats` + chat.py 注入 `signal_history`（每 request 多 10-24KB）
+- v120.6：function_defs.py 加 v120 訊號組合命中率警告規則（最後一道防線）
+
+### v111 — 指標視覺權重 + 動態 ATR + 偏好追蹤
+
+- 指標 registry 加 `visual_weight` 欄位（primary / secondary / minor）
+- 前端按權重渲染：minor 細透明、secondary 普通、primary 粗
+- `_dedupe_close_annotations` 加動態 ATR threshold（取代寫死 1%，依標的波動性調整）
+- 前端 chartStore 加 `getPreferredIndicatorTypes()`，localStorage 追蹤 7 天指標使用偏好
+- 對應 commit：`b157e2f` / `d21a6e0`
+
+### v122 系列 — Stream 中斷終結 + 自動分段 + 4 策略附錄
+
+#### v122.1 修復 v118-v120 chart_state 疊加導致的 round2 stream 中斷
+- 真因：v118-v120 累積把 `regime_warning` / `direction_balance` / `external_signals` / `signal_history` 都塞進 chart_state，round2 仍完整重傳，prompt 從 100KB 膨脹到 200-300KB，Claude CLI TTFT 過長前端中斷
+- 修法：`_minimal_r2_chart_state()`（[adapter.py](backend/app/core/llm/adapter.py)）只保留 symbol / timeframe / currentPrice / currentRegime / recent_accuracy 摘要，移除 signal_history 等 round1 已用過的細節
+- 對應 commit：`36e0e65`
+
+#### v122.2 加分段自動接續輸出
+- `comprehensive_analysis_seg1` prompt → 先輸出「30 秒結論」（方向 / 信心 / 倉位 / 進場 / 止損 / 失效）
+- `comprehensive_analysis_seg2` prompt → 接著輸出「完整詳細分析」（10 個段落）
+- 後端內部自動接續第 2 段，不關閉 stream，前端收到 `segment_complete` SSE 事件顯示分隔線
+- 對應 commit：`78f9237`
+
+#### v122.3 4 種高機率進場策略附錄
+- 策略 A：SMC Demand Zone 回測進場（trending_up 已超買時的回調）
+- 策略 B：RSI 雙背離 + 爆量確認（反轉訊號 + 真實買盤）
+- 策略 C：三重確認突破（突破 + RSI > 50 + 量放大）
+- 策略 D：均值回歸（BB 下軌 + RSI < 30 + StochRSI 反轉）
+- 每策略含：適用條件 / 進場價 / 止損 / 停利 / Wilson 勝率參考
+- 對應 commit：`78f9237`
+
+#### v122.4 partial-save 失效 bug 修復
+- 真因：[chat.py:2974](backend/app/api/routes/chat.py#L2974) 內層 `except (Exception, asyncio.CancelledError)` 把 CancelledError 一起吃掉，外層 partial-save 從未生效
+- 修法：拆成 `except asyncio.CancelledError: raise` + `except Exception` 兩個獨立 handler
+- 同時修 [chat.py:3097](backend/app/api/routes/chat.py#L3097) partial-save 合併 `final_text` + `_r2_text_buf`（round2 內容也存進 DB）
+- 對應 commit：`78f9237`
+
+#### v122.5 `_stream_with_heartbeat` 重新啟用
+- v110 因 anyio cancel scope 問題回退此 helper、改用 raw `async for`
+- v122 重新啟用、加 `asyncio.shield` 包裹 round2 stream loop（[chat.py:2629](backend/app/api/routes/chat.py#L2629)）
+- 同時 [adapter.py](backend/app/core/llm/adapter.py) 3 處 `_line_timeout = 300` → `600`，與前端 STREAM_TIMEOUT_MS 600s 對齊
+- 對應 commit：`704b354`
+
+#### v122.6 HARD_TIMEOUT_MS 630s → 1800s
+- 真因：[ChatInterface.tsx:828](frontend/src/components/ChatInterface/ChatInterface.tsx#L828) `HARD_TIMEOUT_MS = 630_000`（10.5 分鐘）寫死，「全部分析」實際需 15-20 分鐘（round1 LLM 8m + function calls 2m + round2 兩段 5-10m）
+- 之前所有 round2 / SSE / 分段修復都救不了，因為這是「整個 stream 最多 10.5 分鐘」的硬性上限
+- 修法：改成 1800_000（30 分鐘），真正 idle 仍由 [api.ts STREAM_TIMEOUT_MS 600s](frontend/src/services/api.ts#L273) 兜底
+- 對應 commit：`90c9d16`
+
+#### v122.7 `_auto_calc_indicator_values` 內 chart_symbol → symbol（長期 NameError）
+- 真因：函式內 10 處用 `chart_symbol`（不存在於 scope）而非 local `symbol`，每次 NameError 被 try/except 吞掉
+- 影響：`external_signals` / `social_sentiment` / `regime_subtype` / `historical_insights` 四個 chart_state 欄位**從未成功注入**到 LLM
+- 修法：line 292-628 範圍內 10 處 `chart_symbol` → `symbol`
+- 對應 commit：`3bdf6f8`
+
+#### v122.8 `_exec_quant_research` 加細粒度 log + timeout
+- 加 GMM / GARCH / HMM / `calculate_dynamic_positions` / `_generate_conclusion` 個別計時與 30 秒 timeout 保護
+- function call 階段心跳訊息附耗時，讓使用者看到「量化研究進行中... 5s / 10s / 15s」
+- 對應 commit：`1219de1`
+
+### 治理層（v122 同期建立）— 防止技術債再次累積
+
+- **[CLAUDE.md](CLAUDE.md)**：專案根目錄的 governance rule（包含 refactor 配額、shadow flag 規範、chart_state schema 變更流程）
+- **[backend/docs/SHADOW_FEATURES.md](backend/docs/SHADOW_FEATURES.md)**：「flag=False ≠ dead code」教訓記錄（避免再次誤刪 shadow mode 中的 imitation_learning）
+- **[backend/docs/CHART_STATE_SCHEMA.md](backend/docs/CHART_STATE_SCHEMA.md)**：27 個 chart_state 注入欄位的 schema 文件（產生位置 / 消費位置 / 是否進 round2 / 大小級別）
+- **[backend/scripts/check_repo_health.py](backend/scripts/check_repo_health.py)**：pre-commit hook 檢查項目
+  - 檔案 > 4000 行 block / > 3000 行警告
+  - chart_state 注入欄位 > 30 警告
+  - `_PROMPT_MODULES` > 35 警告
+- **[backend/scripts/install_git_hooks.sh](backend/scripts/install_git_hooks.sh)**：一鍵安裝 pre-commit hook
+- **[backend/scripts/shadow_mode.py](backend/scripts/shadow_mode.py)**：alpha-touching 改動的 pre-flight check 工具（跑 shadow mode 比對 CPCV PF baseline）
+- **[.gitignore](.gitignore)**：補完規則涵蓋 `*.db` / `*.pkl` 衍生物 / `events.json` 自動同步
