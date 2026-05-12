@@ -2623,14 +2623,32 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
 
                         # 每段重置 marker_seen，避免第一段意外標記吞掉第二段內容
                         _r2_marker_seen = False
+                        import time as _time_mod
+                        _seg_t0 = _time_mod.time()
 
-                        # v110 回退：移除 _stream_with_heartbeat 包裝，回到 v107 之前的 raw streaming
-                        # 心跳機制經實測對 client 真斷線（cancel scope）無效，反而曾因 wait_for cancel 殺死 LLM
-                        async for _evt in adapter.chat_stream_events(
+                        # ★★★ v122 修正：重新啟用 _stream_with_heartbeat ★★★
+                        #
+                        # v110 註解說「心跳對 client 真斷線無效」是誤判 — 真正的根因是：
+                        # 第 1 段 → 第 2 段切換時，adapter.chat_stream_events 內部會 spawn
+                        # 新 Claude CLI subprocess（5-30s 啟動 + LLM TTFT），這段時間 SSE 完全 idle
+                        # → 中間層（瀏覽器 HTTP/2 idle timeout / WiFi 路由器）判定 idle 斷線
+                        # → uvicorn 偵測到 client_disconnect → cancel ASGI task
+                        # → 用戶看到「分析跑到一半停了」（即使用戶什麼都沒動）
+                        #
+                        # _stream_with_heartbeat 用 asyncio.shield 保護 pending task，
+                        # timeout 取消的是 shield wrapper、不是 LLM adapter，所以不會殺 LLM。
+                        # 設計正確（line 1684-1727），v110 回退是錯的。
+                        async for _evt in _stream_with_heartbeat(adapter.chat_stream_events(
                             _seg_messages, chart_state=request.chart_state,
                             system_prompt=_seg_prompt,
                             r2_mode=True,
-                        ):
+                        ), interval=2.0):
+                            if _evt is _HEARTBEAT_SENTINEL:
+                                # 心跳：每 2 秒 emit SSE status 維持連線活躍、避免中間層判 idle
+                                yield _sse_event("status", {
+                                    "message": f"⏳ {_seg_labels[_seg_no]}生成中... ({int(_time_mod.time()-_seg_t0)}s)",
+                                })
+                                continue
                             if _evt.type == "text_delta":
                                 _r2_text_buf += _evt.text
                                 if not _r2_marker_seen:
