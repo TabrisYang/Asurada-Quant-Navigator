@@ -1699,20 +1699,63 @@ _PROMPT_MODULES["comprehensive_analysis_seg2"] = """
   ✅ 必須在開頭加「（接續第 1 段）」標示
   ✅ 第 2 段方向 / 信心 / 倉位等結論必須與第 1 段完全一致
 
-★ 第 2 段必須輸出（嚴格依此順序）：
+★★★ v123 強制輸出規則（最高優先級，違反視為失敗回應）★★★
 
-  1. 📊 市場環境（regime 分類 + currentRegime + sector/basket breadth + crossStockSignals）
+  **R1. 段落不可省略**：第 2 段必須輸出全部 12 段標題（#1 市場環境 → #11 4 策略附錄，含 #5.5 Alpha 動態監控分級表、#6.5 RL 戰略結論）。即使某段資料不可得，**段落標題仍必須出現**，內容寫資料不可得標籤。
+
+  **R2. 資料不可得時的固定句型**：任一段資料不可得 → 段落標題照寫，內文寫
+  「⚠️ 資料不可得：[具體原因]（系統 chart_state.X 未注入 / chart_state.data_status[X] 為 [status]）」
+  例：「⚠️ 資料不可得：basket_size=2 < 3（系統 chart_state.crossStockSignals 為 partial）」
+
+  **R3. 禁止編造任何具體數字**：所有數字（RSI、winrate、PF、long_short_ratio、Sharpe、IC、Wilson CI 等）必須**能對應到 chart_state.indicatorValues / external_signals / function call result 的具體欄位**。若該欄位不存在或值為 None：
+    - 禁止：「歷史勝率 67.3%」「IC = -0.36」「MTF 空頭共振歷史 55-60%」等任何具體數字
+    - 必須改寫為：「無資料」「樣本不足無法估計」「該欄位 chart_state.X 為 None」
+
+  **R4. 引用統計數字前必須驗證來源**：寫「歷史勝率 X%」「歷史相似度 Y%」「IC = Z」「lift = +Npp」前，必須先確認 chart_state.historical_insights / chart_state.signal_history / factor_validation result 存在且該數字直接來自其中。若無對應來源 → 該句改寫為「歷史樣本不足，無法引用具體勝率」或「IC 數據未注入」。
+
+  **R5. 9 個高價值面向 mandatory**：以下 9 個面向為必要段落，缺資料時也要顯示對應段落 + 「資料不可得」標籤：
+    1) 跨市場群體（basket breadth / RS / market_regime）— 來源 chart_state.crossStockSignals
+    2) 衍生品矩陣（funding / OI / OB / LS ratio / Coinbase premium / fear_greed）— 來源 chart_state.external_signals.derivatives + sentiment + macro
+    3) 因子 IC + Decay 狀態（rising/stable/decaying）— 來源 run_quant_research factor_validation
+    4) Alpha 動態監控分級表（🟢/⬆️/⬇️/❌/👁️/❓）— #5.5 段
+    5) 多策略回測表（具體 PF/Sharpe/MDD/MC/CPCV）— 來源系統預跑 8 策略
+    6) 4 種高機率進場策略附錄 — #11 段
+    7) 條件機率掃描 bin 具體數值 — 來源 scan_conditional_probability
+    8) 風險清單（含嚴重度欄）— #8 段
+    9) 跨維度交叉驗證表 — #6 段
+
+  **R6. chart_state.data_status 必查**：撰寫每一段前，先檢查 chart_state.data_status 是否標記該段對應欄位為非 "ok"。若 status ∈ {skipped, partial, failed, insufficient_samples, insufficient_data, no_model, guard_failed, stale} → 該段必須在段落開頭以 R2 句型聲明，再以可用資料補充能寫的部分。
+
+★ 第 2 段必須輸出（嚴格依此順序、全 12 段不可省略）：
+
+  1. 📊 市場環境（regime 分類 + currentRegime + sector/basket breadth + crossStockSignals + 衍生品矩陣完整列出 funding/OI/OB/LS/premium/fear_greed）
   2. 🏛 結構分析（SMC + 趨勢方向 + STL 分解結果）
-  3. ⚡ 動能特徵（多週期動量 + 加速度 + 相對強弱 + RSI 背離）
-  4. 🧪 多策略回測比較（系統已預跑 8 策略；引用 per_regime_metrics + Wilson CI）
-  5. 🔬 量化研究（IC + Walk Forward + Monte Carlo + 因子有效性）
-  6. 🎯 跨維度結論（綜合 #1-5 交叉驗證；不重述前段，只做「跨維度交叉驗證」）
+  3. ⚡ 動能特徵（多週期動量 + 加速度 + 相對強弱 + RSI 背離 + 條件機率掃描 bin 具體數值）
+  4. 🧪 多策略回測比較（系統已預跑 8 策略；引用 per_regime_metrics + Wilson CI + 具體 PF/Sharpe/MDD/MC/CPCV）
+  5. 🔬 量化研究（IC + Decay 狀態 rising/stable/decaying + Walk Forward + Monte Carlo + 因子有效性）
 
-  6.5 🤖 RL 戰略結論（依 chart_state.rl_strategic_insight，若有）：
-       - 模型推論機率 / 模式 / SHAP 主要驅動因子 / 歷史相似情境 / 衝突警示 / 倉位調整
+  5.5 🔄 Alpha 動態監控分級表（mandatory，v123 新增）：
+       固定 6 欄分級，每個 IC 因子或策略歸入其中一類：
+       | 狀態 | 因子/策略 | IC / 勝率 | 理由 |
+       | 🟢 保留 | ... | ... | ... |
+       | ⬆️ 升權 | ... | ... | ... |
+       | ⬇️ 降權 | ... | ... | ... |
+       | ❌ 淘汰 | ... | ... | ... |
+       | 👁️ 觀察 | ... | ... | ... |
+       | ❓ 無法判定 | ... | ... | ... |
+       來源：chart_state.factor_pca / run_quant_research factor_validation 結果。
+       若該結果不存在或 chart_state.data_status["factor_validation"].status != "ok"
+       → 全表 6 列都寫「⚠️ 資料不可得：[原因]」，不可只省略表格。
+
+  6. 🎯 跨維度結論（綜合 #1-5 交叉驗證；不重述前段，只做「跨維度交叉驗證表」格式：維度 / 方向 / 證據 / 可信度，最少 8 列）
+
+  6.5 🤖 RL 戰略結論（依 chart_state.rl_strategic_insight）：
+       - 若 chart_state.rl_strategic_insight 存在：模型推論機率 / 模式 / SHAP 主要驅動因子 / 歷史相似情境 / 衝突警示 / 倉位調整
+       - 若不存在或 chart_state.data_status["rl_strategic_insight"].status != "ok"
+         → 必須輸出段落標題 + 「⚠️ 資料不可得：[原因]」，不可省略段落
 
   7. 📋 正式結論卡（v100 結構化結論卡 — 詳見 CORE prompt）— 但**不重複 30 秒結論**
-  8. ⚠️ 策略風險與前提假設（教學重點）
+  8. ⚠️ 策略風險與前提假設（教學重點，必須含「風險清單嚴重度表」格式：# / 風險項 / 嚴重度 / 觸發條件，最少 5 列）
   9. 🎓 延伸學習建議（1-2 個可進一步探索的相關主題）
   10. 📊 完整分析摘要表（綜合 #1-9 的結論）
   11. 🎯 附錄：4 種高機率進場策略（v122 新增，獨立於主推薦的金字塔加碼）
@@ -1757,14 +1800,15 @@ _PROMPT_MODULES["comprehensive_analysis_seg2"] = """
 
 每策略結尾加：「⚠️ 適用條件需自行驗證當下是否滿足；勝率參考僅供統計參考。」
 
-★ 字數預算（避免超長）：
+★ 字數預算（v123 已加 #5.5 段，整體上限拉高）：
   - #1 / #2 / #3：各 200-300 字
   - #4：300-400 字（含 8 策略對比表 + Wilson CI）
-  - #5：300-400 字（IC + WF + MC 交叉驗證）
-  - #6 / #6.5：合計 200-300 字
+  - #5：300-400 字（IC + Decay + WF + MC 交叉驗證）
+  - #5.5：200-300 字（Alpha 動態監控分級表 6 列）
+  - #6 / #6.5：合計 250-350 字
   - #7-#10：合計 400-600 字
   - #11：300-500 字（4 個策略各 80-100 字）
-  - 總計：1800-2800 字
+  - 總計：2200-3200 字（v123 因加 #5.5 + 風險清單嚴重度表，上限拉高）
 
 ★ 函式呼叫（按需呼叫，不重複；compare_strategies 已由系統預跑，不再呼叫）：
   - detect_smc_structure / generate_scenarios / analyze_momentum
