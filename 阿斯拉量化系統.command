@@ -8,6 +8,24 @@
 cd "$(dirname "$0")"
 ROOT_DIR="$(pwd)"
 
+# ─── v124：VSCode 整合終端偵測 → 自動 spawn 新 Terminal.app 視窗 ───
+# 合併原「阿斯拉量化系統-背景啟動.command」邏輯（已刪除），單一入口。
+# 從 VSCode 終端執行時，spawn 新 Terminal 視窗執行；關 VSCode 不會停系統。
+if [ "$TERM_PROGRAM" = "vscode" ] && [ "$1" != "--force-spawn" ]; then
+    SCRIPT_PATH="$ROOT_DIR/$(basename "$0")"
+    echo "🚀 偵測到 VSCode 終端，正在開啟獨立 Terminal 視窗啟動阿斯拉量化系統..."
+    ESCAPED="${SCRIPT_PATH//\'/\'\\\'\'}"
+    osascript <<OSA
+tell application "Terminal"
+    activate
+    do script "'${ESCAPED}' --force-spawn"
+end tell
+OSA
+    echo "✅ 已在新 Terminal 視窗啟動，可安全關閉 VSCode（系統將繼續運行）"
+    echo "   主介面將自動開啟：http://localhost:5173"
+    exit 0
+fi
+
 # ---------- 顏色定義 ----------
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -43,6 +61,11 @@ cleanup() {
         kill "$FRONTEND_PID" 2>/dev/null
         wait "$FRONTEND_PID" 2>/dev/null
         echo -e "${GREEN}[✓]${NC} 前端已關閉"
+    fi
+    # v124：保險再殺占用 port 的孤兒（ML subprocess / daemon thread 衍生、SIGTERM 沒收到）
+    STALE_PIDS=$(lsof -ti :8000,:8001,:8002,:8003,:8004,:8005,:8006,:8007,:8008,:8009,:8010,:5173 2>/dev/null | sort -u)
+    if [ -n "$STALE_PIDS" ]; then
+        echo "$STALE_PIDS" | xargs kill -9 2>/dev/null
     fi
     echo -e "${CYAN}感謝使用阿斯拉量化系統，再見！${NC}"
     echo ""
@@ -158,13 +181,45 @@ echo -e "${YELLOW}[6/6]${NC} 啟動服務..."
 # 確保 data 目錄存在
 mkdir -p "$ROOT_DIR/backend/data"
 
-# 自動清理殘留的 port 8000 進程
-OLD_PID=$(lsof -ti :8000 2>/dev/null)
-if [ -n "$OLD_PID" ]; then
-  echo -e "  ${YELLOW}清理殘留進程 (PID: $OLD_PID)...${NC}"
-  kill -9 $OLD_PID 2>/dev/null
-  sleep 1
+# ─── v124：啟動前自我清理（解「SIGKILL 後 process / DB / .pyc 殘留」根因）───
+# 根因：VSCode 強制關專案 / kill -9 backend 會留下：
+#   (1) SQLite WAL/SHM 殘留 → 下次新 process connect 卡 busy_timeout 3s × 多個 DB
+#   (2) 孤兒 backend 占用 port 8000-8010 → 新 backend 無法綁定
+#   (3) 舊 vite 占用 5173 → 新 vite 跳 5174、瀏覽器仍在 5173 舊頁面
+#   (4) __pycache__ 殘留 → 程式碼更新後仍跑舊 .pyc 邏輯
+# → SIGKILL 是 OS 行為、Python lifecycle 救不了，只能啟動時洗乾淨。
+echo -e "  ${YELLOW}清理舊 process / WAL / cache...${NC}"
+
+# (a) 殺 backend 占用 port（8000-8010，含 ML subprocess 孤兒）
+BACKEND_OLD_PIDS=$(lsof -ti :8000,:8001,:8002,:8003,:8004,:8005,:8006,:8007,:8008,:8009,:8010 2>/dev/null | sort -u)
+if [ -n "$BACKEND_OLD_PIDS" ]; then
+    echo -e "  ${YELLOW}  殺舊 backend process: $(echo $BACKEND_OLD_PIDS | tr '\n' ' ')${NC}"
+    echo "$BACKEND_OLD_PIDS" | xargs kill -9 2>/dev/null
 fi
+
+# (b) 殺 frontend 5173 占用 process（避免新 vite 跳 5174、瀏覽器卡舊頁面）
+FRONTEND_OLD_PIDS=$(lsof -ti :5173 2>/dev/null)
+if [ -n "$FRONTEND_OLD_PIDS" ]; then
+    echo -e "  ${YELLOW}  殺舊 frontend process: $(echo $FRONTEND_OLD_PIDS | tr '\n' ' ')${NC}"
+    echo "$FRONTEND_OLD_PIDS" | xargs kill -9 2>/dev/null
+fi
+
+# 等 OS 回收 file descriptor / port
+sleep 1
+
+# (c) 清 SQLite WAL/SHM 殘留（最關鍵的根因 — busy_timeout 卡頓元兇）
+WAL_FILES=$(find "$ROOT_DIR/backend/data/db" "$ROOT_DIR/backend/app/data" \
+    -maxdepth 2 \( -name "*.db-wal" -o -name "*.db-shm" \) 2>/dev/null)
+if [ -n "$WAL_FILES" ]; then
+    WAL_COUNT=$(echo "$WAL_FILES" | wc -l | tr -d ' ')
+    echo -e "  ${YELLOW}  清理 SQLite WAL/SHM 殘留 ($WAL_COUNT 個檔)...${NC}"
+    echo "$WAL_FILES" | xargs rm -f 2>/dev/null
+fi
+
+# (d) 清 Python __pycache__（避免 .pyc timestamp 不同步跑舊邏輯）
+find "$ROOT_DIR/backend" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null
+
+echo -e "${GREEN}  [✓]${NC} 環境已清理完成"
 
 # 同步 .port 檔與實際使用的 port（前端 vite proxy 會讀取此檔）
 echo "8000" > "$ROOT_DIR/backend/.port"
