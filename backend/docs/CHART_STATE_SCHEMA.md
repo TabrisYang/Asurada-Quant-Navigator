@@ -183,8 +183,76 @@
 
 ---
 
+## v123 — `data_status` 注入治根欄位
+
+`data_status: dict[str, dict]` — v123 新增，**每個有條件式注入的欄位都會在此記錄狀態**。
+
+### 用途
+
+過去 12+ 個 chart_state 欄位的注入都用 `try/except + logger.debug` 沉默吞錯：
+- `crossStockSignals` basket < 3 靜默 skip
+- `external_signals.derivatives` API 失敗靜默 skip
+- `rl_strategic_insight` 6 層守衛任一失敗 skip
+- `mlPrediction` 需 df ≥ 100，否則 skip
+- `historical_insights` 需 ≥ 200 樣本，否則 skip
+- ……
+
+→ LLM 完全看不到「曾嘗試但失敗」，導致報告**因標的而異**（ETH/ADA 段落差異甚大）。
+v123 修法：每處改 fallback 注入 `data_status[欄位] = {"status": ..., "reason": ...}`，
+讓 LLM 在 seg2 prompt 的 R2/R6 規則下能寫出「⚠️ 資料不可得：[reason]」而非省略段落。
+
+### 結構
+
+```python
+chart_state["data_status"] = {
+    "crossStockSignals": {"status": "partial", "reason": "basket_size=2 < 3"},
+    "external_signals": {"status": "ok", "reason": "derivatives=6 sentiment=2 macro=1"},
+    "rl_strategic_insight": {"status": "guard_failed", "reason": "canary_not_hit"},
+    "mlPrediction": {"status": "insufficient_data", "reason": "df_len=87 < 100"},
+    "historical_insights": {"status": "insufficient_samples",
+                            "reason": "regime=ranging, n < 200_required"},
+    "regime_subtype": {"status": "skipped", "reason": "regime=trending_up, only_ranging_unknown_applicable"},
+    "social_sentiment": {"status": "skipped", "reason": "tw_stock_not_supported"},
+    ...
+}
+```
+
+### status 約定值
+
+| status | 含義 |
+|---|---|
+| `ok` | 成功注入、資料完整 |
+| `partial` | 部分欄位成功（如 basket 部分成員、衍生品部分 API） |
+| `skipped` | 條件不符（如台股不抓 social_sentiment、ranging 才跑 subtype、沒持倉不抓 portfolio） |
+| `failed` | exception 或 API 全失敗 |
+| `failed_all` | 多個來源全部失敗（如 external_signals 三類 API 都沒回） |
+| `insufficient_samples` | 樣本不足（如 historical_insights n < 200） |
+| `insufficient_data` | 資料量不足（如 df < 100 / df < 60） |
+| `no_model` | ML 模型不存在 |
+| `guard_failed` | 多層守衛任一失敗（如 RL 6 層守衛、canary 未命中） |
+| `stale` | 用 stale cache fallback |
+
+### 涵蓋的注入欄位
+
+- `chat.py:_auto_calc_indicator_values`：decomposition / currentRegime / external_signals / upcoming_events / calendar_meta / crossStockSignals / social_sentiment / portfolio_summary / regime_subtype / donchian_position / bilateral_plan / historical_insights
+- `chat.py:_inject_ml_prediction`：mlPrediction
+- `chat.py:_build_messages`：recent_accuracy / signal_history / rl_strategic_insight
+- `executor.py:_exec_quant_research`：walk_forward / cpcv / backtest 在 `report` 內回 `{status: "insufficient_data" / "skipped", reason: ...}`
+
+### 配套：seg2 prompt 強制規則
+
+[function_defs.py:comprehensive_analysis_seg2](../app/core/llm/function_defs.py) 的 v123 規則 R6：
+> 撰寫每一段前，先檢查 chart_state.data_status 是否標記該段對應欄位為非 "ok"。若 status ∈ {skipped, partial, failed, insufficient_samples, insufficient_data, no_model, guard_failed, stale} → 該段必須在段落開頭以 R2 句型聲明，再以可用資料補充能寫的部分。
+
+### 是否進 round2
+
+**是**（隨主 chart_state 傳遞）。但只是「diagnostic metadata」，體積極小（每欄位 ~80 bytes，12+ 欄位 < 1.5KB）。
+
+---
+
 ## 變更紀錄
 
 | 日期 | 變更 | 緣由 |
 |---|---|---|
 | 2026-05-09 | 建立此文件 | v118-v120 累積疊加 chart_state 欄位導致 stream 中斷後的治理舉措 |
+| 2026-05-12 | 新增 `data_status` 欄位（v123） | 報告因標的而異的根因：12+ 注入點靜默 skip 導致 LLM 看不到「曾嘗試但失敗」，改為 fallback 注入 status payload |

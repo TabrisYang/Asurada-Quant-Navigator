@@ -1363,6 +1363,14 @@ async def _exec_quant_research(args: dict, default_symbol: str, default_tf: str,
                         report["monte_carlo_oos"] = mc_oos
                 else:
                     report["walk_forward"] = wf
+            else:
+                # v123：資料不足時也回傳 status payload，讓 LLM 知道「曾嘗試但資料不夠」
+                report["walk_forward"] = {
+                    "status": "insufficient_data",
+                    "df_len": len(df),
+                    "required": 200,
+                    "reason": f"Walk Forward 需 ≥ 200 根 K 線，目前僅 {len(df)} 根",
+                }
 
             # ── 5b. CPCV（數據 ≥ 500 根時才跑）──
             if len(df) >= 500:
@@ -1383,9 +1391,32 @@ async def _exec_quant_research(args: dict, default_symbol: str, default_tf: str,
                     }
                 else:
                     report["cpcv"] = cpcv
+            else:
+                # v123：資料不足時也回傳 status payload
+                report["cpcv"] = {
+                    "status": "insufficient_data",
+                    "df_len": len(df),
+                    "required": 500,
+                    "reason": f"CPCV 需 ≥ 500 根 K 線，目前僅 {len(df)} 根",
+                }
 
         except Exception as e:
             report["backtest"] = {"error": str(e)}
+    else:
+        # v123：未提供 entry/exit_conditions → backtest/MC/WF/CPCV 不會跑，
+        # 回傳 status payload 讓 LLM 知道「為何缺這段」
+        report["backtest"] = {
+            "status": "skipped",
+            "reason": "no_entry_or_exit_conditions",
+        }
+        report["walk_forward"] = {
+            "status": "skipped",
+            "reason": "no_entry_or_exit_conditions",
+        }
+        report["cpcv"] = {
+            "status": "skipped",
+            "reason": "no_entry_or_exit_conditions",
+        }
 
     # ── 5c-0. Bucket 因子群評分 ──
     try:

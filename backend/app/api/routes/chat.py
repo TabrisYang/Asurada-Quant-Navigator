@@ -289,6 +289,45 @@ _DEEP_ANALYSIS_INDICATORS = [
 _MAX_AUTO_CALC = 30
 
 
+def _mark_status(
+    chart_state: dict | None,
+    key: str,
+    status: str,
+    reason: str = "",
+    **extra,
+) -> None:
+    """v123：把欄位注入狀態寫入 chart_state['data_status'][key]，讓 LLM 看見
+    「曾嘗試但失敗 + 原因」而非完全省略。
+
+    status 約定值：
+      - "ok"                    成功注入
+      - "partial"               部分欄位成功（如 basket 部分成員、衍生品部分 API）
+      - "skipped"               條件不符（如台股不抓 social_sentiment、ranging 才跑 subtype）
+      - "failed"                exception 或 API 全失敗
+      - "insufficient_samples"  樣本不足（如 historical_insights n < 200）
+      - "insufficient_data"     資料量不足（如 df < 100 / df < 60）
+      - "no_model"              ML 模型不存在
+      - "guard_failed"          多層守衛任一失敗（如 RL 6 層守衛）
+      - "stale"                 用 stale cache fallback
+
+    調用方式：
+      _mark_status(chart_state, "crossStockSignals", "partial", "basket_size=2 < 3")
+      _mark_status(chart_state, "external_signals", "ok")
+    """
+    if chart_state is None:
+        return
+    ds = chart_state.get("data_status")
+    if not isinstance(ds, dict):
+        ds = {}
+        chart_state["data_status"] = ds
+    payload = {"status": status}
+    if reason:
+        payload["reason"] = reason
+    if extra:
+        payload.update(extra)
+    ds[key] = payload
+
+
 def _auto_calc_indicator_values(
     user_msg: str,
     chart_state: dict | None,
@@ -366,20 +405,32 @@ def _auto_calc_indicator_values(
         # 注入 STL 時序分解：給 LLM 看到趨勢/季節/殘差立體結構
         try:
             from app.core.timeseries_decomposition import decompose_price, is_available
-            if is_available() and len(df) >= 60:
+            if not is_available():
+                _mark_status(chart_state, "decomposition", "skipped", "stl_module_unavailable")
+            elif len(df) < 60:
+                _mark_status(chart_state, "decomposition", "insufficient_data",
+                             f"df_len={len(df)} < 60")
+            else:
                 # 日線用 period=20（約一個月），其他用 14
                 _stl_period = 20 if timeframe == "1d" else 14
                 decomp = decompose_price(df, period=_stl_period)
                 if "error" not in decomp:
                     chart_state["decomposition"] = decomp
+                    _mark_status(chart_state, "decomposition", "ok")
+                else:
+                    _mark_status(chart_state, "decomposition", "failed",
+                                 str(decomp.get("error")))
         except Exception as _stl_err:
-            logger.debug(f"STL 分解失敗（不影響主流程）: {_stl_err}")
+            logger.info(f"STL 分解失敗（不影響主流程）: {_stl_err}")
+            _mark_status(chart_state, "decomposition", "failed", str(_stl_err))
 
         # 注入當前 regime + 低信心警告（Phase 1A + Phase 2.3）+ Level 1 自動記錄
         try:
             from app.core.regime_filter import summarize_current_regime
             regime_info = summarize_current_regime(df)
             chart_state["currentRegime"] = regime_info
+            _mark_status(chart_state, "currentRegime", "ok",
+                         confidence=regime_info.get("confidence"))
             if regime_info.get("confidence", 0) < 0.5:
                 chart_state["regimeWarning"] = {
                     "level": "high",
@@ -393,7 +444,8 @@ def _auto_calc_indicator_values(
                 except Exception:
                     pass  # 記錄失敗不影響主流程
         except Exception as _rg_err:
-            logger.debug(f"regime 分類失敗（不影響主流程）: {_rg_err}")
+            logger.info(f"regime 分類失敗（不影響主流程）: {_rg_err}")
+            _mark_status(chart_state, "currentRegime", "failed", str(_rg_err))
 
         # v104 Q1 + v119.2：注入外部訊號快照（funding / OI / 多空比 / Fear&Greed / FRED 總體）
         # v119.2 修法：條件放寬為「永遠注入」（即使部分欄位空），讓 LLM 知道「系統有嘗試
@@ -404,15 +456,31 @@ def _auto_calc_indicator_values(
             if _signals:
                 chart_state["external_signals"] = _signals
                 chart_state["external_signals_summary"] = format_signals_summary(_signals)
+                _deriv_n = len(_signals.get('derivatives') or {})
+                _sent_n = len(_signals.get('sentiment') or {})
+                _macro_n = len(_signals.get('macro') or {})
                 _stale_tag = " STALE" if _signals.get("stale") else ""
                 logger.info(
                     f"[external_signals]{_stale_tag} {symbol} "
-                    f"deriv={len(_signals.get('derivatives') or {})} "
-                    f"sentiment={len(_signals.get('sentiment') or {})} "
-                    f"macro={len(_signals.get('macro') or {})}"
+                    f"deriv={_deriv_n} sentiment={_sent_n} macro={_macro_n}"
                 )
+                # v123：部分欄位空 → partial；全空 → failed_all；stale → stale；其餘 ok
+                if _signals.get("stale"):
+                    _es_status = "stale"
+                elif _deriv_n == 0 and _sent_n == 0 and _macro_n == 0:
+                    _es_status = "failed_all"
+                elif _deriv_n == 0 or _sent_n == 0:
+                    _es_status = "partial"
+                else:
+                    _es_status = "ok"
+                _mark_status(chart_state, "external_signals", _es_status,
+                             f"derivatives={_deriv_n} sentiment={_sent_n} macro={_macro_n}")
+            else:
+                _mark_status(chart_state, "external_signals", "failed_all",
+                             "get_signals_snapshot returned empty")
         except Exception as _ex_err:
-            logger.debug(f"external_signals 失敗（不影響主流程）: {_ex_err}")
+            logger.info(f"external_signals 失敗（不影響主流程）: {_ex_err}")
+            _mark_status(chart_state, "external_signals", "failed", str(_ex_err))
 
         # v103 6A + v105.4：注入未來 72h 高影響事件 + calendar_meta（過期警示）
         try:
@@ -427,12 +495,25 @@ def _auto_calc_indicator_values(
                     f"[event_injector] 注入 {len(events)} 筆 72h 內事件 (scope={scope}) "
                     f"calendar age={cal_meta.get('age_days')} 天 stale={cal_meta.get('is_stale')}"
                 )
+                _mark_status(chart_state, "upcoming_events", "ok",
+                             f"n={len(events)} scope={scope}")
+            else:
+                _mark_status(chart_state, "upcoming_events", "skipped",
+                             f"no_high_severity_events_in_72h (scope={scope})")
             # 即使沒事件也注入 calendar_meta（給 prompt 判斷是否過期）
             chart_state["calendar_meta"] = cal_meta
+            if cal_meta.get("is_stale"):
+                _mark_status(chart_state, "calendar_meta", "stale",
+                             f"age_days={cal_meta.get('age_days')}")
+            else:
+                _mark_status(chart_state, "calendar_meta", "ok")
         except Exception as _ev_err:
-            logger.debug(f"event_injector 失敗（不影響主流程）: {_ev_err}")
+            logger.info(f"event_injector 失敗（不影響主流程）: {_ev_err}")
+            _mark_status(chart_state, "upcoming_events", "failed", str(_ev_err))
+            _mark_status(chart_state, "calendar_meta", "failed", str(_ev_err))
 
         # 注入跨股票群體訊號（台股 + 加密）：給 LLM 看到所屬集合 + 龍頭 + breadth
+        # v123: 即使 basket < 3 也注入 partial（含 note），讓 LLM 在 #1 段顯示「資料不可得」而非省略段落
         try:
             from app.utils.symbol import is_tw_stock
             if is_tw_stock(symbol):
@@ -441,27 +522,60 @@ def _auto_calc_indicator_values(
             else:
                 from app.core.cross_stock_signals import compute_signals_crypto
                 cs_signals = compute_signals_crypto(symbol, timeframe)
-            if cs_signals and (cs_signals.get("sector") or cs_signals.get("basket_size") or cs_signals.get("note")):
+            if cs_signals:
+                # 即使只有 note（partial）也注入，讓 LLM 看到 reason
                 chart_state["crossStockSignals"] = cs_signals
+                _basket_size = cs_signals.get("basket_size") or 0
+                _has_full = bool(
+                    cs_signals.get("sector")
+                    or _basket_size >= 3
+                    or cs_signals.get("market_regime")
+                )
+                if _has_full:
+                    _mark_status(chart_state, "crossStockSignals", "ok",
+                                 f"basket_size={_basket_size}")
+                else:
+                    _mark_status(chart_state, "crossStockSignals", "partial",
+                                 cs_signals.get("note") or f"basket_size={_basket_size} < 3")
+                logger.info(
+                    f"[crossStockSignals] {symbol}: basket_size={_basket_size} "
+                    f"status={'ok' if _has_full else 'partial'}"
+                )
+            else:
+                _mark_status(chart_state, "crossStockSignals", "failed",
+                             "compute_signals returned None")
         except Exception as _cs_err:
-            logger.debug(f"跨股票訊號計算失敗（不影響主流程）: {_cs_err}")
+            logger.info(f"跨股票訊號計算失敗（不影響主流程）: {_cs_err}")
+            _mark_status(chart_state, "crossStockSignals", "failed", str(_cs_err))
 
         # v106 A3：注入社群情緒（Reddit + CryptoPanic RSS，graceful fallback）
         try:
             from app.core.social_sentiment import get_social_sentiment
             from app.utils.symbol import is_tw_stock as _is_tw_a3
             # 只對加密 symbol 抓社群情緒（台股的 Reddit 沒參考價值）
-            if not _is_tw_a3(symbol):
+            if _is_tw_a3(symbol):
+                _mark_status(chart_state, "social_sentiment", "skipped",
+                             "tw_stock_not_supported")
+            else:
                 _sent = get_social_sentiment(symbol)
                 if _sent and not _sent.get("stale_warning"):
                     chart_state["social_sentiment"] = _sent
+                    _mark_status(chart_state, "social_sentiment", "ok",
+                                 f"overall={_sent.get('overall_label')}")
                     logger.info(
                         f"[social_sentiment] {symbol}: "
                         f"overall={_sent.get('overall_label')} "
                         f"({_sent.get('overall_sentiment', 0):+.2f})"
                     )
+                elif _sent and _sent.get("stale_warning"):
+                    _mark_status(chart_state, "social_sentiment", "stale",
+                                 str(_sent.get("stale_warning")))
+                else:
+                    _mark_status(chart_state, "social_sentiment", "failed",
+                                 "no_sentiment_data")
         except Exception as _sent_err:
-            logger.debug(f"social_sentiment 注入失敗（不影響主流程）: {_sent_err}")
+            logger.info(f"social_sentiment 注入失敗（不影響主流程）: {_sent_err}")
+            _mark_status(chart_state, "social_sentiment", "failed", str(_sent_err))
 
         # v107.2：只注入 portfolio_summary（客觀組合風控），不注入 user_positions（避免 LLM 偏向使用者立場）
         try:
@@ -469,29 +583,45 @@ def _auto_calc_indicator_values(
             _portfolio = position_tracker.get_summary()
             if _portfolio.get("total_positions", 0) > 0:
                 chart_state["portfolio_summary"] = _portfolio
+                _mark_status(chart_state, "portfolio_summary", "ok",
+                             f"n_positions={_portfolio.get('total_positions')}")
                 logger.info(
                     f"[portfolio_summary] {symbol}: "
                     f"{_portfolio.get('total_positions')} positions, "
                     f"${_portfolio.get('total_exposure_usd', 0):.0f}"
                 )
+            else:
+                _mark_status(chart_state, "portfolio_summary", "skipped",
+                             "no_open_positions")
         except Exception as _pos_err:
-            logger.debug(f"portfolio_summary 注入失敗（不影響主流程）: {_pos_err}")
+            logger.info(f"portfolio_summary 注入失敗（不影響主流程）: {_pos_err}")
+            _mark_status(chart_state, "portfolio_summary", "failed", str(_pos_err))
 
         # v104 Fix B：ranging / unknown 子類型分類
         # 必須在 currentRegime + crossStockSignals + external_signals 注入完才跑
         try:
             _ri = chart_state.get("currentRegime") or {}
-            if _ri.get("regime") in ("ranging", "unknown"):
+            _regime_label = _ri.get("regime")
+            if _regime_label in ("ranging", "unknown"):
                 from app.core.regime_subtype import classify_ranging_subtype
                 _sub = classify_ranging_subtype(df, _ri, chart_state, symbol=symbol)
                 if _sub and _sub.get("subtype"):
                     chart_state["regime_subtype"] = _sub
+                    _mark_status(chart_state, "regime_subtype", "ok",
+                                 f"subtype={_sub['subtype']}")
                     logger.info(
                         f"[regime_subtype] {symbol} {timeframe}: "
                         f"{_sub['subtype']} (conf={_sub.get('confidence',0):.2f}) — {_sub.get('reason','')}"
                     )
+                else:
+                    _mark_status(chart_state, "regime_subtype", "failed",
+                                 "classify returned no subtype")
+            else:
+                _mark_status(chart_state, "regime_subtype", "skipped",
+                             f"regime={_regime_label}, only_ranging_unknown_applicable")
         except Exception as _sub_err:
-            logger.debug(f"regime_subtype 分類失敗（不影響主流程）: {_sub_err}")
+            logger.info(f"regime_subtype 分類失敗（不影響主流程）: {_sub_err}")
+            _mark_status(chart_state, "regime_subtype", "failed", str(_sub_err))
 
         # v108 Phase 2：注入 donchian_position_pct + bilateral_plan
         # 解決 LLM 編造客觀數值問題：區間位置 % 與雙向計劃進場分批價必須由後端算好
@@ -508,10 +638,13 @@ def _auto_calc_indicator_values(
                     chart_state["donchian_position_pct"] = round(_pct, 1)
                     chart_state["donchian_upper"] = round(_don_u, 6)
                     chart_state["donchian_lower"] = round(_don_l, 6)
-                    logger.debug(
-                        f"[donchian_position] {symbol} {timeframe}: "
-                        f"{_pct:.1f}% (close={_close_now}, U={_don_u}, L={_don_l})"
-                    )
+                    _mark_status(chart_state, "donchian_position", "ok")
+                else:
+                    _mark_status(chart_state, "donchian_position", "skipped",
+                                 "zero_range")
+            else:
+                _mark_status(chart_state, "donchian_position", "insufficient_data",
+                             f"df_len={len(df)} < 20")
 
             # 2. bilateral_plan — 僅 ranging/unknown 場景才算（其他 regime 不需雙向計劃）
             _ri_bp = chart_state.get("currentRegime") or {}
@@ -532,14 +665,23 @@ def _auto_calc_indicator_values(
                 )
                 if _bp:
                     chart_state["bilateral_plan"] = _bp
+                    _mark_status(chart_state, "bilateral_plan", "ok",
+                                 f"regime={_regime_bp} conf={_conf_bp:.2f}")
                     logger.info(
                         f"[bilateral_plan] {symbol} {timeframe}: "
                         f"enabled={_bp.get('enabled')} "
                         f"long={len(_bp.get('long_entries') or [])} "
                         f"short={len(_bp.get('short_entries') or [])}"
                     )
+                else:
+                    _mark_status(chart_state, "bilateral_plan", "failed",
+                                 "compute_laddered_entries returned empty")
+            else:
+                _mark_status(chart_state, "bilateral_plan", "skipped",
+                             f"regime={_regime_bp}, only_ranging_unknown_applicable")
         except Exception as _bp_err:
-            logger.debug(f"donchian_position / bilateral_plan 注入失敗（不影響主流程）: {_bp_err}")
+            logger.info(f"donchian_position / bilateral_plan 注入失敗（不影響主流程）: {_bp_err}")
+            _mark_status(chart_state, "bilateral_plan", "failed", str(_bp_err))
 
         # v106 C3：注入歷史洞察庫（從 200 筆驗證樣本萃取 patterns）
         try:
@@ -549,12 +691,18 @@ def _auto_calc_indicator_values(
             _insight = get_insights_for(symbol, timeframe, _regime_label)
             if _insight:
                 chart_state["historical_insights"] = _insight
+                _mark_status(chart_state, "historical_insights", "ok",
+                             f"n={_insight.get('n_samples')} regime={_regime_label}")
                 logger.info(
                     f"[strategy_insights] {symbol} {timeframe} {_regime_label}: "
                     f"n={_insight['n_samples']} winrate={_insight['winrate']*100:.1f}%"
                 )
+            else:
+                _mark_status(chart_state, "historical_insights", "insufficient_samples",
+                             f"regime={_regime_label}, n < 200_required")
         except Exception as _ins_err:
-            logger.debug(f"strategy_insights 注入失敗（不影響主流程）: {_ins_err}")
+            logger.info(f"strategy_insights 注入失敗（不影響主流程）: {_ins_err}")
+            _mark_status(chart_state, "historical_insights", "failed", str(_ins_err))
 
         # 強制重算模式：清除前端傳來的舊值，完全以後端計算為準
         if force_recalc:
@@ -688,7 +836,8 @@ def _inject_ml_prediction(
 
         should_enable, reason = model_manager.should_enable_ml(symbol, timeframe)
         if not should_enable:
-            logger.debug(f"ML 未啟用: {reason}")
+            logger.info(f"ML 未啟用: {reason}")
+            _mark_status(chart_state, "mlPrediction", "no_model", reason)
             return chart_state
 
         # 優先使用 _auto_calc_indicator_values 已載入的 DataFrame
@@ -699,6 +848,8 @@ def _inject_ml_prediction(
             from app.data.fetchers.crypto_engine import crypto_engine
             df = crypto_engine.load_local_data(symbol, timeframe)
         if df.empty or len(df) < 100:
+            _mark_status(chart_state, "mlPrediction", "insufficient_data",
+                         f"df_len={len(df)} < 100")
             return chart_state
 
         result = model_manager.predict_consensus(df, symbol, timeframe)
@@ -706,14 +857,20 @@ def _inject_ml_prediction(
             chart_state["mlPrediction"] = result["prediction"]
             mode = result["prediction"].get("consensus_mode", "best")
             n_models = result["prediction"].get("models_considered", 1)
+            _mark_status(chart_state, "mlPrediction", "ok",
+                         f"consensus={mode} n_models={n_models}")
             logger.info(
                 f"ML 預測注入: {symbol} {timeframe} → "
                 f"{result['prediction']['direction']} "
                 f"(prob={result['prediction']['probability']:.1%}, "
                 f"consensus={mode}, models={n_models})"
             )
+        else:
+            _mark_status(chart_state, "mlPrediction", "failed",
+                         str(result.get("status") or "unknown"))
     except Exception as e:
-        logger.debug(f"ML 預測注入失敗（不影響分析）: {e}")
+        logger.info(f"ML 預測注入失敗（不影響分析）: {e}")
+        _mark_status(chart_state, "mlPrediction", "failed", str(e))
 
     return chart_state
 
@@ -787,6 +944,12 @@ def _build_messages(
                 try:
                     _stats_30d = prediction_tracker.get_stats(symbol=chart_symbol, days=30)
                     _stats_90d = prediction_tracker.get_stats(symbol=chart_symbol, days=90)
+                    _n30 = _stats_30d.get("total", 0)
+                    _n90 = _stats_90d.get("total", 0)
+                    if _n30 < 3 and _n90 < 3:
+                        _mark_status(request.chart_state, "recent_accuracy",
+                                     "insufficient_predictions",
+                                     f"n_30d={_n30}, n_90d={_n90}, min=3")
                     if _stats_30d.get("total", 0) >= 3 or _stats_90d.get("total", 0) >= 3:
                         _bayes = _stats_30d.get("bayesian", {})
                         # v112 fix：3 個連環 bug
@@ -815,6 +978,8 @@ def _build_messages(
                             "best_indicators": _best_inds,
                             "worst_indicators": _worst_inds,
                         }
+                        _mark_status(request.chart_state, "recent_accuracy", "ok",
+                                     f"n_30d={_n30} n_90d={_n90}")
 
                         # ★ v118：注入 regime_warning + direction_balance（修「看漲說漲」bias）
                         # Diagnose 發現：BULLISH regime 100% 看多但命中率僅 21.7%（賠錢領域），
@@ -873,6 +1038,9 @@ def _build_messages(
                             _ext_sig = (request.chart_state or {}).get("external_signals") or {}
                             _ext_deriv = _ext_sig.get("derivatives") or {}
                             _ext_sentiment = _ext_sig.get("sentiment") or {}
+                            if not (_ext_deriv or _ext_sentiment):
+                                _mark_status(request.chart_state, "signal_history",
+                                             "skipped", "no_derivatives_or_sentiment_data")
                             if _ext_deriv or _ext_sentiment:
                                 from app.core.signal_buckets import classify_all_signals
                                 _current_buckets = classify_all_signals(_ext_deriv, _ext_sentiment)
@@ -913,10 +1081,18 @@ def _build_messages(
                                         "combo_stats": _combo,
                                         "single_signal_stats": _single_stats,
                                     }
+                                    _mark_status(request.chart_state, "signal_history",
+                                                 "ok", f"n_buckets={len(_active_buckets)}")
+                                else:
+                                    _mark_status(request.chart_state, "signal_history",
+                                                 "skipped", "all_buckets_UNKNOWN")
                         except Exception as _v120_err:
-                            logger.debug(f"v120.5 signal_history 注入失敗: {_v120_err}")
+                            logger.info(f"v120.5 signal_history 注入失敗: {_v120_err}")
+                            _mark_status(request.chart_state, "signal_history",
+                                         "failed", str(_v120_err))
                 except Exception as _ra_err:
-                    logger.debug(f"recent_accuracy 注入失敗: {_ra_err}")
+                    logger.info(f"recent_accuracy 注入失敗: {_ra_err}")
+                    _mark_status(request.chart_state, "recent_accuracy", "failed", str(_ra_err))
             except Exception as e:
                 logger.warning(f"預測反饋載入失敗: {e}")
 
@@ -992,10 +1168,15 @@ def _build_messages(
                     )
                     if insight:
                         request.chart_state["rl_strategic_insight"] = insight
+                        _mark_status(request.chart_state, "rl_strategic_insight", "ok",
+                                     f"mode={insight.get('mode')}")
                         logger.info(
                             f"[v101] 注入 rl_strategic_insight: "
                             f"mode={insight.get('mode')} p={insight.get('p_hit_target')}"
                         )
+                    else:
+                        _mark_status(request.chart_state, "rl_strategic_insight",
+                                     "failed", "predict_via_subprocess returned empty")
                 elif settings.imitation_shadow_mode:
                     # SHADOW MODE：subprocess 推論但不注入給 user
                     # （目的：驗證 subprocess 流程穩定 + 累積資料給 quality gate）
@@ -1007,8 +1188,15 @@ def _build_messages(
                             f"[v101 shadow] mode={insight.get('mode')} "
                             f"p={insight.get('p_hit_target')}"
                         )
+                    _mark_status(request.chart_state, "rl_strategic_insight",
+                                 "guard_failed", "shadow_mode_only_no_user_inject")
+                else:
+                    _mark_status(request.chart_state, "rl_strategic_insight",
+                                 "guard_failed", "canary_not_hit_or_quality_gate_failed")
             except Exception as _ie:
-                logger.debug(f"v101 subprocess 失敗（不影響 v100 流程）: {_ie}")
+                logger.info(f"v101 subprocess 失敗（不影響 v100 流程）: {_ie}")
+                _mark_status(request.chart_state, "rl_strategic_insight",
+                             "failed", str(_ie))
 
         if chart_symbol and (_intents & {"analysis", "backtest", "calibrate"}):
             try:
