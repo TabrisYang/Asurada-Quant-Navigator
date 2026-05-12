@@ -823,9 +823,12 @@ export default function ChatInterface() {
 
     // 保存 abort 函式，讓 handleAbort 可以真正斷開連線
     abortStreamRef.current = streamAbort;
-    // v105.6 Fix 2：streamPromise race 一個 hard timeout（630s = SSE timeout 600s + 30s 寬限）
-    // 即使 streamPromise 永遠不 settle（罕見），也保證 chatLoading 不會卡住
-    const HARD_TIMEOUT_MS = 630_000;
+    // v122 fix: 「全部分析」實際需 15-20 分鐘（round1 LLM 8m + function calls 2m
+    // + round2 兩段 5-10m）。舊版 630s 永遠不夠，導致用戶看到「stream 莫名斷
+    // 在 10 分 30 秒」的 bug（前端 HARD_TIMEOUT 觸發 → controller.abort → 後端
+    // 收到 cancel → client_disconnect log）。新值 30 分鐘給「全部分析」充分
+    // 空間；真正 idle 仍由 api.ts STREAM_TIMEOUT_MS (600s) 觸發、不會無限等。
+    const HARD_TIMEOUT_MS = 1800_000;
     try {
       await Promise.race([
         streamPromise,
