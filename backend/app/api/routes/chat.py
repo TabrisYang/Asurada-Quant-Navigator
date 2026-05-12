@@ -2971,26 +2971,30 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                             "content": "⚠️ AI 分析完成但未能產生文字報告，請嘗試重新提問。"
                         })
 
-                except (Exception, asyncio.CancelledError) as e:
+                except asyncio.CancelledError:
+                    # v114 bug 修正：以前 except (Exception, CancelledError) 一起抓會吞掉 cancel,
+                    # 導致外層 line 3091 的 partial-save 永遠不會被觸發、用戶 r2_text_buf 內容遺失。
+                    # 現在拆開：CancelledError re-raise 給外層處理 partial-save，
+                    # 真實 exception 仍在下方 Exception 分支處理。
                     import traceback
-                    # v110：CancelledError 通常是 client 斷線（cancel scope by RequestResponseCycle）
-                    # 加詳細狀態 log：被 cancel 時已收到多少 LLM 文字、是否在 function call 階段等
-                    if isinstance(e, asyncio.CancelledError):
-                        _r2_len = len(locals().get("_r2_text_buf", "") or "")
-                        _r2_fc_count = len(locals().get("_r2_function_calls", []) or [])
-                        _has_response = "response" in locals()
-                        _round2_started = "round2_messages" in locals()
-                        logger.warning(
-                            f"[client_disconnect] HTTP 連線在 stream_gen 內被 cancel\n"
-                            f"  狀態：round2_started={_round2_started}, "
-                            f"r2_text_len={_r2_len}, r2_function_calls={_r2_fc_count}, "
-                            f"has_response={_has_response}\n"
-                            f"  常見原因：(1) 用戶切換 symbol/timeframe (2) browser tab 斷連 "
-                            f"(3) 前端 abort 其他原因\n"
-                            f"{traceback.format_exc()}"
-                        )
-                    else:
-                        logger.error(f"Function call 執行或二輪回應失敗: {e}\n{traceback.format_exc()}")
+                    _r2_len = len(locals().get("_r2_text_buf", "") or "")
+                    _r2_fc_count = len(locals().get("_r2_function_calls", []) or [])
+                    _has_response = "response" in locals()
+                    _round2_started = "round2_messages" in locals()
+                    logger.warning(
+                        f"[client_disconnect] HTTP 連線在 stream_gen 內被 cancel\n"
+                        f"  狀態：round2_started={_round2_started}, "
+                        f"r2_text_len={_r2_len}, r2_function_calls={_r2_fc_count}, "
+                        f"has_response={_has_response}\n"
+                        f"  常見原因：(1) 用戶切換 symbol/timeframe (2) browser tab 斷連 "
+                        f"(3) 前端 abort 其他原因\n"
+                        f"  → 將 re-raise 給外層 partial-save 把 r2_text_buf 存進 DB\n"
+                        f"{traceback.format_exc()}"
+                    )
+                    raise
+                except Exception as e:
+                    import traceback
+                    logger.error(f"Function call 執行或二輪回應失敗: {e}\n{traceback.format_exc()}")
                     err_msg = str(e) or "未知錯誤"
                     yield _sse_event("token", {
                         "content": f"\n\n⚠️ 分析報告產生失敗: {err_msg}\n請嘗試重新提問，若持續發生請檢查後端日誌。"
@@ -3094,12 +3098,22 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
             # 即使 client 斷線（瀏覽器/系統/網路層原因，外部不可控），
             # 使用者重整頁面也能看到 partial 報告，不必打「請繼續」重跑浪費 token + 8 分鐘
             # 用 sync 呼叫 chat_history.save_message（不 await），避免被 cancel scope 連坐
+            #
+            # v122 bug 修正：以前 partial-save 只存 final_text，但 round2 內容在 _r2_text_buf
+            # → 用戶在 round2 第 2 段被斷線時 2095 字 r2_text_buf 全遺失。
+            #   現合併兩者：優先 final_text、若沒則用 _r2_text_buf；若兩者都有則 final_text + r2_text_buf
             _partial_final = locals().get("final_text") or ""
+            _partial_r2 = locals().get("_r2_text_buf") or ""
             _partial_conv_id = locals().get("conversation_id") or ""
-            if _partial_final.strip() and _partial_conv_id:
+            # 合併：若 r2_text_buf 內容不在 final_text 內，就 append（避免重複）
+            if _partial_r2 and _partial_r2 not in _partial_final:
+                _partial_combined = (_partial_final + "\n\n" + _partial_r2).strip() if _partial_final else _partial_r2
+            else:
+                _partial_combined = _partial_final
+            if _partial_combined.strip() and _partial_conv_id:
                 try:
                     _partial_clean = (
-                        strip_system_distill(strip_predictions(strip_key_insights(_partial_final)))
+                        strip_system_distill(strip_predictions(strip_key_insights(_partial_combined)))
                         + "\n\n---\n⚠️ **報告生成中斷**（網路抖動 / 系統省電）— 已存上方部分內容。請輸入「請繼續」接續。"
                     )
                     _partial_total_usage = locals().get("total_usage")
@@ -3110,7 +3124,10 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                         content=_partial_clean,
                         token_usage=_partial_usage_dict,
                     )
-                    logger.info(f"[client_disconnect] partial 內容已存 DB，長度={len(_partial_clean)}")
+                    logger.info(
+                        f"[client_disconnect] partial 內容已存 DB，長度={len(_partial_clean)}"
+                        f"（final_text={len(_partial_final)}, r2_text_buf={len(_partial_r2)}）"
+                    )
                 except Exception as _save_err:
                     logger.error(f"[client_disconnect] partial 存 DB 失敗: {_save_err}")
             return
