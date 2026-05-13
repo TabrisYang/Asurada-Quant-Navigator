@@ -790,7 +790,7 @@ function TrackView({ pctileThreshold }: { pctileThreshold: number }) {
               className="px-3 py-1 rounded text-sm border-none outline-none cursor-pointer"
               style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)' }}
             >
-              <option value="recent_scan">最近一次掃描結果（~30 檔，~30 秒）</option>
+              <option value="recent_scan">最近 5 次掃描聯集（~30-50 檔，~30 秒）</option>
               <option value="full_market">全市場 1938 檔（~2 小時）</option>
             </select>
           </div>

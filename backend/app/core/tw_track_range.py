@@ -34,17 +34,30 @@ _DEFAULT_PCTILE_THRESHOLD = 20.0  # BB% < 20 視為符合條件
 _BB_PERIOD = 20
 _BB_LOOKBACK = 120                 # 計算 BB Width 百分位的滾動視窗
 _BACKFILL_BUFFER_DAYS = 200       # 起算日往前多撈幾天，確保 BB lookback 充足
+_DEFAULT_RECENT_SCANS_UNION = 5   # v126: 跨日追蹤標的池 = 最近 N 次掃描聯集（去重）
+                                   # N=1 → ~19 檔（只看「現在符合」的、看不到「先符後鬆」）
+                                   # N=5 → ~37 檔（甜蜜點：覆蓋一週多 / 邊際效益高）
+                                   # N=10 → ~52 檔（覆蓋更久但邊際遞減）
 
 
 # ──────────────────────────────────────────────
 # 標的池取得
 # ──────────────────────────────────────────────
 
-def get_recent_scan_symbols() -> tuple[Optional[str], list[dict]]:
-    """從 tw_scan_history.db 撈最近一次掃描結果的標的清單。
+def get_recent_scan_symbols(n_scans: int = _DEFAULT_RECENT_SCANS_UNION) -> tuple[Optional[str], list[dict]]:
+    """從 tw_scan_history.db 撈最近 N 次掃描結果的**聯集**標的清單（去重）。
+
+    v126: 從「LIMIT 1」改為「LIMIT N + 聯集去重」，解決原本只看「現在符合」
+    導致看不到「先壓縮後展開」標的（這類標的在最近一次掃描的當天已不符合、
+    因此不會出現在池中）。
+
+    去重邏輯：保留每個 code 第一次出現（最近一次掃描）的 meta 欄位（name / market / industry）。
+
+    Args:
+        n_scans: 取最近幾次掃描做聯集。預設 5（DB 數據顯示甜蜜點：覆蓋一週多、邊際遞減）。
 
     Returns:
-        (scan_id, [{"code", "name", "market", "industry"}, ...])
+        (latest_scan_id, [{"code", "name", "market", "industry"}, ...])
         若無歷史則回 (None, [])
     """
     db_path = settings.db_path / "tw_scan_history.db"
@@ -53,34 +66,44 @@ def get_recent_scan_symbols() -> tuple[Optional[str], list[dict]]:
 
     conn = sqlite3.connect(db_path)
     try:
-        row = conn.execute(
-            "SELECT scan_id, results_json FROM tw_bb_scans "
-            "ORDER BY scanned_at DESC LIMIT 1"
-        ).fetchone()
+        rows = conn.execute(
+            "SELECT scan_id, scanned_at, results_json FROM tw_bb_scans "
+            "ORDER BY scanned_at DESC LIMIT ?",
+            (max(1, n_scans),),
+        ).fetchall()
     finally:
         conn.close()
 
-    if not row:
+    if not rows:
         return None, []
 
-    scan_id, results_json = row
-    try:
-        results = json.loads(results_json)
-    except Exception as e:
-        logger.warning(f"tw_scan_history 最新 scan results 解析失敗: {e}")
-        return scan_id, []
+    # 聯集去重：保留每個 code 第一次出現（最近一次掃描）的 meta
+    seen: set[str] = set()
+    union: list[dict] = []
+    for scan_id, scanned_at, results_json in rows:
+        try:
+            results = json.loads(results_json)
+        except Exception as e:
+            logger.warning(f"tw_scan_history scan {scan_id} 解析失敗: {e}")
+            continue
+        for r in results:
+            code = r.get("code", "")
+            if not code or code in seen:
+                continue
+            seen.add(code)
+            union.append({
+                "code": code,
+                "name": r.get("name", ""),
+                "market": r.get("market", ""),
+                "industry": r.get("industry", ""),
+            })
 
-    symbols = [
-        {
-            "code": r.get("code", ""),
-            "name": r.get("name", ""),
-            "market": r.get("market", ""),
-            "industry": r.get("industry", ""),
-        }
-        for r in results
-        if r.get("code")
-    ]
-    return scan_id, symbols
+    latest_scan_id = rows[0][0]
+    logger.info(
+        f"get_recent_scan_symbols: 聯集最近 {len(rows)} 次掃描，去重後 {len(union)} 個標的 "
+        f"(latest_scan_id={latest_scan_id})"
+    )
+    return latest_scan_id, union
 
 
 async def get_full_market_symbols() -> list[dict]:
