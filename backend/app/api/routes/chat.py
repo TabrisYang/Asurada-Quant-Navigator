@@ -2766,6 +2766,8 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                     _r2_yielded_until = 0
                     _r2_marker_seen = False
                     _r2_streamed = True  # 旗標：表示文字已經邊串流邊 yield 過，後續顯示段不要重複
+                    # v125-B: 追蹤每段結束時 _r2_text_buf 的長度，用於計算每段字數做完整性驗證
+                    _seg_end_positions: dict[int, int] = {}
 
                     # KEY_INSIGHTS / PREDICTIONS / SYSTEM_DISTILL 標記偵測（不 yield 給使用者）
                     _MARKER_RE = re.compile(r'\n---(?:KEY_INSIGHTS|PREDICTIONS|SYSTEM_DISTILL)---')
@@ -2891,6 +2893,9 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                             })
                             _r2_yielded_until = len(_r2_text_buf)
 
+                        # v125-B: 記錄本段結束時的 _r2_text_buf 長度（給 seg2 字數驗證用）
+                        _seg_end_positions[_seg_no] = len(_r2_text_buf)
+
                         # 段間：emit segment_complete（除最後一段）
                         # 前端可據此插入「【第 N 段：xxx】」分隔或新建 message bubble
                         if _seg_no >= 1 and _seg_idx < len(_segments_to_run) - 1:
@@ -2900,6 +2905,34 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                                 "next_segment": _next_seg,
                                 "next_label": _seg_labels.get(_next_seg, ""),
                             })
+
+                            # v125-B: seg1→seg2 切換 SSE idle 風險點 — 主動 emit 3 次心跳
+                            # adapter.chat_stream_events 對 seg2 會 spawn 新 Claude CLI subprocess
+                            # （5-30s 啟動 + LLM TTFT），這段 SSE idle 是 v122 心跳機制覆蓋不到的縫
+                            # （_stream_with_heartbeat 只在 adapter 已啟動後生效）
+                            for _hb_i in range(3):
+                                yield _sse_event("status", {
+                                    "message": f"準備第 {_next_seg} 段（{_seg_labels.get(_next_seg, '完整詳細分析')}）... ({_hb_i+1}/3)",
+                                    "phase": "seg_warmup",
+                                })
+                                await asyncio.sleep(1.5)
+
+                    # v125-B: seg2 字數完整性檢查
+                    # 預期 seg2 ≥ 4000 字（涵蓋 12 段詳細分析）；不足表示 streaming 中斷或 LLM 早收
+                    if 2 in _segments_to_run and 2 in _seg_end_positions:
+                        _seg1_end = _seg_end_positions.get(1, 0)
+                        _seg2_len = _seg_end_positions[2] - _seg1_end
+                        if _seg2_len < 4000:
+                            logger.warning(
+                                f"[v125-B] seg2 字數過短 {_seg2_len} < 4000，疑似 streaming 中斷或 LLM 早收"
+                            )
+                            yield _sse_event("warning", {
+                                "message": f"第 2 段內容可能不完整（{_seg2_len} 字、預期 ≥ 4000）",
+                                "type": "seg2_incomplete",
+                                "seg2_len": _seg2_len,
+                            })
+                        else:
+                            logger.info(f"[v125-B] seg2 字數驗證通過：{_seg2_len} 字 ≥ 4000")
 
                     # 建構 response2 物件相容後續既有邏輯
                     class _StreamedResponse:
