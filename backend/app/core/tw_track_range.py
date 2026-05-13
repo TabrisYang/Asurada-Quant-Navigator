@@ -34,43 +34,59 @@ _DEFAULT_PCTILE_THRESHOLD = 20.0  # BB% < 20 視為符合條件
 _BB_PERIOD = 20
 _BB_LOOKBACK = 120                 # 計算 BB Width 百分位的滾動視窗
 _BACKFILL_BUFFER_DAYS = 200       # 起算日往前多撈幾天，確保 BB lookback 充足
-_DEFAULT_RECENT_SCANS_UNION = 5   # v126: 跨日追蹤標的池 = 最近 N 次掃描聯集（去重）
-                                   # N=1 → ~19 檔（只看「現在符合」的、看不到「先符後鬆」）
-                                   # N=5 → ~37 檔（甜蜜點：覆蓋一週多 / 邊際效益高）
-                                   # N=10 → ~52 檔（覆蓋更久但邊際遞減）
+_DEFAULT_RECENT_DAYS = 30         # v128: 跨日追蹤標的池 = 最近 N 天掃描聯集（去重）
+                                   # 30 天 ≈ 21 個交易日，覆蓋 BB 壓縮研究完整週期：
+                                   #   - 壓縮事件 5-15 個交易日後傾向突破
+                                   #   - 突破後再加 1-2 週走勢觀察
+                                   # 避免「最近 N 次」邏輯：若用戶月跑 1 次、5 次 = 5 個月過舊
 
 
 # ──────────────────────────────────────────────
 # 標的池取得
 # ──────────────────────────────────────────────
 
-def get_recent_scan_symbols(n_scans: int = _DEFAULT_RECENT_SCANS_UNION) -> tuple[Optional[str], list[dict]]:
-    """從 tw_scan_history.db 撈最近 N 次掃描結果的**聯集**標的清單（去重）。
+def get_recent_scan_symbols(within_days: int = _DEFAULT_RECENT_DAYS) -> tuple[Optional[str], list[dict]]:
+    """從 tw_scan_history.db 撈最近 N 天內掃描結果的**聯集**標的清單（去重）。
 
-    v126: 從「LIMIT 1」改為「LIMIT N + 聯集去重」，解決原本只看「現在符合」
-    導致看不到「先壓縮後展開」標的（這類標的在最近一次掃描的當天已不符合、
-    因此不會出現在池中）。
+    v128: 從「LIMIT N 次」（v126）改成「WHERE scanned_at >= now - N days」（v128）。
+    動機：解決「掃描頻率低 → N 次池含過老資料」的盲點。
+    30 天涵蓋 BB 壓縮研究完整週期（壓縮事件 5-15 個交易日後突破 + 走勢觀察）。
 
-    去重邏輯：保留每個 code 第一次出現（最近一次掃描）的 meta 欄位（name / market / industry）。
+    去重邏輯：保留每個 code 第一次出現（最近一次掃描）的 meta 欄位。
 
     Args:
-        n_scans: 取最近幾次掃描做聯集。預設 5（DB 數據顯示甜蜜點：覆蓋一週多、邊際遞減）。
+        within_days: 取過去幾天內的掃描做聯集。預設 30 天。
 
     Returns:
         (latest_scan_id, [{"code", "name", "market", "industry"}, ...])
         若無歷史則回 (None, [])
+        若 N 天內無掃描 → fallback 取最近 1 筆（避免完全空池）
     """
     db_path = settings.db_path / "tw_scan_history.db"
     if not db_path.exists():
         return None, []
 
+    # 用 Python 算 cutoff（與 SQLite tz 解耦）
+    cutoff = (datetime.now() - timedelta(days=max(1, within_days))).isoformat(timespec="seconds")
+
     conn = sqlite3.connect(db_path)
     try:
         rows = conn.execute(
             "SELECT scan_id, scanned_at, results_json FROM tw_bb_scans "
-            "ORDER BY scanned_at DESC LIMIT ?",
-            (max(1, n_scans),),
+            "WHERE scanned_at >= ? ORDER BY scanned_at DESC",
+            (cutoff,),
         ).fetchall()
+        # Fallback：N 天內 0 筆 → 取最近 1 筆，避免完全空池
+        if not rows:
+            rows = conn.execute(
+                "SELECT scan_id, scanned_at, results_json FROM tw_bb_scans "
+                "ORDER BY scanned_at DESC LIMIT 1"
+            ).fetchall()
+            if rows:
+                logger.warning(
+                    f"get_recent_scan_symbols: 過去 {within_days} 天無掃描歷史，"
+                    f"降級用最近 1 筆 (scanned_at={rows[0][1]})"
+                )
     finally:
         conn.close()
 
@@ -100,8 +116,8 @@ def get_recent_scan_symbols(n_scans: int = _DEFAULT_RECENT_SCANS_UNION) -> tuple
 
     latest_scan_id = rows[0][0]
     logger.info(
-        f"get_recent_scan_symbols: 聯集最近 {len(rows)} 次掃描，去重後 {len(union)} 個標的 "
-        f"(latest_scan_id={latest_scan_id})"
+        f"get_recent_scan_symbols: 聯集過去 {within_days} 天內 {len(rows)} 次掃描，"
+        f"去重後 {len(union)} 個標的 (latest_scan_id={latest_scan_id})"
     )
     return latest_scan_id, union
 
