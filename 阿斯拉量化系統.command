@@ -63,7 +63,8 @@ cleanup() {
         echo -e "${GREEN}[✓]${NC} 前端已關閉"
     fi
     # v124：保險再殺占用 port 的孤兒（ML subprocess / daemon thread 衍生、SIGTERM 沒收到）
-    STALE_PIDS=$(lsof -ti :8000,:8001,:8002,:8003,:8004,:8005,:8006,:8007,:8008,:8009,:8010,:5173 2>/dev/null | sort -u)
+    # v124.1: 拆兩段 lsof（macOS lsof 4.91 不支援多 port 逗號語法）
+    STALE_PIDS=$( { lsof -ti :8000-8010 2>/dev/null; lsof -ti :5173 2>/dev/null; } | sort -u)
     if [ -n "$STALE_PIDS" ]; then
         echo "$STALE_PIDS" | xargs kill -9 2>/dev/null
     fi
@@ -191,7 +192,8 @@ mkdir -p "$ROOT_DIR/backend/data"
 echo -e "  ${YELLOW}清理舊 process / WAL / cache...${NC}"
 
 # (a) 殺 backend 占用 port（8000-8010，含 ML subprocess 孤兒）
-BACKEND_OLD_PIDS=$(lsof -ti :8000,:8001,:8002,:8003,:8004,:8005,:8006,:8007,:8008,:8009,:8010 2>/dev/null | sort -u)
+# v124.1: 改用 port range 語法（macOS lsof 4.91 不支援 :8000,:8001,... 多 port 寫法、會報 "unknown service"）
+BACKEND_OLD_PIDS=$(lsof -ti :8000-8010 2>/dev/null | sort -u)
 if [ -n "$BACKEND_OLD_PIDS" ]; then
     echo -e "  ${YELLOW}  殺舊 backend process: $(echo $BACKEND_OLD_PIDS | tr '\n' ' ')${NC}"
     echo "$BACKEND_OLD_PIDS" | xargs kill -9 2>/dev/null
