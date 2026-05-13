@@ -131,7 +131,8 @@ export interface StreamCallbacks {
   onThinking?: () => void;
   onStatus?: (message: string) => void;
   onProgress?: (progress: ProgressInfo) => void;
-  onToken?: (content: string) => void;
+  // v125-A: token 加 segment 參數，讓 ChatInterface 把 seg2 token 路由到獨立 message bubble
+  onToken?: (content: string, segment?: 1 | 2) => void;
   onFunctionCalls?: (calls: Array<{ name: string; arguments: Record<string, unknown> }>) => void;
   onChartUpdates?: (updates: Record<string, unknown>) => void;
   onUsage?: (usage: TokenUsage) => void;
@@ -175,6 +176,8 @@ export interface StreamCallbacks {
     next_segment: number;
     next_label: string;
   }) => void;
+  // v125-B: 後端 warning event（seg2 字數不足等不致命提醒）
+  onWarning?: (data: { message: string; type: string }) => void;
 }
 
 /** SSE 串流回傳值：promise 等待完成，abort 可主動斷開連線 */
@@ -397,7 +400,9 @@ function _handleSSEEvent(
       break;
     case 'token':
       if (typeof data.content === 'string') {
-        callbacks.onToken?.(data.content);
+        // v125-A: 傳遞 segment 給 onToken，讓前端能路由 seg2 token 到獨立 message bubble
+        const _seg = data.segment === 1 || data.segment === 2 ? (data.segment as 1 | 2) : undefined;
+        callbacks.onToken?.(data.content, _seg);
       }
       break;
     case 'function':
@@ -435,6 +440,10 @@ function _handleSSEEvent(
       break;
     case 'segment_complete':
       callbacks.onSegmentComplete?.(data as unknown as Parameters<NonNullable<StreamCallbacks['onSegmentComplete']>>[0]);
+      break;
+    case 'warning':
+      // v125-B: 後端 seg2 字數不足等不致命提醒
+      callbacks.onWarning?.(data as unknown as Parameters<NonNullable<StreamCallbacks['onWarning']>>[0]);
       break;
     case 'heartbeat':
       // v110：心跳事件，無 callback，僅維持 SSE 連線 active 防中間層判 idle 而斷

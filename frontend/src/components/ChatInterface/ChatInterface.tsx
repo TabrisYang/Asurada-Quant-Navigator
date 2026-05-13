@@ -525,6 +525,12 @@ export default function ChatInterface() {
 
     let accumulatedText = '';
     let doneReceived = false;
+    // v125-A: seg2 獨立 bubble 狀態
+    // assistantMsgId / accumulatedText 給 seg1 用；以下兩個 ref 給 seg2 用
+    let seg2MsgId: string | null = null;
+    let seg2Text = '';
+    let activeSegment: 1 | 2 = 1;  // 由 onSegmentComplete 切到 2、由 segment-aware onToken 維護
+    let warnedSeg2Incomplete = false;  // v125-B warning event 已收過就不再 onDone 重複偵測
 
     // ★ 建立對話歷史：只送出「最後一次切換標的」之後的對話，避免不同標的混淆
     const currentMessages = useChartStore.getState().messages;
@@ -583,15 +589,29 @@ export default function ChatInterface() {
           });
         },
 
-        onToken: (content: string) => {
-          accumulatedText += content;
-          updateMessage(assistantMsgId, {
-            content: accumulatedText,
-            isThinking: false,
-            isStreaming: true,
-            statusText: undefined,
-            progress: undefined,
-          });
+        onToken: (content: string, segment?: 1 | 2) => {
+          // v125-A: 依後端 segment 欄位路由 token 到正確的 message bubble
+          // - segment===2 寫進 seg2MsgId（若已建立）
+          // - 其餘（segment===1 / undefined / seg2MsgId 未建立）寫進 seg1（assistantMsgId）
+          if (segment === 2 && seg2MsgId) {
+            seg2Text += content;
+            updateMessage(seg2MsgId, {
+              content: seg2Text,
+              isThinking: false,
+              isStreaming: true,
+              statusText: undefined,
+              progress: undefined,
+            });
+          } else {
+            accumulatedText += content;
+            updateMessage(assistantMsgId, {
+              content: accumulatedText,
+              isThinking: false,
+              isStreaming: true,
+              statusText: undefined,
+              progress: undefined,
+            });
+          }
         },
 
         onFunctionCalls: (calls) => {
@@ -721,11 +741,38 @@ export default function ChatInterface() {
 
         onDone: (_convId?: string, hints?: Record<string, unknown>) => {
           doneReceived = true;
+          // v125-A：把 seg1 + seg2 兩個 bubble 都收尾
           updateMessage(assistantMsgId, {
             isThinking: false,
             isStreaming: false,
             statusText: undefined,
           });
+          if (seg2MsgId) {
+            // A.3：onDone 時驗證 seg2 完整性（字數 ≥ 4000 + 含關鍵字）
+            // 若後端 B.2 已送 warning event（warnedSeg2Incomplete=true）→ 不重複偵測
+            const hasSeg2Keyword = /#1|#2|📊\s*市場環境|🏛\s*結構|⚡\s*動能/.test(seg2Text);
+            const isShort = seg2Text.length < 4000;
+            const isIncomplete = !warnedSeg2Incomplete && (isShort || !hasSeg2Keyword);
+            if (isIncomplete) {
+              const note = (
+                `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                `⚠️ **第 2 段（完整分析）可能不完整**\n` +
+                `字數 ${seg2Text.length}（預期 ≥ 4000）${!hasSeg2Keyword ? '、未偵測到「📊 市場環境」等關鍵段落' : ''}\n` +
+                `streaming 可能中途中斷。可重新對相同標的送出「全部分析」重生第 2 段。\n` +
+                `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
+              );
+              seg2Text += note;
+              updateMessage(seg2MsgId, {
+                content: seg2Text,
+                segmentIncomplete: true,
+              });
+            }
+            updateMessage(seg2MsgId, {
+              isThinking: false,
+              isStreaming: false,
+              statusText: undefined,
+            });
+          }
           setChatLoading(false);
           streamingMsgIdRef.current = null;
           if (hints?.distill_hint) {
@@ -793,23 +840,46 @@ export default function ChatInterface() {
           updateMessage(assistantMsgId, { content: String(currentMsg.content || '') + note });
         },
 
-        // S3：分段輸出 — 第 1 段完成時插入分隔符，讓用戶明確看到第 2 段即將接續
+        // v125-A：第 1 段完成 → 結束 seg1 bubble、新建 seg2 bubble
+        // 之前的版本：所有 token 都寫進同一個 bubble、seg2 streaming 中斷時整段被污染、用戶不知道
+        // 新版本：seg1 與 seg2 是獨立 message，seg2 streaming 即使中斷、seg1 仍完整
         onSegmentComplete: (data) => {
           const nextLabel = data.next_label || '完整詳細分析';
-          const divider = (
-            `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-            `✅ **第 ${data.segment} 段完成**\n` +
-            `📌 第 ${data.next_segment} 段「${nextLabel}」即將自動接續...\n` +
-            `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`
-          );
-          accumulatedText += divider;
+          // 1. 結束 seg1 bubble
           updateMessage(assistantMsgId, {
             content: accumulatedText,
-            isStreaming: true,
+            isStreaming: false,
             segment: data.segment as 1 | 2,
             segmentComplete: true,
-            statusText: `第 ${data.segment} 段完成 ｜ 生成第 ${data.next_segment} 段中...`,
+            statusText: undefined,
           });
+          // 2. 新建 seg2 bubble（content 開頭加上「（接續第 X 段）」標籤、與後端 prompt 對齊）
+          const newSeg2Id = `assistant-seg2-${Date.now()}`;
+          seg2MsgId = newSeg2Id;
+          seg2Text = '';
+          activeSegment = 2;
+          streamingMsgIdRef.current = newSeg2Id;
+          const seg2InitMsg: ChatMessage = {
+            id: newSeg2Id,
+            role: 'assistant',
+            content: '',
+            timestamp: new Date().toISOString(),
+            isThinking: false,
+            isStreaming: true,
+            segment: data.next_segment as 1 | 2,
+            statusText: `第 ${data.next_segment} 段「${nextLabel}」生成中...`,
+          };
+          addMessage(seg2InitMsg);
+        },
+
+        // v125-B：seg2 字數不足 warning（後端 _r2_text_buf < 4000 字 emit）
+        onWarning: (data) => {
+          if (data.type === 'seg2_incomplete' && seg2MsgId) {
+            warnedSeg2Incomplete = true;
+            const note = `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚠️ **${data.message}**\n（streaming 可能中斷，建議重生第 2 段）\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
+            seg2Text += note;
+            updateMessage(seg2MsgId, { content: seg2Text, segmentIncomplete: true });
+          }
         },
       },
       currentConversationId || undefined,

@@ -131,6 +131,8 @@ export interface ChatMessage {
   segment?: 1 | 2;
   segmentComplete?: boolean;  // 該段是否已完成
   segmentLabel?: string;       // 段落標題（例「第 1 段：核心結論」）
+  // v125-A: seg2 streaming 中斷 / 字數不足時標記，前端 UI 可顯示警告樣式
+  segmentIncomplete?: boolean;
 }
 
 export interface FunctionCall {
