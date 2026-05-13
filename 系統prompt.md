@@ -1,6 +1,6 @@
 # 阿斯拉量化系統 — 完整系統 Prompt 與架構規格書
 
-> **最後更新：2026-05-12** — 與實際程式碼同步（v122）
+> **最後更新：2026-05-13** — 與實際程式碼同步（v128）
 
 ## 系統定位
 
@@ -1347,3 +1347,107 @@ GET    /api/health                   # 系統健康狀態
 - **[backend/scripts/install_git_hooks.sh](backend/scripts/install_git_hooks.sh)**：一鍵安裝 pre-commit hook
 - **[backend/scripts/shadow_mode.py](backend/scripts/shadow_mode.py)**：alpha-touching 改動的 pre-flight check 工具（跑 shadow mode 比對 CPCV PF baseline）
 - **[.gitignore](.gitignore)**：補完規則涵蓋 `*.db` / `*.pkl` 衍生物 / `events.json` 自動同步
+
+---
+
+## v122 → v128 變更紀錄
+
+> 2026-05-12 ~ 2026-05-13 期間新增的修復、功能與根因治理。保持原文章節不動、僅在此追加紀錄。
+
+### 台股跨日追蹤功能（新增、多次迭代）
+
+完整新增「📊 跨日追蹤」第 3 個 tab（在台股掃描面板）：對標的池逐日重算 4 個指標（close / bb_pctile / change_20d / vol_5d）、矩陣表 + sparkline 顯示、CSV 匯出、✕ 隱藏標的、還原全部。研究目的：驗證 BB% 是否真有 alpha（看「壓縮後股價走勢」）。
+
+| 版本 | 內容 | commit |
+|---|---|---|
+| 初版 | 標的池 = 最近 1 次掃描（19 檔）| `e449e60` |
+| v126 | 改最近 5 次掃描聯集（37 檔、看到「先壓縮後展開」標的）| `785814a` |
+| v127 | 加 ✕ 隱藏標的按鈕 + 還原全部 + CSV 前端組（排除已隱藏）| `b862cac` |
+| **v128** | 改最近 30 天掃描聯集（54 檔）對齊 BB 壓縮研究週期（壓縮 5-15 交易日 + 走勢觀察 1-2 週）| `feafa20` |
+
+對應後端：[backend/app/core/tw_track_range.py](backend/app/core/tw_track_range.py)、[backend/app/api/routes/tw_scanner.py](backend/app/api/routes/tw_scanner.py)
+對應前端：[frontend/src/components/TwBBScanPanel/TwBBScanPanel.tsx](frontend/src/components/TwBBScanPanel/TwBBScanPanel.tsx)
+
+### v123 系列 — 分析報告面向統一治根
+
+**問題**：ETH 與 ADA 報告段落不一致（ADA 13 段、ETH 缺 5 段）+ LLM 編造數字（fact-check 偵測到 RSI / winrate / long_short_ratio 多處不符）。根因是 LLM 隨意省略段落 + chart_state 13 處靜默 skip 讓 LLM 看不到「曾嘗試但失敗」。
+
+#### v123-A `9a8373a` — seg2 prompt 強制 12 段 + 禁止編造
+
+[backend/app/core/llm/function_defs.py](backend/app/core/llm/function_defs.py) `comprehensive_analysis_seg2` 加 v123 強制輸出規則（最高優先級）：
+- R1 段落不可省略（12 段必出現含標題）
+- R2 資料不可得固定句型「⚠️ 資料不可得：[原因]（chart_state.X / data_status[X] 為 [status]）」
+- R3 禁止編造任何具體數字（RSI / winrate / PF / IC / LS ratio 等必須對應 chart_state 欄位）
+- R4 引用統計數字前必須驗證來源（historical_insights / signal_history / factor_validation）
+- R5 9 個高價值面向 mandatory（跨市場群體 / 衍生品矩陣 / 因子 IC+Decay / Alpha 動態監控 / 多策略回測 / 4 策略附錄 / 條件機率 / 風險嚴重度 / 跨維度驗證）
+- R6 撰寫前必查 chart_state.data_status
+
+新增 **#5.5 Alpha 動態監控分級表**（固定 6 列：🟢 保留 / ⬆️ 升權 / ⬇️ 降權 / ❌ 淘汰 / 👁️ 觀察 / ❓ 無法判定）；#6 跨維度交叉驗證表至少 8 列；#8 風險清單嚴重度表至少 5 列。字數預算從 1800-2800 拉到 2200-3200。
+
+#### v123-B `521855f` — chart_state.data_status 注入治根
+
+[backend/app/api/routes/chat.py](backend/app/api/routes/chat.py) 加 `_mark_status(chart_state, key, status, reason, **extra)` helper。13 處靜默 skip 改 fallback：
+- `_auto_calc_indicator_values`（10 處）：decomposition / currentRegime / external_signals / upcoming_events / calendar_meta / crossStockSignals / social_sentiment / portfolio_summary / regime_subtype / donchian_position+bilateral_plan / historical_insights
+- `_inject_ml_prediction`（1 處）：mlPrediction
+- `_build_messages`（3 處）：recent_accuracy / signal_history / rl_strategic_insight
+
+**status 約定值**：`ok` / `partial` / `skipped` / `failed` / `failed_all` / `insufficient_samples` / `insufficient_data` / `no_model` / `guard_failed` / `stale`
+
+[backend/app/core/llm/executor.py](backend/app/core/llm/executor.py) `_exec_quant_research`：Walk Forward / CPCV 資料不足時回傳 `{status: "insufficient_data", df_len, required, reason}` 而非靜默跳過。
+
+[backend/docs/CHART_STATE_SCHEMA.md](backend/docs/CHART_STATE_SCHEMA.md) 加 `data_status` 完整欄位定義。
+
+### v124 系列 — 啟動腳本治本
+
+**問題**：VSCode 關閉專案、開別專案執行後、回此專案系統不穩。Explore 診斷三大根因：
+1. **SQLite WAL/SHM 殘留**（45%）— 11 個 DB 都用 WAL mode + busy_timeout=3000ms，舊 backend 被強制終止留下未提交 WAL 片段
+2. **`.port` 過時** + Vite proxy 指向錯誤 backend（35%）
+3. **daemon thread / asyncio task 取消** 在 SIGKILL 下無解 — OS 行為，Python lifecycle 無能為力
+
+#### v124 `987af15` — 啟動腳本整合 + 自我清理
+
+[阿斯拉量化系統.command](阿斯拉量化系統.command)：
+- 開頭加 VSCode 環境偵測 → 自動 `osascript` spawn 新 Terminal.app 視窗（合併原「背景啟動.command」邏輯）
+- 啟動前 4 步自我清理：殺 8000-8010 孤兒 backend / 殺 5173 舊 vite / 清 SQLite WAL/SHM 殘留 / 清 `__pycache__`
+- `cleanup()` trap 保險殺 port 孤兒（含 ML subprocess）
+
+桌面從 3 個 .command 簡化為 2 個（刪除「阿斯拉量化系統-背景啟動.command」、邏輯併入主腳本）。
+
+#### v124.1 `920c769` — 修 lsof 語法 bug
+
+實機驗證：macOS lsof 4.91 **不支援** `lsof -ti :8000,:8001,...` 多 port 逗號語法（報 "unknown service :8001"）。v124 cleanup 段因此**完全沒生效**（每次都 silently fail、實機觀察到 5173 兩個孤兒 vite + 14 個 WAL/SHM 殘留沒被清掉）。
+
+修法：改用 port range 語法 `lsof -ti :8000-8010`；`cleanup()` 拆兩段 `{ lsof -ti :8000-8010; lsof -ti :5173; } | sort -u`。
+
+修完後實機觀察到 terminal log 出現「殺舊 backend process: X」「清理 SQLite WAL/SHM 殘留 (N 個檔)」（之前因 bug 完全沒這些 log）。
+
+### v125 系列 — seg2 自動接續失敗三層治根
+
+**問題**：「全部分析」seg2 streaming 中途中斷時前端無感知。實機 DB 對照：
+- ADA 1d 02:51：12,898 字 ✅ 完整 seg1+seg2
+- ETH 1d 03:10：12,202 字 ✅ 完整（有「接續第 1 段」標記）
+- **ETH 1d 03:22**：9,283 字 ❌ **只有 seg1、無 seg2**（同 prompt、同 backend、隨機機率性中斷）
+
+三條獨立故障路徑、三層治根：
+
+#### v125-A `128ae7b` — 前端 seg2 獨立 bubble + 字數驗證
+
+- [api.ts](frontend/src/services/api.ts)：`StreamCallbacks.onToken` 加 `segment?: 1 | 2` 參數、新增 `onWarning` callback + warning event handler
+- [ChatInterface.tsx](frontend/src/components/ChatInterface/ChatInterface.tsx)：`onToken` 依 segment 路由（seg2 token 寫進獨立 bubble seg2MsgId）；`onSegmentComplete` 改成「結束 seg1 bubble + 新建 seg2 bubble」（之前都寫進同一個）
+- `onDone` 驗證 seg2 字數 ≥ 4000 + 含關鍵字（`#1` / `📊 市場環境` 等）、不足跳警告「⚠️ 第 2 段（完整分析）可能不完整」+ 提示重新生成
+- [types/index.ts](frontend/src/types/index.ts) ChatMessage 加 `segmentIncomplete?: boolean` 欄位
+
+#### v125-B `6616f7c` — 後端 seg1→seg2 SSE 心跳 + 字數驗證
+
+[backend/app/api/routes/chat.py](backend/app/api/routes/chat.py)：
+- `segment_complete` event 後 emit 3 次 status 心跳（間隔 1.5s）、覆蓋「Claude CLI subprocess 啟動」5-30s idle 縫
+- 追蹤每段結束位置 `_seg_end_positions[seg_no] = len(_r2_text_buf)`
+- 全部 segment 跑完後驗證 seg2 字數：`seg2_len < 4000` → `logger.warning` + emit warning event `{type: "seg2_incomplete", seg2_len, ...}` 給前端
+
+#### v125-C `16a52c1` — DB save 改 transaction 防 partial write
+
+[backend/app/core/chat_history.py](backend/app/core/chat_history.py) `save_message`：
+- 改用 `with self._conn:` context manager 包整個事務
+- 成功 → 自動 COMMIT、exception → 自動 ROLLBACK
+- 杜絕「多 execute 之間 exception 後 commit 把半截 statements 一起提交」的 partial save 風險
+- 配套 v125-A + v125-B 三層治根
