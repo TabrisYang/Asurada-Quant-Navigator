@@ -109,70 +109,74 @@ class ChatHistoryStore(BaseDBStore):
             return conversation_id
 
         try:
-            now = datetime.utcnow().isoformat()
+            # v125-C: 用 `with self._conn:` 包成 transaction，保證 partial write 不發生
+            # SQLite context manager 語意：成功 → COMMIT、exception → ROLLBACK
+            # 之前的版本：多個 execute 之間若 exception、commit() 沒呼叫，下次 commit
+            # 可能把半截 transaction 跟新 statements 一起 commit 進去（partial save）
+            with self._conn:
+                now = datetime.utcnow().isoformat()
 
-            # 確保對話存在
-            existing = self._conn.execute(
-                "SELECT id FROM conversations WHERE id = ?", (conversation_id,)
-            ).fetchone()
+                # 確保對話存在
+                existing = self._conn.execute(
+                    "SELECT id FROM conversations WHERE id = ?", (conversation_id,)
+                ).fetchone()
 
-            if not existing:
-                # 自動生成標題：取使用者第一句話的前 30 字
-                title = content[:30] + ("..." if len(content) > 30 else "") if role == "user" else "新對話"
-                self._conn.execute(
-                    """INSERT INTO conversations (id, title, symbol, timeframe, created_at, updated_at, message_count)
-                       VALUES (?, ?, ?, ?, ?, ?, 0)""",
-                    (conversation_id, title, symbol, timeframe, now, now),
-                )
-
-            # 保存訊息
-            usage_json = json.dumps(token_usage, ensure_ascii=False) if token_usage else None
-            self._conn.execute(
-                """INSERT INTO messages (conversation_id, role, content, timestamp, token_usage)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (conversation_id, role, content, now, usage_json),
-            )
-
-            # 更新對話的 updated_at 和 message_count
-            self._conn.execute(
-                """UPDATE conversations
-                   SET updated_at = ?, message_count = message_count + 1,
-                       symbol = COALESCE(?, symbol),
-                       timeframe = COALESCE(?, timeframe)
-                   WHERE id = ?""",
-                (now, symbol, timeframe, conversation_id),
-            )
-
-            # 如果是使用者的第一句話，更新標題
-            if role == "user":
-                msg_count = self._conn.execute(
-                    "SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND role = 'user'",
-                    (conversation_id,),
-                ).fetchone()[0]
-                if msg_count == 1:
-                    title = content[:30] + ("..." if len(content) > 30 else "")
+                if not existing:
+                    # 自動生成標題：取使用者第一句話的前 30 字
+                    title = content[:30] + ("..." if len(content) > 30 else "") if role == "user" else "新對話"
                     self._conn.execute(
-                        "UPDATE conversations SET title = ? WHERE id = ?",
-                        (title, conversation_id),
+                        """INSERT INTO conversations (id, title, symbol, timeframe, created_at, updated_at, message_count)
+                           VALUES (?, ?, ?, ?, ?, ?, 0)""",
+                        (conversation_id, title, symbol, timeframe, now, now),
                     )
 
-            # 清理超出上限的舊訊息
-            total = self._conn.execute(
-                "SELECT COUNT(*) FROM messages WHERE conversation_id = ?",
-                (conversation_id,),
-            ).fetchone()[0]
-            if total > _MAX_MESSAGES_PER_CONVERSATION:
+                # 保存訊息
+                usage_json = json.dumps(token_usage, ensure_ascii=False) if token_usage else None
                 self._conn.execute(
-                    """DELETE FROM messages WHERE id IN (
-                        SELECT id FROM messages
-                        WHERE conversation_id = ?
-                        ORDER BY id ASC
-                        LIMIT ?
-                    )""",
-                    (conversation_id, total - _MAX_MESSAGES_PER_CONVERSATION),
+                    """INSERT INTO messages (conversation_id, role, content, timestamp, token_usage)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (conversation_id, role, content, now, usage_json),
                 )
 
-            self._conn.commit()
+                # 更新對話的 updated_at 和 message_count
+                self._conn.execute(
+                    """UPDATE conversations
+                       SET updated_at = ?, message_count = message_count + 1,
+                           symbol = COALESCE(?, symbol),
+                           timeframe = COALESCE(?, timeframe)
+                       WHERE id = ?""",
+                    (now, symbol, timeframe, conversation_id),
+                )
+
+                # 如果是使用者的第一句話，更新標題
+                if role == "user":
+                    msg_count = self._conn.execute(
+                        "SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND role = 'user'",
+                        (conversation_id,),
+                    ).fetchone()[0]
+                    if msg_count == 1:
+                        title = content[:30] + ("..." if len(content) > 30 else "")
+                        self._conn.execute(
+                            "UPDATE conversations SET title = ? WHERE id = ?",
+                            (title, conversation_id),
+                        )
+
+                # 清理超出上限的舊訊息
+                total = self._conn.execute(
+                    "SELECT COUNT(*) FROM messages WHERE conversation_id = ?",
+                    (conversation_id,),
+                ).fetchone()[0]
+                if total > _MAX_MESSAGES_PER_CONVERSATION:
+                    self._conn.execute(
+                        """DELETE FROM messages WHERE id IN (
+                            SELECT id FROM messages
+                            WHERE conversation_id = ?
+                            ORDER BY id ASC
+                            LIMIT ?
+                        )""",
+                        (conversation_id, total - _MAX_MESSAGES_PER_CONVERSATION),
+                    )
+                # with self._conn: 結束時自動 COMMIT；若上面任一 execute 拋例外則自動 ROLLBACK
             return conversation_id
 
         except Exception as e:
