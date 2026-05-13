@@ -717,8 +717,28 @@ function TrackView({ pctileThreshold }: { pctileThreshold: number }) {
   const [result, setResult] = useState<TwTrackRangeResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [csvLoading, setCsvLoading] = useState(false);
+  // v127: 用戶可點 ✕ 暫時隱藏不想追蹤的標的（重新執行追蹤會復原）
+  const [removedCodes, setRemovedCodes] = useState<Set<string>>(new Set());
 
   const abortRef = useRef<(() => void) | null>(null);
+
+  // v127: 過濾掉用戶已刪除的標的
+  const visibleSymbols = result
+    ? result.symbols.filter((s) => !removedCodes.has(s.code))
+    : [];
+
+  const handleRemoveSymbol = useCallback((code: string) => {
+    setRemovedCodes((prev) => {
+      const next = new Set(prev);
+      next.add(code);
+      return next;
+    });
+  }, []);
+
+  const handleRestoreAll = useCallback(() => {
+    setRemovedCodes(new Set());
+    toast('已還原所有隱藏的標的', 'info');
+  }, []);
 
   const handleStart = useCallback(() => {
     if (!startDate || !endDate) { toast('請選擇日期範圍', 'warning'); return; }
@@ -733,6 +753,7 @@ function TrackView({ pctileThreshold }: { pctileThreshold: number }) {
     setProgress(null);
     setResult(null);
     setError(null);
+    setRemovedCodes(new Set());  // v127: 新追蹤、清空隱藏清單
 
     const handle = streamTwScanRange(
       { start_date: startDate, end_date: endDate, scope, pctile_threshold: pctileThreshold },
@@ -764,6 +785,39 @@ function TrackView({ pctileThreshold }: { pctileThreshold: number }) {
 
   const handleExportCsv = useCallback(async () => {
     if (!startDate || !endDate) return;
+    // v127: 若用戶有隱藏標的、改用前端組 CSV（後端重跑會包含已隱藏）
+    if (result && removedCodes.size > 0) {
+      const headers = ['代號', '名稱', '市場', '產業', '首次符合', '符合天數'];
+      for (const d of result.scan_dates) {
+        headers.push(`${d}_BB%`, `${d}_收盤`, `${d}_20日漲跌%`, `${d}_5日均量`);
+      }
+      const lines: string[] = [headers.join(',')];
+      for (const s of result.symbols) {
+        if (removedCodes.has(s.code)) continue;
+        const row: (string | number)[] = [
+          s.code, s.name, s.market, s.industry, s.first_match_date, s.match_count,
+        ];
+        for (const d of result.scan_dates) {
+          const f = s.daily_features[d];
+          row.push(
+            f?.bb_pctile ?? '', f?.close ?? '',
+            f?.change_20d ?? '', f?.vol_5d ?? '',
+          );
+        }
+        lines.push(row.join(','));
+      }
+      const csv = '﻿' + lines.join('\n');
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `tw_bb_track_${startDate}_to_${endDate}_${scope}_filtered.csv`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      toast(`CSV 下載完成（已排除 ${removedCodes.size} 檔隱藏標的）`, 'success');
+      return;
+    }
+    // 無隱藏 → 用後端原始邏輯下載（重跑、體積較小）
     setCsvLoading(true);
     try {
       await downloadTwScanRangeCSV({ start_date: startDate, end_date: endDate, scope, pctile_threshold: pctileThreshold });
@@ -773,7 +827,7 @@ function TrackView({ pctileThreshold }: { pctileThreshold: number }) {
     } finally {
       setCsvLoading(false);
     }
-  }, [startDate, endDate, scope, pctileThreshold]);
+  }, [startDate, endDate, scope, pctileThreshold, result, removedCodes]);
 
   const progressPct = progress ? Math.floor((progress.current / progress.total) * 100) : 0;
 
@@ -873,11 +927,28 @@ function TrackView({ pctileThreshold }: { pctileThreshold: number }) {
         )}
 
         {result && !running && (
-          <div className="text-sm" style={{ color: 'var(--text-secondary)' }}>
-            ✅ 追蹤完成：掃 <b style={{ color: 'var(--text-primary)' }}>{result.total_scanned}</b> 檔，
-            符合 <b style={{ color: 'var(--accent-blue)' }}>{result.total_matched}</b> 檔，
-            日期數 <b style={{ color: 'var(--text-primary)' }}>{result.scan_dates.length}</b>，
-            耗時 {result.duration_sec}s
+          <div className="text-sm flex items-center gap-2 flex-wrap" style={{ color: 'var(--text-secondary)' }}>
+            <span>
+              ✅ 追蹤完成：掃 <b style={{ color: 'var(--text-primary)' }}>{result.total_scanned}</b> 檔，
+              符合 <b style={{ color: 'var(--accent-blue)' }}>{result.total_matched}</b> 檔，
+              日期數 <b style={{ color: 'var(--text-primary)' }}>{result.scan_dates.length}</b>，
+              耗時 {result.duration_sec}s
+            </span>
+            {removedCodes.size > 0 && (
+              <>
+                <span style={{ color: 'var(--accent-orange, #f59e0b)' }}>
+                  ｜已隱藏 <b>{removedCodes.size}</b> 檔，顯示 <b>{visibleSymbols.length}</b> 檔
+                </span>
+                <button
+                  onClick={handleRestoreAll}
+                  className="px-2 py-0.5 rounded text-xs cursor-pointer hover:opacity-90"
+                  style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)' }}
+                  title="把所有隱藏的標的還原回來"
+                >
+                  🔄 還原全部
+                </button>
+              </>
+            )}
           </div>
         )}
       </div>
@@ -887,16 +958,20 @@ function TrackView({ pctileThreshold }: { pctileThreshold: number }) {
           <div className="text-center py-12" style={{ color: 'var(--text-secondary)' }}>
             {running ? '追蹤中… 結果會在完成後一次顯示' : '尚未追蹤。選好日期範圍 + 標的池後按「執行追蹤」'}
           </div>
-        ) : result.symbols.length === 0 ? (
+        ) : visibleSymbols.length === 0 ? (
           <div className="text-center py-12" style={{ color: 'var(--text-secondary)' }}>
-            此區間內無任何標的符合 BB% &lt; {pctileThreshold}% 條件
+            {removedCodes.size > 0
+              ? `所有 ${removedCodes.size} 檔標的都被隱藏了，點上方「🔄 還原全部」復原`
+              : `此區間內無任何標的符合 BB% < ${pctileThreshold}% 條件`}
           </div>
         ) : (
           <table className="text-sm" style={{ minWidth: '100%' }}>
             <thead style={{ color: 'var(--text-secondary)' }}>
               <tr className="border-b" style={{ borderColor: 'var(--border-color)' }}>
-                <th className="text-left py-2 px-2 sticky left-0 z-10" style={{ background: 'var(--bg-secondary)' }}>代號</th>
-                <th className="text-left py-2 px-2 sticky z-10" style={{ background: 'var(--bg-secondary)', left: '60px' }}>名稱</th>
+                {/* v127: 操作欄（X 刪除按鈕） */}
+                <th className="text-center py-2 px-1 sticky left-0 z-10" style={{ background: 'var(--bg-secondary)', width: '32px' }}></th>
+                <th className="text-left py-2 px-2 sticky z-10" style={{ background: 'var(--bg-secondary)', left: '32px' }}>代號</th>
+                <th className="text-left py-2 px-2 sticky z-10" style={{ background: 'var(--bg-secondary)', left: '92px' }}>名稱</th>
                 <th className="text-left py-2 px-2">首次符合</th>
                 <th className="text-center py-2 px-2">符合天數</th>
                 <th className="text-center py-2 px-2">走勢</th>
@@ -906,10 +981,21 @@ function TrackView({ pctileThreshold }: { pctileThreshold: number }) {
               </tr>
             </thead>
             <tbody style={{ color: 'var(--text-primary)' }}>
-              {result.symbols.map((s) => (
-                <tr key={s.code} className="border-b hover:brightness-110" style={{ borderColor: 'var(--border-color)' }}>
-                  <td className="py-1.5 px-2 font-mono sticky left-0" style={{ color: 'var(--accent-blue)', background: 'var(--bg-secondary)' }}>{s.code}</td>
-                  <td className="py-1.5 px-2 sticky whitespace-nowrap" style={{ background: 'var(--bg-secondary)', left: '60px' }}>{s.name}</td>
+              {visibleSymbols.map((s) => (
+                <tr key={s.code} className="border-b hover:brightness-110 group" style={{ borderColor: 'var(--border-color)' }}>
+                  {/* v127: X 刪除按鈕（hover 整行才明顯） */}
+                  <td className="py-1.5 px-1 text-center sticky left-0" style={{ background: 'var(--bg-secondary)', width: '32px' }}>
+                    <button
+                      onClick={() => handleRemoveSymbol(s.code)}
+                      className="px-1.5 py-0.5 rounded text-xs cursor-pointer opacity-30 hover:opacity-100 hover:bg-red-500/20"
+                      style={{ color: '#dc2626' }}
+                      title={`隱藏 ${s.code} ${s.name}（暫時、重跑復原）`}
+                    >
+                      ✕
+                    </button>
+                  </td>
+                  <td className="py-1.5 px-2 font-mono sticky" style={{ color: 'var(--accent-blue)', background: 'var(--bg-secondary)', left: '32px' }}>{s.code}</td>
+                  <td className="py-1.5 px-2 sticky whitespace-nowrap" style={{ background: 'var(--bg-secondary)', left: '92px' }}>{s.name}</td>
                   <td className="py-1.5 px-2 whitespace-nowrap text-xs">
                     {s.first_match_date}
                     {s.first_match_date === result.scan_dates[0] && <span title="範圍內首日就符合"> ✨</span>}
