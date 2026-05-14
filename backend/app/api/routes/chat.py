@@ -2594,6 +2594,62 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                 f"function_calls={len(response.function_calls)}"
             )
 
+            # v130: comprehensive_analysis 強制 call function 兜底（最多重試 1 次）
+            # 若 LLM 第一輪沒 call function 卻寫了實質內容，必然走純文字單段路徑、
+            # 跳過所有 v129 的完整性保護機制（seg1/seg2 / 段落驗證 / function 補齊），
+            # 且 LLM 在沒 function 數據下會編造 winrate/PF/IC 數字（fact_checker 抓到的場景）。
+            if (
+                "comprehensive_analysis" in _intents
+                and not response.function_calls
+                and len(response.message or "") > 200
+            ):
+                logger.warning(
+                    f"[v130] comprehensive_analysis 第一輪 function_calls=0 "
+                    f"(text_len={len(response.message)}), 強制重試 1 次"
+                )
+                yield _sse_event("status", {
+                    "message": "[重試] LLM 未呼叫必要函式，重新請求中...",
+                })
+                _retry_messages = list(messages) + [
+                    {"role": "assistant", "content": (response.message or "")[:500]},
+                    {"role": "user", "content": (
+                        "[系統強制] 你的上一輪回覆沒有呼叫任何 function，"
+                        "但 comprehensive_analysis 模式必須先呼叫以下函式取得真實數據："
+                        "detect_smc_structure、generate_scenarios、analyze_momentum、"
+                        "scan_conditional_probability、run_quant_research、compute_laddered_entries。"
+                        "**請現在呼叫這些 function**，再根據結果重寫完整分析。"
+                        "**禁止在沒有 function 結果的情況下編造任何具體數字**"
+                        "（winrate / PF / IC / Sharpe / MDD / RSI 數值 等）。"
+                    )},
+                ]
+                _retry_task = asyncio.create_task(adapter.chat(
+                    _retry_messages, chart_state=request.chart_state,
+                    system_prompt=_dynamic_prompt,
+                    chart_screenshot=request.chart_screenshot,
+                ))
+                _active_tasks.append(_retry_task)
+                _hb_sec = 0
+                while not _retry_task.done():
+                    await asyncio.sleep(3)
+                    _hb_sec += 3
+                    yield _sse_event("status", {
+                        "message": f"重試中... ({_hb_sec}秒)",
+                    })
+                _retry_response = _retry_task.result()
+                logger.info(
+                    f"[v130] 重試結果: 文字長度={len(_retry_response.message)}, "
+                    f"function_calls={len(_retry_response.function_calls)}"
+                )
+                if _retry_response.usage:
+                    if total_usage:
+                        total_usage.prompt_tokens += _retry_response.usage.prompt_tokens
+                        total_usage.completion_tokens += _retry_response.usage.completion_tokens
+                        total_usage.total_tokens += _retry_response.usage.total_tokens
+                    else:
+                        total_usage = _retry_response.usage
+                # 無論重試是否成功都用結果取代（避免無限循環）
+                response = _retry_response
+
             # 3. 如果 LLM 回傳了 function calls → 執行 → 二輪回應
             if response.function_calls:
                 # 第一輪若 LLM 同時寫了實質內容（例如 #1-#6 初稿），當 seg1 串給前端。
@@ -3322,6 +3378,35 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                         yield _sse_event("token", {"content": chunk})
                         await asyncio.sleep(0.02)
 
+                    # v130: 純文字單段路徑下對 comprehensive_analysis 做完整性檢測
+                    # （走到這代表方案 B 重試後 LLM 仍不 call function，至少留下警告線索）
+                    if "comprehensive_analysis" in _intents and display_text:
+                        if len(display_text) < 4000:
+                            logger.warning(
+                                f"[v130 純文字] comprehensive_analysis 字數過短 "
+                                f"{len(display_text)} < 4000，疑似 LLM 早收"
+                            )
+                            yield _sse_event("warning", {
+                                "message": f"完整分析內容偏短（{len(display_text)} 字、預期 ≥ 4000）",
+                                "type": "plain_text_too_short",
+                                "text_len": len(display_text),
+                            })
+                        _section_pattern = re.compile(r'(?:^|\n)\s*#\s*(\d+(?:\.5)?)\b')
+                        _found_sections = set(_section_pattern.findall(display_text))
+                        # 純文字單段走的是舊 6 段結構（function_defs.py:1576-1582）
+                        _expected_sections = {'1', '2', '3', '4', '5', '6'}
+                        _missing_sections = _expected_sections - _found_sections
+                        if _missing_sections:
+                            _missing_sorted = sorted(_missing_sections, key=lambda x: float(x))
+                            logger.warning(
+                                f"[v130 純文字] comprehensive_analysis 缺段落: {_missing_sorted}"
+                            )
+                            yield _sse_event("warning", {
+                                "message": f"分析報告缺少段落 #{', #'.join(_missing_sorted)}",
+                                "type": "plain_text_missing_sections",
+                                "missing": _missing_sorted,
+                            })
+
             # 4a. 三階段完整分析：程式化強制附加接續提示（不依賴 LLM）
             _deep_reminder = ""
             if "deep_phase1" in _intents or "deep_analysis" in _intents:
@@ -3470,6 +3555,16 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                             f"[fact_check] {len(mismatches)} mismatches in final_text "
                             f"(checked {fc['checked_count']})"
                         )
+                        # v130: 同步發 warning event 讓前端 toast / UI 警告也能聽到
+                        # （現有 fact_check event 與下方可見區塊都保留，職責不同：
+                        #  fact_check event → 給專用 UI 顯示完整 mismatch 列表；
+                        #  warning event → 給通用 toast / status bar 一句話警告；
+                        #  可見區塊 → 直接附加到報告底部讓用戶必看到）
+                        yield _sse_event("warning", {
+                            "message": f"⚠️ 報告含 {len(mismatches)} 處數字與真實數據不符，請務必複核",
+                            "type": "fact_check_mismatch",
+                            "count": len(mismatches),
+                        })
                         # v108 Phase 2：將 mismatch 列表組成可見區塊串流給使用者
                         _fc_lines = ["", "", "═══ ⚠️ 數值校驗異常（系統 fact-check）═══"]
                         for _m in mismatches[:8]:  # 最多顯示 8 條，避免淹沒

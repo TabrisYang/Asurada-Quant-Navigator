@@ -1589,13 +1589,18 @@ _PROMPT_MODULES["comprehensive_analysis"] = """
   - 結論段（#6）不重述前段內容，只做「跨維度交叉驗證 + 決策」
     例：「結構偏多（#2）+ 動能加速（#3）+ 趨勢策略樣本內勝率高（#4）+ IC 穩定（#5）→ 多頭證據齊備」
 
-★ 函式呼叫順序（按需呼叫，不重複；compare_strategies 已由系統預跑，不再呼叫）：
+★★★ 函式呼叫（v130：必呼叫、不可省略，否則視為失敗回應由系統強制重發）★★★
+回應前**必須**先呼叫以下函式取得真實數據，任一未呼叫 → 系統會自動重試 + 嚴重警告：
   1. detect_smc_structure       → 給 #2 用
   2. generate_scenarios          → 給 #2 用（情境預測併入結構段）
   3. analyze_momentum            → 給 #3 用
   4. scan_conditional_probability → 給 #4 用（補充預跑回測的條件機率視角）
   5. run_quant_research          → 給 #5 用（IC + WF + MC + 因子驗證一併取得）
   6. compute_laddered_entries    → 給 #6 用（後端算分批價，禁 LLM 推算）
+（compare_strategies 已由系統預跑，不需重呼叫）
+
+**絕對禁止無 function call 的情況下寫具體數字**（winrate / PF / IC / Sharpe / MDD / RSI 數值 等）。
+若 chart_state 已預載某指標值可直接引用，但 6 個函式仍需呼叫補完每段所需數據。
 
 ★ 字數預算（避免超長）：
   - #1 / #2 / #3：各 200-300 字
