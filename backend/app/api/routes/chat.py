@@ -43,6 +43,7 @@ from app.core.prediction_feedback import (
     generate_feedback_prompt, get_active_predictions_summary,
 )
 from app.core.backtest.parameter_optimizer import format_calibration_for_prompt
+from app.utils.timezone import taipei_now
 from app.models.schemas import ChatRequest, ChatResponse, TokenUsageResponse
 
 router = APIRouter()

@@ -105,7 +105,12 @@ def _check_prediction_against_df(pred: dict, df: pd.DataFrame, last_sweep_ts: Op
     if "timestamp" not in df.columns:
         return None
 
+    # created_at（及衍生的 min_check_time）是 tz-aware，CSV 的 timestamp 是 tz-naive。
+    # 直接比較會 raise「Invalid comparison between datetime64 and Timestamp」，
+    # 故把 df 時間統一 localize 到 Taipei tz 再比較。
     df_ts = pd.to_datetime(df["timestamp"], errors="coerce")
+    if df_ts.dt.tz is None:
+        df_ts = df_ts.dt.tz_localize(taipei_now().tzinfo)
     df_filtered = df[df_ts >= pd.Timestamp(min_check_time)].copy()
     if df_filtered.empty:
         return None
@@ -113,7 +118,10 @@ def _check_prediction_against_df(pred: dict, df: pd.DataFrame, last_sweep_ts: Op
     # 若有上次 sweep 時間，從那之後開始檢（避免重掃舊資料），但仍從 min_check_time 限制起
     if last_sweep_ts is not None:
         start_from = max(last_sweep_ts, min_check_time)
-        df_filtered = df_filtered[pd.to_datetime(df_filtered["timestamp"], errors="coerce") >= pd.Timestamp(start_from)].copy()
+        _ts2 = pd.to_datetime(df_filtered["timestamp"], errors="coerce")
+        if _ts2.dt.tz is None:
+            _ts2 = _ts2.dt.tz_localize(taipei_now().tzinfo)
+        df_filtered = df_filtered[_ts2 >= pd.Timestamp(start_from)].copy()
         if df_filtered.empty:
             return None
 
