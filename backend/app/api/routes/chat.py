@@ -2596,9 +2596,15 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
 
             # 3. 如果 LLM 回傳了 function calls → 執行 → 二輪回應
             if response.function_calls:
-                # 第一輪有 function calls 時，不串流佔位文字給用戶
-                # （第二輪會根據 function 結果產生完整報告）
+                # 第一輪若 LLM 同時寫了實質內容（例如 #1-#6 初稿），當 seg1 串給前端。
+                # 早期版本會丟棄此段假設它是「佔位文字」，但 LLM 行為不保證，
+                # 直接 stream 是穩健契約。同時不放入 round2_messages（見下方 v129）
+                # 以免 seg2 LLM 看到後從中段續寫、漏掉前半。
                 if response.message:
+                    yield _sse_event("token", {
+                        "content": response.message,
+                        "segment": 1,
+                    })
                     if len(final_text) < _MAX_FINAL_TEXT:
                         final_text += response.message[:_MAX_FINAL_TEXT - len(final_text)]
 
@@ -2736,8 +2742,10 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                         "role": "user",
                         "content": f"{_r2_symbol_hint}{_user_original}",
                     })
-                    if response.message:
-                        round2_messages.append({"role": "assistant", "content": response.message})
+                    # v129：不把第一輪 assistant 文字放進 round2。若放會讓 seg2 LLM
+                    # 看到 #1-#6 已寫過、自行從 #7 開始續寫，造成前端看到「跳段」。
+                    # 第一輪文字已透過 token event(segment=1) 串給前端，這裡只給 seg2
+                    # 看 user 原文 + tool 結果，由它完整重寫 #1-#11。
                     _r2_func_rule = (
                         "你可以繼續呼叫分析函式補充數據（如 detect_smc_structure、generate_scenarios 等），"
                         "也可以呼叫 annotate_chart、draw_pattern、manage_indicator 進行圖表繪製。"
@@ -2853,7 +2861,14 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                             if _evt.type == "text_delta":
                                 _r2_text_buf += _evt.text
                                 if not _r2_marker_seen:
-                                    _m = _MARKER_RE.search(_r2_text_buf, _r2_yielded_until)
+                                    # v129：限制 marker 只在文末 200 字內搜尋
+                                    # 避免 LLM 在中段（如 #5/#6）意外輸出 ---KEY_INSIGHTS---
+                                    # 把後續所有段落（#7-#11）全吞掉
+                                    _marker_search_start = max(
+                                        _r2_yielded_until,
+                                        len(_r2_text_buf) - 200,
+                                    )
+                                    _m = _MARKER_RE.search(_r2_text_buf, _marker_search_start)
                                     if _m:
                                         # yield 標記之前的文字，然後停止 yield（本段內）
                                         if _m.start() > _r2_yielded_until:
@@ -2906,13 +2921,14 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                                 "next_label": _seg_labels.get(_next_seg, ""),
                             })
 
-                            # v125-B: seg1→seg2 切換 SSE idle 風險點 — 主動 emit 3 次心跳
+                            # v125-B → v129: seg1→seg2 切換 SSE idle 風險點 — 主動 emit 心跳
                             # adapter.chat_stream_events 對 seg2 會 spawn 新 Claude CLI subprocess
                             # （5-30s 啟動 + LLM TTFT），這段 SSE idle 是 v122 心跳機制覆蓋不到的縫
-                            # （_stream_with_heartbeat 只在 adapter 已啟動後生效）
-                            for _hb_i in range(3):
+                            # （_stream_with_heartbeat 只在 adapter 已啟動後生效）。
+                            # v129：心跳次數從 3 拉到 20（4.5s → 30s），覆蓋 subprocess 最壞啟動情況
+                            for _hb_i in range(20):
                                 yield _sse_event("status", {
-                                    "message": f"準備第 {_next_seg} 段（{_seg_labels.get(_next_seg, '完整詳細分析')}）... ({_hb_i+1}/3)",
+                                    "message": f"準備第 {_next_seg} 段（{_seg_labels.get(_next_seg, '完整詳細分析')}）... ({_hb_i+1}/20)",
                                     "phase": "seg_warmup",
                                 })
                                 await asyncio.sleep(1.5)
@@ -2933,6 +2949,28 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                             })
                         else:
                             logger.info(f"[v125-B] seg2 字數驗證通過：{_seg2_len} 字 ≥ 4000")
+
+                        # v129: seg2 段落完整性檢測 — 字數夠但段落仍可能缺
+                        # 用「#N」標題正則掃描 seg2，比對預期 12 段（含 #5.5、#6.5）
+                        _seg2_text_only = _r2_text_buf[_seg1_end:]
+                        _section_pattern = re.compile(r'(?:^|\n)\s*#\s*(\d+(?:\.5)?)\b')
+                        _found_sections = set(_section_pattern.findall(_seg2_text_only))
+                        _expected_sections = {'1', '2', '3', '4', '5', '5.5', '6', '6.5', '7', '8', '9', '10', '11'}
+                        _missing_sections = _expected_sections - _found_sections
+                        if _missing_sections:
+                            _missing_sorted = sorted(_missing_sections, key=lambda x: float(x))
+                            _found_sorted = sorted(_found_sections, key=lambda x: float(x) if x.replace('.', '').isdigit() else 99)
+                            logger.warning(
+                                f"[seg2 完整性] 缺少段落: {_missing_sorted}（found={_found_sorted}）"
+                            )
+                            yield _sse_event("warning", {
+                                "message": f"分析報告缺少段落 #{', #'.join(_missing_sorted)}",
+                                "type": "seg2_missing_sections",
+                                "missing": _missing_sorted,
+                                "found": _found_sorted,
+                            })
+                        else:
+                            logger.info(f"[seg2 完整性] 全 13 段（含 #5.5、#6.5）皆到齊")
 
                     # 建構 response2 物件相容後續既有邏輯
                     class _StreamedResponse:
