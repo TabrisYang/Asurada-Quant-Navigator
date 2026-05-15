@@ -5,6 +5,7 @@ import type { ReactNode, ErrorInfo } from 'react';
 import TopBar from './components/TopBar';
 import OnboardingGuide, { useOnboarding } from './components/OnboardingGuide';
 import { ToastContainer } from './components/Toast';
+import V132EvalBanner from './components/V132EvalBanner';
 import { useChartStore } from './stores/chartStore';
 import { calculateIndicator } from './services/api';
 
@@ -164,6 +165,11 @@ function App() {
 
   return (
     <div className="flex flex-col h-screen" style={{ background: 'var(--bg-primary)' }}>
+      {/* v132 編排管線 2 週評估 banner（pending 狀態下不渲染） */}
+      <ErrorBoundary name="v132 評估狀態">
+        <V132EvalBanner />
+      </ErrorBoundary>
+
       {/* 頂部工具列 */}
       <ErrorBoundary name="頂部工具列">
         <div data-guide="topbar">

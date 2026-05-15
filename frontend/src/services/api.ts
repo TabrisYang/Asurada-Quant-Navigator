@@ -1723,4 +1723,45 @@ export async function fetchDownloadedSymbols(): Promise<{ symbol: string; record
   }
 }
 
+// ===== v132 編排管線 2 週評估狀態 =====
+
+export type V132EvalStatus = 'pending' | 'scheduled' | 'passed' | 'degraded' | 'error';
+
+export interface V132EvalStatusResponse {
+  status: V132EvalStatus;
+  target_date?: string;
+  message?: string;
+  evaluated_at?: string;
+  has_degradation?: boolean;
+  baseline?: string;
+  new_report?: string;
+  log_tail?: string;
+}
+
+/** 取得 v132 編排管線 2 週評估狀態（讀 launchd 寫的 marker）。 */
+export async function fetchV132EvalStatus(): Promise<V132EvalStatusResponse> {
+  try {
+    const res = await api.get('/system/v132_eval_status');
+    return res.data as V132EvalStatusResponse;
+  } catch (err) {
+    return {
+      status: 'error',
+      message: extractErrorMessage(err, '評估狀態讀取失敗'),
+    };
+  }
+}
+
+export interface V132RollbackResponse {
+  ok: boolean;
+  changed: boolean;
+  needs_restart: boolean;
+  message: string;
+}
+
+/** 一鍵回滾 v132：把 .env 的 COMPREHENSIVE_PIPELINE_ENABLED 改 false（不自動重啟後端）。 */
+export async function triggerV132Rollback(): Promise<V132RollbackResponse> {
+  const res = await api.post('/system/v132_rollback');
+  return res.data as V132RollbackResponse;
+}
+
 export default api;
