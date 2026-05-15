@@ -1826,6 +1826,79 @@ _PROMPT_MODULES["comprehensive_analysis_seg2"] = """
 """
 
 
+# ─── comprehensive_synthesis（編排管線 — reduce 階段）──────────
+# 取代 seg2 monolith 的 #6-#11 段。輸入為 5 個維度 focused call 的輸出全文 +
+# seg1 的 30 秒卡原文 + compute_laddered_entries 結果。
+_PROMPT_MODULES["comprehensive_synthesis"] = """
+【★★★ 全部分析 — Synthesis（跨維度整合 + 決策）★★★】
+
+系統已用 5 次獨立的 focused 呼叫產生了 5 個維度的深度分析（市場環境 / 結構 / 動能 / 多策略回測 / 量化研究），
+其全文已附在對話中。第 1 段的「30 秒結論卡」也已附上。
+這次呼叫**不重做任何維度分析**，只做「整合 + 決策」。
+
+★ 嚴格規則：
+  ❌ 禁止重複 5 個維度的細節數值（它們已輸出，使用者看得到）
+  ❌ 禁止重複「30 秒結論卡」與「分批進場表」（已在第 1 段輸出）
+  ✅ 開頭加「（接續：跨維度整合）」標示
+  ✅ 所有數字必須能對應到 5 維度報告 / 30 秒卡 / chart_state，禁止編造
+
+★★★ 全局連貫硬規則（最高優先級）★★★
+  5 個維度是獨立呼叫產生的，彼此沒看過對方。你的首要職責是**主動偵測並標示維度間的矛盾**：
+  - 逐維度比對方向結論（看多 / 看空 / 中性）
+  - 若有矛盾（例：動能段判定動能轉強、市場環境段判定 regime 轉弱）→ **必須在 #6 明說分歧**，
+    並評估「哪個維度在當前情境下更具主導性」，給出加權後的淨判斷
+  - 嚴禁無視矛盾、各說各話地拼貼 5 段結論
+
+★ 必須輸出（依序）：
+
+  #6 🎯 跨維度結論
+     - 「跨維度交叉驗證表」格式（最少 8 列）：維度 / 方向 / 關鍵證據 / 可信度
+     - 表後加「⚠️ 維度矛盾」段：逐條列出偵測到的方向衝突 + 主導性評估（無矛盾則寫「5 維度方向一致」）
+     - 最後給「淨判斷：[方向] / [信心] / 證據齊備度 X/5」
+
+  #6.5 🤖 RL 戰略結論（依 chart_state.rl_strategic_insight）：
+     - 存在：模型推論機率 / 模式 / SHAP 主要驅動因子 / 歷史相似情境 / 衝突警示 / 倉位調整
+     - 不存在或 data_status 非 ok → 段落標題 + 「⚠️ 資料不可得：[原因]」，不可省略段落
+
+  #7 📋 正式結論卡（v100 結構化結論卡，格式見 CORE prompt）
+     - 方向 / 信心 / 倉位 **必須與第 1 段 30 秒卡完全一致**（30 秒卡為錨點，不可矛盾）
+     - 低信心 → 改用「⚠️ 建議觀望」格式
+     - 「📈 系統參考：」寫成佔位文字，後端會替換實際命中率，不要自填數字
+
+  #8 ⚠️ 策略風險與前提假設
+     - 必含「風險清單嚴重度表」格式（最少 5 列）：# / 風險項 / 嚴重度 / 觸發條件
+
+  #9 🎓 延伸學習建議（1-2 個可進一步探索的相關主題）
+
+  #10 📊 完整分析摘要表（綜合 5 維度 + #6-#9 的結論，一表收斂）
+
+  #11 🎯 附錄：4 種高機率進場策略（獨立於主推薦的次推薦）
+     依當前 regime + chart_state 給 4 個策略，每個含：適用條件 / 進場價 / 止損 / 停利 / 預估勝率 / 為何適合當下。
+     A. SMC Demand Zone 回測進場（trending_up 超買時等回調）
+     B. RSI 雙背離 + 爆量確認（短期超賣後反彈）
+     C. 三重確認突破（趨勢延續、防假突破）
+     D. 均值回歸 BB 下軌 + RSI 超賣 + StochRSI 反轉（ranging / 超賣反彈）
+     每策略結尾加：「⚠️ 適用條件需自行驗證當下是否滿足；勝率參考僅供統計參考。」
+
+★ 字數預算：1200-1800 字（純整合 + 決策，不重述維度細節）。
+★ 結尾以「附錄：4 種高機率進場策略」結束，不再加任何額外段落。
+"""
+
+
+# ─── 編排管線維度共用尾規格 ──────────────────────────────
+# assemble_dimension_prompt 會把這段附加到每個維度 prompt 之後（連貫性保險 #2）。
+_DIMENSION_TAIL_SPEC = """
+【★ 編排管線維度規格 — 強制遵守 ★】
+你正在產出「全部分析」的**其中一個維度**（非完整報告）。系統會另跑其他維度 + 一個整合呼叫。
+1. 只深入分析「本維度」，用上方模組指定的專屬輸出格式，做到單獨深度分析的品質與篇幅。
+2. **禁止**輸出跨維度交叉驗證表、正式結論卡、30 秒結論卡、分批進場表 — 那是整合階段的職責。
+3. **結尾必須加一行「🔻 本維度失效條件：[具體條件]」** — 寫明什麼情況會推翻本維度的判斷，
+   讓這段拆出來也能獨立成立。
+4. 所有具體數字必須來自系統提供的 function 結果 / chart_state，禁止編造；無資料寫「無資料」。
+5. 預期篇幅：800-1500 字（依本維度模組的格式要求）。
+"""
+
+
 _PROMPT_MODULES["teaching"] = """
 【教學模式 — 面向學習者的解說】
 你目前處於教學模式。除了正常分析，你必須額外做到：
@@ -2065,6 +2138,23 @@ _DOMINANCE: dict[str, list[str]] = {
 }
 
 
+# ═══════════════════════════════════════════════════════
+# 編排管線（map-reduce）— 全部分析 seg2 拆成 5 個維度 focused call
+# ═══════════════════════════════════════════════════════
+# 每個維度載入自己的專用 _mode 模組（品質對齊「單獨問該維度」），
+# 由 assemble_dimension_prompt 組裝。reduce 階段用 comprehensive_synthesis。
+_PIPELINE_DIMENSIONS: dict[str, list[str]] = {
+    "regime":    ["regime_v2", "analysis_v2", "regime_analysis_mode"],
+    "structure": ["smc", "scenario"],
+    "momentum":  ["momentum_analysis_mode", "conditional_prob"],
+    "backtest":  ["strategy_backtest_mode", "backtest", "auto_backtest", "risk_checklist"],
+    "quant":     ["factor_validation_mode", "quant_research", "factor_validation", "alpha_monitor"],
+}
+
+# 維度執行順序（決定 bubble 顯示順序 / segment 編號）
+_PIPELINE_DIMENSION_ORDER = ("regime", "structure", "momentum", "backtest", "quant")
+
+
 def assemble_system_prompt(
     intents: set[str], teaching_mode: bool = False, segment: int = 0,
 ) -> str:
@@ -2108,6 +2198,38 @@ def assemble_system_prompt(
     return static + dynamic
 
 
+def assemble_dimension_prompt(dimension: str, teaching_mode: bool = False) -> str:
+    """組裝編排管線「單一維度」focused call 的 system prompt。
+
+    載入該維度的專用模組（含 _mode 模組）+ 共用維度尾規格 _DIMENSION_TAIL_SPEC。
+    複用 assemble_system_prompt_split 以保留 _DOMINANCE 處理與 prompt caching 結構。
+
+    Args:
+        dimension: _PIPELINE_DIMENSIONS 的 key（regime / structure / momentum / backtest / quant）
+        teaching_mode: 啟用教學模式
+    """
+    modules = _PIPELINE_DIMENSIONS.get(dimension)
+    if not modules:
+        raise ValueError(f"unknown pipeline dimension: {dimension!r}")
+    modules_needed = set(modules)
+    modules_needed.add("data_sync_mode")
+    if teaching_mode:
+        modules_needed.add("teaching")
+
+    static, dynamic = assemble_system_prompt_split(modules_needed)
+    # 維度尾規格附在 static 段（內容穩定、可 cache），時間戳仍置於最後
+    return static + "\n" + _DIMENSION_TAIL_SPEC + dynamic
+
+
+def assemble_synthesis_prompt(teaching_mode: bool = False) -> str:
+    """組裝編排管線 reduce 階段（synthesis）的 system prompt。"""
+    modules_needed = {"comprehensive_synthesis", "risk_checklist", "data_sync_mode"}
+    if teaching_mode:
+        modules_needed.add("teaching")
+    static, dynamic = assemble_system_prompt_split(modules_needed)
+    return static + dynamic
+
+
 # 固定順序確保 prompt 結構一致（模組層常數，給 split 函式用）
 _MODULE_ORDER = (
     "teaching",
@@ -2118,6 +2240,7 @@ _MODULE_ORDER = (
     "comprehensive_analysis",  # ★ 全部分析統合 prompt（位置在三階段之後、其他細節之前）
     "comprehensive_analysis_seg1",  # S2: 全部分析第 1 段（30 秒結論卡 + 倉位）
     "comprehensive_analysis_seg2",  # S2: 全部分析第 2 段（完整詳細分析）
+    "comprehensive_synthesis",  # 編排管線 reduce 階段（取代 seg2 monolith 的 #6-#11）
     "drawing", "event_analysis", "conditional_prob", "scenario", "smc",
     "quant_research", "calibrate", "backtest",
     "sector_analysis",

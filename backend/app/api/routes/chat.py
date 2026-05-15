@@ -2839,8 +2839,15 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
 
                     # S1: 分段判定 — 「全部分析」拆成兩段（30 秒結論卡 + 完整詳細分析）
                     # 其他 intent 走原單段邏輯（segment=0）
+                    # v132: comprehensive_pipeline flag 開 → seg1 照跑、seg2 monolith 改走編排管線
                     _is_comprehensive = "comprehensive_analysis" in _intents
-                    _segments_to_run: list[int] = [1, 2] if _is_comprehensive else [0]
+                    _use_pipeline = _is_comprehensive and settings.comprehensive_pipeline_enabled
+                    if _use_pipeline:
+                        _segments_to_run = [1]            # seg1 仍由本迴圈跑，seg2 交給 pipeline
+                    elif _is_comprehensive:
+                        _segments_to_run = [1, 2]
+                    else:
+                        _segments_to_run = [0]
                     _seg_labels = {
                         0: "完整分析",
                         1: "第 1 段（核心結論）",
@@ -2989,6 +2996,53 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                                     "phase": "seg_warmup",
                                 })
                                 await asyncio.sleep(1.5)
+
+                    # ═══ v132 編排管線：seg1 之後跑 map-reduce pipeline 取代 seg2 monolith ═══
+                    # 5 維度 focused call（並行）+ synthesis call。每維度品質對齊「單獨問」。
+                    # pipeline 自行 emit status/token/segment_complete/warning，並以
+                    # ("_pipeline_result", {...}) 終結事件帶回全文與 usage。
+                    if _use_pipeline:
+                        _seg1_card_text = _r2_text_buf  # seg1 是本迴圈唯一跑過的段
+                        _pipeline_full_text = ""
+                        try:
+                            from app.core.llm.comprehensive_pipeline import run_pipeline
+                            async for _evt_type, _payload in run_pipeline(
+                                adapter=adapter,
+                                user_message=_user_original,
+                                chart_state=request.chart_state,
+                                function_calls=response.function_calls,
+                                exec_result=exec_result,
+                                seg1_card_text=_seg1_card_text,
+                                pre_backtest_summary=locals().get("_pre_bt_summary", "") or "",
+                                teaching_mode=_teaching,
+                                chart_symbol=chart_symbol or "",
+                                chart_timeframe=chart_timeframe_ctx or "",
+                            ):
+                                if _evt_type == "_pipeline_result":
+                                    _pipeline_full_text = _payload.get("full_text", "") or ""
+                                    _pl_usage = _payload.get("usage") or {}
+                                    if _pl_usage and total_usage:
+                                        total_usage.prompt_tokens += _pl_usage.get("prompt_tokens", 0)
+                                        total_usage.completion_tokens += _pl_usage.get("completion_tokens", 0)
+                                        total_usage.total_tokens += _pl_usage.get("total_tokens", 0)
+                                    continue
+                                yield _sse_event(_evt_type, _payload)
+                        except Exception as _pl_err:
+                            import traceback as _pl_tb
+                            logger.error(
+                                f"[v132 pipeline] 執行失敗: {_pl_err}\n{_pl_tb.format_exc()}"
+                            )
+                            yield _sse_event("warning", {
+                                "message": f"編排管線執行失敗：{_pl_err}",
+                                "type": "pipeline_failed",
+                            })
+                        # pipeline 全文併入 _r2_text_buf（給持久化 / fact-check / 預測追蹤用）
+                        if _pipeline_full_text:
+                            _r2_text_buf += "\n\n" + _pipeline_full_text
+                        logger.info(
+                            f"[v132 pipeline] 完成，全文長度={len(_pipeline_full_text)}，"
+                            f"_r2_text_buf 總長={len(_r2_text_buf)}"
+                        )
 
                     # v125-B: seg2 字數完整性檢查
                     # 預期 seg2 ≥ 4000 字（涵蓋 12 段詳細分析）；不足表示 streaming 中斷或 LLM 早收

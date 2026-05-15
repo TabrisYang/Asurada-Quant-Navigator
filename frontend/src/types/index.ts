@@ -127,8 +127,9 @@ export interface ChatMessage {
     total: number;
     current_task: string;
   };
-  // S3: 分段輸出（「全部分析」會分成 1=核心結論 / 2=完整詳細分析）
-  segment?: 1 | 2;
+  // S3 → v132: 分段輸出。舊 monolith：1=核心結論 / 2=完整詳細分析。
+  // 編排管線：1=30 秒卡 / 2-6=5 維度深度分析 / 7=跨維度整合
+  segment?: number;
   segmentComplete?: boolean;  // 該段是否已完成
   segmentLabel?: string;       // 段落標題（例「第 1 段：核心結論」）
   // v125-A: seg2 streaming 中斷 / 字數不足時標記，前端 UI 可顯示警告樣式

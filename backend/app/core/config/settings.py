@@ -106,6 +106,11 @@ class Settings(BaseSettings):
     # 沒檔自動 fallback 經驗值。設 False 強制走經驗值。
     bias_score_data_driven_weights: bool = True
 
+    # v132：完整分析「編排管線」— 把 seg2 monolith（13 段一次出）拆成
+    # 5 個維度 focused call + 1 個 synthesis call，每維度品質對齊「單獨問」。
+    # 預設 False（灰度）；確認 shadow mode 不劣化後再切 True。
+    comprehensive_pipeline_enabled: bool = False
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",

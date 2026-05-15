@@ -525,12 +525,12 @@ export default function ChatInterface() {
 
     let accumulatedText = '';
     let doneReceived = false;
-    // v125-A: seg2 獨立 bubble 狀態
-    // assistantMsgId / accumulatedText 給 seg1 用；以下兩個 ref 給 seg2 用
-    let seg2MsgId: string | null = null;
-    let seg2Text = '';
-    let activeSegment: 1 | 2 = 1;  // 由 onSegmentComplete 切到 2、由 segment-aware onToken 維護
-    let warnedSeg2Incomplete = false;  // v125-B warning event 已收過就不再 onDone 重複偵測
+    // v125-A → v132: 多段輸出狀態。seg1（30 秒卡）固定用 assistantMsgId / accumulatedText；
+    // segment ≥ 2 用 map（舊 monolith 只有 seg2；新編排管線有 2-6 五維度 + 7 synthesis）。
+    const segBubbles = new Map<number, string>();  // segment 號 → bubble message id
+    const segTexts = new Map<number, string>();    // segment 號 → 累積文字
+    let activeSegment = 1;  // 由 onSegmentComplete 切換、由 segment-aware onToken 維護
+    let warnedSegIncomplete = false;  // 後端已送 warning event → onDone 不重複偵測
 
     // ★ 建立對話歷史：只送出「最後一次切換標的」之後的對話，避免不同標的混淆
     const currentMessages = useChartStore.getState().messages;
@@ -589,14 +589,17 @@ export default function ChatInterface() {
           });
         },
 
-        onToken: (content: string, segment?: 1 | 2) => {
-          // v125-A: 依後端 segment 欄位路由 token 到正確的 message bubble
-          // - segment===2 寫進 seg2MsgId（若已建立）
-          // - 其餘（segment===1 / undefined / seg2MsgId 未建立）寫進 seg1（assistantMsgId）
-          if (segment === 2 && seg2MsgId) {
-            seg2Text += content;
-            updateMessage(seg2MsgId, {
-              content: seg2Text,
+        onToken: (content: string, segment?: number) => {
+          // v132: 依後端 segment 欄位路由 token 到正確的 message bubble
+          // - segment ≥ 2 且該 bubble 已建立 → 寫進 segBubbles 對應 bubble
+          // - 其餘（segment 1 / undefined / bubble 未建立）→ 寫進 seg1（assistantMsgId）
+          const seg = segment ?? activeSegment;
+          const segMsgId = seg >= 2 ? segBubbles.get(seg) : undefined;
+          if (segMsgId) {
+            const next = (segTexts.get(seg) ?? '') + content;
+            segTexts.set(seg, next);
+            updateMessage(segMsgId, {
+              content: next,
               isThinking: false,
               isStreaming: true,
               statusText: undefined,
@@ -741,19 +744,22 @@ export default function ChatInterface() {
 
         onDone: (_convId?: string, hints?: Record<string, unknown>) => {
           doneReceived = true;
-          // v125-A：把 seg1 + seg2 兩個 bubble 都收尾
+          // v132：收尾 seg1 + 所有 segment ≥ 2 的 bubble
           updateMessage(assistantMsgId, {
             isThinking: false,
             isStreaming: false,
             statusText: undefined,
           });
-          if (seg2MsgId) {
-            // A.3：onDone 時驗證 seg2 完整性（字數 ≥ 4000 + 含關鍵字）
-            // 若後端 B.2 已送 warning event（warnedSeg2Incomplete=true）→ 不重複偵測
+          // 舊 monolith 路徑（只有 seg2 一個額外 bubble）→ 沿用 4000 字啟發式完整性檢測。
+          // 新編排管線（segBubbles 有 2-6 維度 + 7 synthesis）→ 後端已逐段 emit warning，
+          // 各維度本來就只有 ~800-1500 字，不適用 4000 字門檻，故僅做收尾。
+          const isMonolithSeg2 = segBubbles.size === 1 && segBubbles.has(2);
+          if (isMonolithSeg2 && !warnedSegIncomplete) {
+            const seg2MsgId = segBubbles.get(2)!;
+            const seg2Text = segTexts.get(2) ?? '';
             const hasSeg2Keyword = /#1|#2|📊\s*市場環境|🏛\s*結構|⚡\s*動能/.test(seg2Text);
             const isShort = seg2Text.length < 4000;
-            const isIncomplete = !warnedSeg2Incomplete && (isShort || !hasSeg2Keyword);
-            if (isIncomplete) {
+            if (isShort || !hasSeg2Keyword) {
               const note = (
                 `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
                 `⚠️ **第 2 段（完整分析）可能不完整**\n` +
@@ -761,13 +767,16 @@ export default function ChatInterface() {
                 `streaming 可能中途中斷。可重新對相同標的送出「全部分析」重生第 2 段。\n` +
                 `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
               );
-              seg2Text += note;
+              segTexts.set(2, seg2Text + note);
               updateMessage(seg2MsgId, {
-                content: seg2Text,
+                content: seg2Text + note,
                 segmentIncomplete: true,
               });
             }
-            updateMessage(seg2MsgId, {
+          }
+          // 收尾所有 segment ≥ 2 的 bubble
+          for (const segMsgId of segBubbles.values()) {
+            updateMessage(segMsgId, {
               isThinking: false,
               isStreaming: false,
               statusText: undefined,
@@ -840,45 +849,59 @@ export default function ChatInterface() {
           updateMessage(assistantMsgId, { content: String(currentMsg.content || '') + note });
         },
 
-        // v125-A：第 1 段完成 → 結束 seg1 bubble、新建 seg2 bubble
-        // 之前的版本：所有 token 都寫進同一個 bubble、seg2 streaming 中斷時整段被污染、用戶不知道
-        // 新版本：seg1 與 seg2 是獨立 message，seg2 streaming 即使中斷、seg1 仍完整
+        // v125-A → v132：某段完成 → 結束該段 bubble、新建下一段 bubble
+        // 舊 monolith：seg1 → seg2 兩段。新編排管線：seg1 → 5 維度 → synthesis 共 7 段。
+        // 每段獨立 message，後段 streaming 中斷不污染前段。
         onSegmentComplete: (data) => {
-          const nextLabel = data.next_label || '完整詳細分析';
-          // 1. 結束 seg1 bubble
-          updateMessage(assistantMsgId, {
-            content: accumulatedText,
-            isStreaming: false,
-            segment: data.segment as 1 | 2,
-            segmentComplete: true,
-            statusText: undefined,
-          });
-          // 2. 新建 seg2 bubble（content 開頭加上「（接續第 X 段）」標籤、與後端 prompt 對齊）
-          const newSeg2Id = `assistant-seg2-${Date.now()}`;
-          seg2MsgId = newSeg2Id;
-          seg2Text = '';
-          activeSegment = 2;
-          streamingMsgIdRef.current = newSeg2Id;
-          const seg2InitMsg: ChatMessage = {
-            id: newSeg2Id,
+          const doneSeg = data.segment;
+          const nextSeg = data.next_segment;
+          const nextLabel = data.next_label || `第 ${nextSeg} 段`;
+          // 1. 結束已完成段的 bubble（seg1 用 assistantMsgId，其餘查 segBubbles）
+          const doneMsgId = doneSeg === 1 ? assistantMsgId : segBubbles.get(doneSeg);
+          if (doneMsgId) {
+            const doneText = doneSeg === 1 ? accumulatedText : (segTexts.get(doneSeg) ?? '');
+            updateMessage(doneMsgId, {
+              content: doneText,
+              isStreaming: false,
+              segment: doneSeg,
+              segmentComplete: true,
+              statusText: undefined,
+            });
+          }
+          // 2. 新建下一段 bubble
+          const newId = `assistant-seg${nextSeg}-${Date.now()}`;
+          segBubbles.set(nextSeg, newId);
+          segTexts.set(nextSeg, '');
+          activeSegment = nextSeg;
+          streamingMsgIdRef.current = newId;
+          const nextInitMsg: ChatMessage = {
+            id: newId,
             role: 'assistant',
             content: '',
             timestamp: new Date().toISOString(),
             isThinking: false,
             isStreaming: true,
-            segment: data.next_segment as 1 | 2,
-            statusText: `第 ${data.next_segment} 段「${nextLabel}」生成中...`,
+            segment: nextSeg,
+            statusText: `${nextLabel}生成中...`,
           };
-          addMessage(seg2InitMsg);
+          addMessage(nextInitMsg);
         },
 
-        // v125-B：seg2 字數不足 warning（後端 _r2_text_buf < 4000 字 emit）
+        // v125-B → v132：後端 warning event（維度不完整 / synthesis 不完整 / 字數不足等）
+        // 一律附加到當前 active 段的 bubble；標記 warnedSegIncomplete 讓 onDone 不重複偵測
         onWarning: (data) => {
-          if (data.type === 'seg2_incomplete' && seg2MsgId) {
-            warnedSeg2Incomplete = true;
-            const note = `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚠️ **${data.message}**\n（streaming 可能中斷，建議重生第 2 段）\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
-            seg2Text += note;
-            updateMessage(seg2MsgId, { content: seg2Text, segmentIncomplete: true });
+          warnedSegIncomplete = true;
+          const seg = activeSegment;
+          const msgId = seg === 1 ? assistantMsgId : segBubbles.get(seg);
+          if (!msgId) return;
+          const note = `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚠️ **${data.message}**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
+          if (seg === 1) {
+            accumulatedText += note;
+            updateMessage(msgId, { content: accumulatedText, segmentIncomplete: true });
+          } else {
+            const next = (segTexts.get(seg) ?? '') + note;
+            segTexts.set(seg, next);
+            updateMessage(msgId, { content: next, segmentIncomplete: true });
           }
         },
       },

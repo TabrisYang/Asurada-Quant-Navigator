@@ -131,8 +131,9 @@ export interface StreamCallbacks {
   onThinking?: () => void;
   onStatus?: (message: string) => void;
   onProgress?: (progress: ProgressInfo) => void;
-  // v125-A: token 加 segment 參數，讓 ChatInterface 把 seg2 token 路由到獨立 message bubble
-  onToken?: (content: string, segment?: 1 | 2) => void;
+  // v125-A → v132: token 加 segment 參數，讓 ChatInterface 把各段 token 路由到獨立 message bubble
+  // 編排管線下 segment 可為 1（30 秒卡）/ 2-6（5 維度）/ 7（synthesis）
+  onToken?: (content: string, segment?: number) => void;
   onFunctionCalls?: (calls: Array<{ name: string; arguments: Record<string, unknown> }>) => void;
   onChartUpdates?: (updates: Record<string, unknown>) => void;
   onUsage?: (usage: TokenUsage) => void;
@@ -400,8 +401,9 @@ function _handleSSEEvent(
       break;
     case 'token':
       if (typeof data.content === 'string') {
-        // v125-A: 傳遞 segment 給 onToken，讓前端能路由 seg2 token 到獨立 message bubble
-        const _seg = data.segment === 1 || data.segment === 2 ? (data.segment as 1 | 2) : undefined;
+        // v132: 傳遞 segment 給 onToken，讓前端能路由各段 token 到獨立 message bubble
+        // （編排管線：seg1=1, 5 維度=2-6, synthesis=7）
+        const _seg = typeof data.segment === 'number' ? data.segment : undefined;
         callbacks.onToken?.(data.content, _seg);
       }
       break;
