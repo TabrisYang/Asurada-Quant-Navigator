@@ -95,9 +95,10 @@ const ANALYSIS_CATEGORIES = [
       { label: '因子驗證與監控', prompt: '驗證 {symbol} 當前哪些因子有效、哪些已衰退' },
       // ★ A2：sequence 欄位讓按鈕真正依序執行 phase 1 → 2 → 3（透過 messageQueue 自動接力）
       { label: '完整分析三階段', prompt: '完整分析一 {symbol}', sequence: ['完整分析一 {symbol}', '完整分析二 {symbol}', '完整分析三 {symbol}'] },
-      // ★ v133 A+：補足 v132 編排管線排除的維度（基本面 / 族群 / 事件型態）
+      // ★ v133 A+：補足 v132 編排管線排除的維度（基本面 / 族群 / 事件型態 / 校準 / 分批）
       // 注意：「全部分析」keyword 觸發 comprehensive_analysis intent，「完整分析」會誤觸 deep_analysis
-      { label: '一鍵連跑：技術 + 基本面 + 族群 + 事件', prompt: '對 {symbol} 進行全部分析', sequence: ['對 {symbol} 進行全部分析（v132 5 維度技術面編排）', '對 {symbol} 進行基本面分析', '分析 {symbol} 所屬族群的技術面與相對強弱', '分析 {symbol} 歷史大漲大跌前的共通特徵'] },
+      // 6 條 sequence = 28 個 item 100% 涵蓋（含工具型 校準 + 分批）
+      { label: '一鍵連跑：技術 + 基本面 + 族群 + 事件 + 校準 + 分批', prompt: '對 {symbol} 進行全部分析', sequence: ['對 {symbol} 進行全部分析（v132 5 維度技術面編排）', '對 {symbol} 進行基本面分析', '分析 {symbol} 所屬族群的技術面與相對強弱', '分析 {symbol} 歷史大漲大跌前的共通特徵', '校準 {symbol} 的最佳指標參數', '規劃 {symbol} 的分批進場價位'] },
     ],
   },
 ];
