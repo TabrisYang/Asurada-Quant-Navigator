@@ -2814,52 +2814,85 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                 and not response.function_calls
                 and len(response.message or "") > 200
             ):
-                logger.warning(
-                    f"[v130] comprehensive_analysis 第一輪 function_calls=0 "
-                    f"(text_len={len(response.message)}), 強制重試 1 次"
-                )
-                yield _sse_event("status", {
-                    "message": "[重試] LLM 未呼叫必要函式，重新請求中...",
-                })
-                _retry_messages = list(messages) + [
-                    {"role": "assistant", "content": (response.message or "")[:500]},
-                    {"role": "user", "content": (
-                        "[系統強制] 你的上一輪回覆沒有呼叫任何 function，"
-                        "但 comprehensive_analysis 模式必須先呼叫以下函式取得真實數據："
-                        "detect_smc_structure、generate_scenarios、analyze_momentum、"
-                        "scan_conditional_probability、run_quant_research、compute_laddered_entries。"
-                        "**請現在呼叫這些 function**，再根據結果重寫完整分析。"
-                        "**禁止在沒有 function 結果的情況下編造任何具體數字**"
-                        "（winrate / PF / IC / Sharpe / MDD / RSI 數值 等）。"
-                    )},
-                ]
-                _retry_task = asyncio.create_task(adapter.chat(
-                    _retry_messages, chart_state=request.chart_state,
-                    system_prompt=_dynamic_prompt,
-                    chart_screenshot=request.chart_screenshot,
-                ))
-                _active_tasks.append(_retry_task)
-                _hb_sec = 0
-                while not _retry_task.done():
-                    await asyncio.sleep(3)
-                    _hb_sec += 3
+                text_len = len(response.message or "")
+                # v134 修復 A：純文字 ≥ 3000 字 → LLM 已給完整分析，跳過重試避免卡頓
+                # 原邏輯硬要重試 → CLI 大 prompt + 同 prompt 重試常 fail → 卡 28+ 分鐘
+                if text_len >= 3000:
+                    logger.warning(
+                        f"[v130/v134] 第一輪 function_calls=0 但純文字 {text_len} 字 ≥ 3000，"
+                        f"跳過重試直接用純文字回應"
+                    )
                     yield _sse_event("status", {
-                        "message": f"重試中... ({_hb_sec}秒)",
+                        "message": f"[提示] LLM 給出 {text_len} 字純文字分析（未呼叫 function），跳過重試",
                     })
-                _retry_response = _retry_task.result()
-                logger.info(
-                    f"[v130] 重試結果: 文字長度={len(_retry_response.message)}, "
-                    f"function_calls={len(_retry_response.function_calls)}"
-                )
-                if _retry_response.usage:
-                    if total_usage:
-                        total_usage.prompt_tokens += _retry_response.usage.prompt_tokens
-                        total_usage.completion_tokens += _retry_response.usage.completion_tokens
-                        total_usage.total_tokens += _retry_response.usage.total_tokens
-                    else:
-                        total_usage = _retry_response.usage
-                # 無論重試是否成功都用結果取代（避免無限循環）
-                response = _retry_response
+                    # 不重試，用原始 response 繼續走後續流程
+                else:
+                    logger.warning(
+                        f"[v130] comprehensive_analysis 第一輪 function_calls=0 "
+                        f"(text_len={text_len}), 強制重試 1 次"
+                    )
+                    yield _sse_event("status", {
+                        "message": "[重試] LLM 未呼叫必要函式，重新請求中...",
+                    })
+                    _retry_messages = list(messages) + [
+                        {"role": "assistant", "content": (response.message or "")[:500]},
+                        {"role": "user", "content": (
+                            "[系統強制] 你的上一輪回覆沒有呼叫任何 function，"
+                            "但 comprehensive_analysis 模式必須先呼叫以下函式取得真實數據："
+                            "detect_smc_structure、generate_scenarios、analyze_momentum、"
+                            "scan_conditional_probability、run_quant_research、compute_laddered_entries。"
+                            "**請現在呼叫這些 function**，再根據結果重寫完整分析。"
+                            "**禁止在沒有 function 結果的情況下編造任何具體數字**"
+                            "（winrate / PF / IC / Sharpe / MDD / RSI 數值 等）。"
+                        )},
+                    ]
+                    _retry_task = asyncio.create_task(adapter.chat(
+                        _retry_messages, chart_state=request.chart_state,
+                        system_prompt=_dynamic_prompt,
+                        chart_screenshot=request.chart_screenshot,
+                    ))
+                    _active_tasks.append(_retry_task)
+                    # v134 修復 B：5 分鐘 hard timeout，超過 cancel + 用原始 response
+                    _RETRY_TIMEOUT_SEC = 300
+                    _retry_timed_out = False
+                    _hb_sec = 0
+                    while not _retry_task.done():
+                        await asyncio.sleep(3)
+                        _hb_sec += 3
+                        # v134 修復 C：心跳訊息標明 timeout 上限
+                        yield _sse_event("status", {
+                            "message": f"重試中... ({_hb_sec}秒 / 最多 {_RETRY_TIMEOUT_SEC} 秒)",
+                        })
+                        if _hb_sec >= _RETRY_TIMEOUT_SEC:
+                            logger.warning(
+                                f"[v134] 重試超過 {_RETRY_TIMEOUT_SEC}s，取消重試使用原始回應"
+                            )
+                            _retry_task.cancel()
+                            _retry_timed_out = True
+                            yield _sse_event("status", {
+                                "message": f"[超時] 重試超過 {_RETRY_TIMEOUT_SEC}s，使用原始回應",
+                            })
+                            break
+
+                    if not _retry_timed_out and _retry_task.done() and not _retry_task.cancelled():
+                        try:
+                            _retry_response = _retry_task.result()
+                            logger.info(
+                                f"[v130] 重試結果: 文字長度={len(_retry_response.message)}, "
+                                f"function_calls={len(_retry_response.function_calls)}"
+                            )
+                            if _retry_response.usage:
+                                if total_usage:
+                                    total_usage.prompt_tokens += _retry_response.usage.prompt_tokens
+                                    total_usage.completion_tokens += _retry_response.usage.completion_tokens
+                                    total_usage.total_tokens += _retry_response.usage.total_tokens
+                                else:
+                                    total_usage = _retry_response.usage
+                            # 無論重試是否成功都用結果取代（避免無限循環）
+                            response = _retry_response
+                        except Exception as _retry_err:
+                            logger.warning(f"[v130] 重試結果取得失敗: {_retry_err}，使用原始回應")
+                    # else: 超時 / cancelled，保持原 response 不動
 
             # 3. 如果 LLM 回傳了 function calls → 執行 → 二輪回應
             if response.function_calls:
