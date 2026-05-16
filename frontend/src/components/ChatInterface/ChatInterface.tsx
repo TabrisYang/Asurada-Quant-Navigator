@@ -15,26 +15,52 @@ const DEFAULT_QUICK_QUESTIONS = [
   '比較 RSI 和 MACD 策略的績效',
 ];
 
+// v133：UI 重組為 7 tabs，每 item 綁 mode 確保 LLM 強制 call 對應 function。
+// 新增 Tab 2「市場結構與情境」收納 SMC / 三情境 / 條件機率 / 事件型態 4 個專屬入口。
+// 原「市場體制」tab 移除，GMM/HMM 上移 Tab 1 基礎分析。
+// Tab 7「全部分析」改名「完整技術分析」對齊 v132 編排管線實際涵蓋範圍，
+// 並新增「一鍵連跑」sequence item 補足基本面/族群/事件型態。
 const ANALYSIS_CATEGORIES = [
   {
     tab: '基礎分析',
-    allPrompt: '對 {symbol} 進行完整基礎分析（市場環境判定 + 七維度技術分析 + SMC 智慧資金分析 + 情境預測）',
+    allPrompt: '對 {symbol} 進行完整基礎分析（市場環境 + 七維度技術 + GMM/HMM 市場體制）',
     items: [
-      { label: '市場環境判定', prompt: '分析 {symbol} 的市場環境（Regime + 結構 + 多時框對齊）' },
+      { label: '市場環境判定', prompt: '分析 {symbol} 的市場環境（regime + 結構 + 多時框對齊）' },
       { label: '七維度技術分析', prompt: '對 {symbol} 進行完整的七維度技術分析' },
-      { label: 'SMC 智慧資金分析', prompt: '分析 {symbol} 的 SMC 訂單流結構' },
-      { label: '情境預測', prompt: '預測 {symbol} 未來三種可能情境' },
+      { label: 'GMM Regime 分類', prompt: '用 GMM 分析 {symbol} 當前處於哪種市場體制 regime（強多/弱多/盤整/強空），含 GARCH 波動率展望' },
+      { label: 'HMM 狀態轉移', prompt: '用 HMM 分析 {symbol} 當前 regime 還會持續多久、狀態轉移機率' },
+    ],
+  },
+  {
+    tab: '市場結構與情境',
+    allPrompt: '對 {symbol} 進行完整市場結構與情境分析（SMC 結構 + 三情境預測 + 條件機率 + 事件型態）',
+    items: [
+      { label: 'SMC 結構分析', prompt: '對 {symbol} 進行 SMC 智慧資金結構分析（BOS / CHoCH / Order Block / FVG / 流動性掃蕩）', mode: 'smc_structure' },
+      { label: '三情境預測', prompt: '預測 {symbol} 未來三種可能情境（看漲/中性/看跌）含 ML + 歷史相似度', mode: 'scenario_predict' },
+      { label: '條件機率掃描', prompt: '掃描 {symbol} 各指標的條件機率，找出最佳進場區間（含 Wilson CI）', mode: 'conditional_prob' },
+      { label: '事件型態分析', prompt: '分析 {symbol} 歷史上大漲大跌前的共通技術特徵', mode: 'event_pattern' },
+    ],
+  },
+  {
+    tab: '動能分析',
+    mode: 'momentum_analysis',
+    allPrompt: '對 {symbol} 進行完整動能交易分析（多週期動量 + 加速度 + 相對強弱 + 反轉偵測）',
+    items: [
+      { label: '多週期動量', prompt: '分析 {symbol} 的多週期動量因子和方向一致性' },
+      { label: '動量加速/減速', prompt: '分析 {symbol} 的動量加速度，是在加速還是減速' },
+      { label: '相對強弱', prompt: '比較 {symbol} vs BTC 的相對動量強弱' },
+      { label: '動量反轉偵測', prompt: '偵測 {symbol} 是否有動量反轉信號（RSI/MACD 背離等）' },
     ],
   },
   {
     tab: '因子驗證',
     mode: 'factor_validation',
-    allPrompt: '對 {symbol} 進行因子驗證（因子 IC 排名 + 組合 IC + Bucket 評分 + 條件機率）',
+    allPrompt: '對 {symbol} 進行因子驗證（因子 IC 排名 + 組合 IC + Bucket 評分 + 衰退監控）',
     items: [
       { label: '因子 IC 排名', prompt: '分析 {symbol} 哪些因子最有效、IC 排名如何' },
       { label: '組合因子分析', prompt: '分析 {symbol} 的雙因子組合 IC，哪些因子搭配效果最好' },
-      { label: '條件機率掃描', prompt: '掃描 {symbol} 各指標的條件機率，找出最佳進場區間' },
       { label: '因子群評分', prompt: '對 {symbol} 進行趨勢/動量/波動/量能/結構五群 Bucket 評分' },
+      { label: '因子衰退監控', prompt: '監控 {symbol} 各因子的 IC decay 與失效趨勢，識別已衰退因子' },
     ],
   },
   {
@@ -45,50 +71,33 @@ const ANALYSIS_CATEGORIES = [
       { label: '多策略比較', prompt: '回測比較 {symbol} 的多種交易策略績效' },
       { label: 'MC + WF 驗證', prompt: '對 {symbol} 進行 Monte Carlo 穩定性測試和 Walk Forward 過擬合檢測' },
       { label: 'CPCV 嚴格驗證', prompt: '對 {symbol} 進行 CPCV 組合淨化交叉驗證（最嚴格的過擬合檢測）' },
-      { label: '指標參數校準', prompt: '校準 {symbol} 的最佳指標參數' },
+      { label: '指標參數校準', prompt: '校準 {symbol} 的最佳指標參數', mode: 'calibrate' },
+      { label: '分批進場規劃', prompt: '規劃 {symbol} 的分批進場價位（依當前 regime 自動選配比策略）', mode: 'compute_laddered' },
     ],
   },
   {
-    tab: '市場體制',
-    mode: 'regime_analysis',
-    allPrompt: '對 {symbol} 進行市場體制分析（GMM Regime + GARCH 波動率 + HMM 狀態轉移）',
-    items: [
-      { label: 'GMM Regime 分類', prompt: '用 GMM 分析 {symbol} 當前處於哪種市場體制（強多/弱多/盤整/強空）' },
-      { label: 'GARCH 波動率', prompt: '用 GARCH 預測 {symbol} 未來波動率是擴張還是收斂' },
-      { label: 'HMM 狀態轉移', prompt: '用 HMM 分析 {symbol} 當前 regime 還會持續多久' },
-      { label: '事件型態分析', prompt: '分析 {symbol} 歷史上大漲大跌前的共通特徵' },
-    ],
-  },
-  {
-    tab: '基本面',
+    tab: '基本面與族群',
     mode: 'fundamental_analysis',
-    allPrompt: '對 {symbol} 進行基本面分析（月營收趨勢 + 法人買賣超 + 財報指標 + 綜合評分）',
+    allPrompt: '對 {symbol} 進行基本面與族群分析（月營收 + 法人 + 財報 + 族群相對強弱）',
     items: [
       { label: '月營收趨勢', prompt: '分析 {symbol} 的月營收 MoM/YoY 趨勢' },
       { label: '法人買賣超', prompt: '分析 {symbol} 的三大法人買賣超動向' },
       { label: '財報指標', prompt: '查看 {symbol} 的本益比、EPS、殖利率' },
-      { label: '基本面綜合', prompt: '給我 {symbol} 的基本面綜合評分和分析' },
-    ],
-  },
-  {
-    tab: '動能分析',
-    mode: 'momentum_analysis',
-    allPrompt: '對 {symbol} 進行完整動能交易分析（多週期動量 + 加速度 + 相對強弱 + 反轉偵測 + 策略回測）',
-    items: [
-      { label: '多週期動量', prompt: '分析 {symbol} 的多週期動量因子和方向一致性' },
-      { label: '動量加速/減速', prompt: '分析 {symbol} 的動量加速度，是在加速還是減速' },
-      { label: '相對強弱', prompt: '比較 {symbol} vs BTC 的相對動量強弱' },
-      { label: '動量反轉偵測', prompt: '偵測 {symbol} 是否有動量反轉信號（RSI/MACD 背離等）' },
+      { label: '族群分析', prompt: '分析 {symbol} 所屬族群指數的技術面、Breadth 與族群內個股相對強弱排名', mode: 'sector_analysis' },
     ],
   },
   {
     tab: '完整分析',
-    allPrompt: '對 {symbol} 進行全部分析（含市場結構 + 動能 + 多策略回測 + 因子驗證 + 量化研究）',
+    // tab-level「全部分析」按鈕（allPrompt）：保留「全部分析」keyword 觸發 v132 編排 comprehensive_analysis intent
+    allPrompt: '對 {symbol} 進行全部分析（v132 編排管線，5 維度技術面 map-reduce：市場環境 / 結構 / 動能 / 策略 / 因子）',
     items: [
       { label: '完整量化研究', prompt: '對 {symbol} 進行完整量化研究（因子IC + Monte Carlo + Walk Forward + CPCV + GMM/GARCH/HMM）' },
       { label: '因子驗證與監控', prompt: '驗證 {symbol} 當前哪些因子有效、哪些已衰退' },
       // ★ A2：sequence 欄位讓按鈕真正依序執行 phase 1 → 2 → 3（透過 messageQueue 自動接力）
       { label: '完整分析三階段', prompt: '完整分析一 {symbol}', sequence: ['完整分析一 {symbol}', '完整分析二 {symbol}', '完整分析三 {symbol}'] },
+      // ★ v133 A+：補足 v132 編排管線排除的維度（基本面 / 族群 / 事件型態）
+      // 注意：「全部分析」keyword 觸發 comprehensive_analysis intent，「完整分析」會誤觸 deep_analysis
+      { label: '一鍵連跑：技術 + 基本面 + 族群 + 事件', prompt: '對 {symbol} 進行全部分析', sequence: ['對 {symbol} 進行全部分析（v132 5 維度技術面編排）', '對 {symbol} 進行基本面分析', '分析 {symbol} 所屬族群的技術面與相對強弱', '分析 {symbol} 歷史大漲大跌前的共通特徵'] },
     ],
   },
 ];
@@ -1131,23 +1140,36 @@ export default function ChatInterface() {
         </div>
         {analysisBarOpen && (
           <div className="flex flex-wrap gap-1.5 px-3 py-2" style={{ background: 'var(--bg-secondary)' }}>
-            <button
-              onClick={() => {
-                const sym = useChartStore.getState().symbol || 'BTC/USDT';
-                const cat = ANALYSIS_CATEGORIES[activeAnalysisTab];
-                const prompt = cat.allPrompt.replace('{symbol}', sym);
-                setInput(prompt);
-                // 有指定 mode 的分析類型，直接帶 mode 發送
-                const catMode = (cat as any).mode;
-                if (catMode) {
-                  setTimeout(() => handleSend(catMode), 50);
-                }
-              }}
-              className="px-2.5 py-1 rounded text-xs cursor-pointer transition-colors font-medium"
-              style={{ background: 'var(--accent-blue)', color: '#fff' }}
-            >
-              全部分析
-            </button>
+            {(() => {
+              const cat = ANALYSIS_CATEGORIES[activeAnalysisTab];
+              const isComprehensive = cat.tab === '完整分析';
+              // v133：Tab 7「完整分析」的 allPrompt 走 comprehensive_analysis (v132 編排管線)，
+              // 該管線只跑 5 維度技術面（不含基本面 / 族群 / 事件型態），按鈕改名為「完整技術分析」
+              // 並加 tooltip 標清楚涵蓋範圍，需要全部請改點 item「一鍵連跑」
+              const btnLabel = isComprehensive ? '完整技術分析' : '全部分析';
+              const btnTooltip = isComprehensive
+                ? 'v132 編排管線：5 維度技術面（市場環境 / 結構 / 動能 / 策略 / 因子）。\n不含基本面 / 族群 / 事件型態 — 需要全部請點下方「一鍵連跑」item。'
+                : `對當前 ${cat.tab} tab 的全部 ${cat.items.length} 個 item 進行完整分析`;
+              return (
+                <button
+                  onClick={() => {
+                    const sym = useChartStore.getState().symbol || 'BTC/USDT';
+                    const prompt = cat.allPrompt.replace('{symbol}', sym);
+                    setInput(prompt);
+                    // 有指定 mode 的分析類型，直接帶 mode 發送
+                    const catMode = (cat as any).mode;
+                    if (catMode) {
+                      setTimeout(() => handleSend(catMode), 50);
+                    }
+                  }}
+                  title={btnTooltip}
+                  className="px-2.5 py-1 rounded text-xs cursor-pointer transition-colors font-medium"
+                  style={{ background: 'var(--accent-blue)', color: '#fff' }}
+                >
+                  {btnLabel}
+                </button>
+              );
+            })()}
             {ANALYSIS_CATEGORIES[activeAnalysisTab].items.map((item, i) => (
               <button
                 key={i}
@@ -1155,17 +1177,23 @@ export default function ChatInterface() {
                   const sym = useChartStore.getState().symbol || 'BTC/USDT';
                   // ★ A2：含 sequence 欄位 → 自動依序送 N 條訊息（用既有的 messageQueueRef）
                   const seq = (item as any).sequence as string[] | undefined;
+                  // ★ v133：item 可帶自己的 mode（覆蓋 tab mode），強制觸發對應 function
+                  const itemMode = (item as any).mode as string | undefined;
                   if (seq && seq.length > 0) {
-                    // 第 1 條：直接送
+                    // 第 1 條：直接送（若 item 有 mode 就帶上）
                     const first = seq[0].replace('{symbol}', sym);
                     setInput(first);
-                    setTimeout(() => handleSend(), 50);
+                    setTimeout(() => handleSend(itemMode), 50);
                     // 第 2-N 條：排隊（_processQueue 會在前一條完成後自動接力）
                     for (let k = 1; k < seq.length; k++) {
                       const text = seq[k].replace('{symbol}', sym);
                       messageQueueRef.current.push({ text });
                     }
                     setQueueLength(messageQueueRef.current.length);
+                  } else if (itemMode) {
+                    // ★ v133：有專屬 mode 的 item 自動送，確保 LLM 強制 call 對應 function
+                    setInput(item.prompt.replace('{symbol}', sym));
+                    setTimeout(() => handleSend(itemMode), 50);
                   } else {
                     setInput(item.prompt.replace('{symbol}', sym));
                   }

@@ -1496,6 +1496,65 @@ def _build_messages(
             f"使用者備註：{request.message if request.message.strip() else '請校準全部可用指標'}"
         )
         messages.append({"role": "user", "content": calibrate_prefix})
+    elif request.mode == "smc_structure":
+        smc_prefix = (
+            "[系統指令：使用者點擊了「SMC 結構分析」按鈕]\n"
+            "你必須呼叫 detect_smc_structure 取得 SMC 智慧資金結構數據。\n"
+            "專注報告：BOS / CHoCH 結構破壞、訂單塊 (Order Block) 位置、"
+            "公平價值缺口 (FVG)、流動性掃蕩 (Liquidity Sweep)、"
+            "並依結構提出明確進場 / 止損 / 止盈位。\n\n"
+            f"使用者備註：{request.message if request.message.strip() else '請分析當前標的的 SMC 智慧資金結構'}"
+        )
+        messages.append({"role": "user", "content": smc_prefix})
+    elif request.mode == "scenario_predict":
+        sp_prefix = (
+            "[系統指令：使用者點擊了「三情境預測」按鈕]\n"
+            "你必須呼叫 generate_scenarios 取得三情境機率預測。\n"
+            "專注報告：看漲 / 中性 / 看跌三情境的機率分布、各情境的價格目標、"
+            "歷史相似度匹配、ML 模型輔助結論、各情境對應建議倉位。\n\n"
+            f"使用者備註：{request.message if request.message.strip() else '請預測當前標的未來三種可能情境'}"
+        )
+        messages.append({"role": "user", "content": sp_prefix})
+    elif request.mode == "conditional_prob":
+        cp_prefix = (
+            "[系統指令：使用者點擊了「條件機率掃描」按鈕]\n"
+            "你必須呼叫 scan_conditional_probability 取得指標條件機率數據。\n"
+            "專注報告：各指標在不同數值區間下，後續 N 根 K 線達到 X% 漲跌的歷史機率、"
+            "Wilson 95% 信賴區間、Bayesian shrinkage 後的穩健機率、"
+            "並找出 lift 最大且樣本充足的條件區間作為進場參考。\n\n"
+            f"使用者備註：{request.message if request.message.strip() else '請掃描當前標的各指標的條件機率，找出最佳進場區間'}"
+        )
+        messages.append({"role": "user", "content": cp_prefix})
+    elif request.mode == "event_pattern":
+        ep_prefix = (
+            "[系統指令：使用者點擊了「事件型態分析」按鈕]\n"
+            "你必須呼叫 analyze_event_patterns 取得歷史事件前的 K 線指標共通特徵。\n"
+            "專注報告：歷史大漲 / 大跌 / 爆量事件前 N 根 K 線的指標分布、"
+            "共通技術特徵（如 RSI / MACD / 量能 / 結構）、"
+            "並比對當前是否符合這些前兆，給出觸發機率評估。\n\n"
+            f"使用者備註：{request.message if request.message.strip() else '請分析當前標的歷史大漲大跌前的共通特徵'}"
+        )
+        messages.append({"role": "user", "content": ep_prefix})
+    elif request.mode == "compute_laddered":
+        cl_prefix = (
+            "[系統指令：使用者點擊了「分批進場規劃」按鈕]\n"
+            "你必須呼叫 compute_laddered_entries 取得分批進場價位規劃。\n"
+            "專注報告：依當前 regime 自動選擇配比策略（金字塔加碼 / 倒金字塔 / 均分）、"
+            "各檔進場價位（含技術依據如 SMC OB / EMA / BB 中軌）、"
+            "加權均價、止損 / 止盈、風險回報比、建議倉位大小。\n\n"
+            f"使用者備註：{request.message if request.message.strip() else '請規劃當前標的的分批進場價位'}"
+        )
+        messages.append({"role": "user", "content": cl_prefix})
+    elif request.mode == "sector_analysis":
+        sec_prefix = (
+            "[系統指令：使用者點擊了「族群分析」按鈕]\n"
+            "你必須呼叫 analyze_sector 取得族群指數技術分析數據。\n"
+            "專注報告：族群指數的 Regime、Breadth（多少成分股呈現多頭）、"
+            "族群內個股相對強弱排名、族群龍頭股辨識、"
+            "並判斷該族群是否具備族群行情（族群 RS > 大盤）。\n\n"
+            f"使用者備註：{request.message if request.message.strip() else '請分析當前標的所屬族群的技術面與內部強弱排名'}"
+        )
+        messages.append({"role": "user", "content": sec_prefix})
     else:
         messages.append({"role": "user", "content": request.message})
 
