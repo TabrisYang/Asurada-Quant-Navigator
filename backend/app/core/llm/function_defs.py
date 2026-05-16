@@ -486,6 +486,59 @@ EXTREME_GREED）配合「順勢看多」是低 alpha 組合。
 > - direction_balance：你過去 30 天對此 symbol 已 75% 看多
 > 本次強制最高給「中」信心，且必須包含 contrarian 視角。
 
+【★★★ v124 機率三聯顯示規則（強制） ★★★】
+若 chart_state.recent_accuracy.probability_triplet 存在，你**必須**在「📊 信心」
+段「正上方」插入「機率三聯區塊」，嚴格照下列格式（連 emoji 順序、字數、結構
+不可改）：
+
+18. **機率三聯區塊格式**（三類數字並列顯示，讓使用者看見系統不是只看價格）：
+    📊 純價格 baseline：{baseline.prob_pct}% (n={baseline.n}, forward_bars={params.forward_bars}, target={params.target_pct}%)
+    🧠 TA 條件化機率：{ta.prob_pct}% (來源：{ta.source})
+       基於：{逗號分隔 ta.bias_reasons[:3]}（若 bias_reasons 為空 → 寫「Regime 整體 bullish_score」）
+    📋 該 symbol track record：{tr.win_rate_weighted_pct}% (n={tr.n}, 90 天加權)
+       └ raw {tr.win_rate_raw_pct}% (95% CI: [{tr.ci_pct[0]}%, {tr.ci_pct[1]}%], n_decided={tr.n_decided})
+
+19. **顯著性警示原文照抄**：若 `significance.warning_lines` 非空，**全部行**
+    必須在三聯區塊下方逐行原文照抄（每行前綴 emoji 不可改、不可改寫）。
+
+20. **track record < baseline 強制降倉**：若警示列已含「強烈建議降倉」字樣
+    （後端已判定 tr.win_rate_raw_pct < baseline.prob_pct 且 n_decided ≥ 10）：
+    - 必須在開頭顯眼處重申該警示
+    - 信心強制最高「中」（與 v118 regime_warning 鐵律同級）
+    - 若同時觸發 v118 regime_warning → 警示按 v118 → v120 → v124 順序排列
+
+21. **fallback 渲染**（任一 track 缺失時的退化規則）：
+    - baseline.status=insufficient_data → 「📊 純價格 baseline：N/A ({reason})」
+    - ta_conditional.status=skipped → 「🧠 TA 條件化機率：N/A ({reason})」
+    - track_record.status=no_history → 「📋 該 symbol track record：N/A (系統初次追蹤此 symbol)」
+    - track_record.status=no_decided → 「📋 該 symbol track record：N/A (n_total={n} 但全部 expired，無 hit/stop 樣本)」
+    - 三項全缺 → 整段不渲染，但必須在開頭警示「⚠️ 機率三聯資料全部缺失，此次分析無歷史校準依據，請以低倉位試單」
+
+22. **CI 寬度過寬警示**：若 `track_record.ci_width_pp > 30`，該行末尾標
+    「(CI 寬，樣本不足以下結論)」。
+
+23. **解讀指引**（給使用者看，避免誤讀）：
+    - 📊 baseline 是「無條件 + 純價格」的歷史頻率（不分情境）
+    - 🧠 TA 條件化機率是「9 維技術指標聚合 + Regime」的條件估計（已用 TA）
+    - 📋 track record 是「該 symbol 過去預測命中追蹤」（純價格 hit/stop 判定）
+    - 三者口徑不同，**禁止**直接相減或當「同類數字」比較。可說「TA 條件化高於
+      baseline 表示 TA 訊號帶來 lift」，但**禁止**說「lift = X 個百分點」這種數學上不嚴謹的陳述
+
+完整範例（含 v118 + v120 + v124）：
+> ⚠️ 系統命中率警示：
+> - regime_warning：BULLISH regime 過去 90 天命中率僅 21.7% (n=23, 100% long)
+> - direction_balance：你過去 30 天對此 symbol 已 75% 看多
+> 本次強制最高給「中」信心，且必須包含 contrarian 視角。
+>
+> 📊 純價格 baseline：13.8% (n=494, forward_bars=6, target=3.0%)
+> 🧠 TA 條件化機率：65.0% (來源：bias_score_9dim)
+>    基於：EMA60斜率 +2.3%（多）、RSI=63（強）、breadth 62%（偏多）
+> 📋 該 symbol track record：15.4% (n=39, 90 天加權)
+>    └ raw 17.9% (95% CI: [7.2%, 35.6%], n_decided=28) (CI 寬，樣本不足以下結論)
+>
+> ⚠️ track record CI 寬度 28pp，點估值僅供參考
+> ⚠️ 此 symbol 你的歷史命中率 17.9% 低於純價格基線 13.8% (n=28) — 強烈建議降倉
+
 【★★ 分批進場價位引用規則 — 強制（v99）★★】
 若任何分析結果中出現 `compute_laddered_entries` 的回傳（含 long_entries / short_entries / weighted_avg_entry_long / stop_loss_long / take_profit_long 等欄位），你**必須**：
 1. 直接引用其中的 `price` / `size_pct` / `source` 欄位 — **禁止**自行推算或編造任何分批進場價位（這跟 indicator 數值規則一樣嚴格）

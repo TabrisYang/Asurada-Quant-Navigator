@@ -66,6 +66,21 @@ def _minimal_r2_chart_state(chart_state: Optional[dict]) -> Optional[dict]:
             ra_summary["combo_stats_summary"] = (
                 f"win_rate={cs.get('win_rate')}% n={cs.get('samples', 0)}"
             )
+        # v124：機率三聯壓單行 summary + 保留警示列（round1 已詳讀完整 triplet）
+        pt = ra.get("probability_triplet") or {}
+        if pt:
+            base = pt.get("baseline_unconditional") or {}
+            ta = pt.get("ta_conditional") or {}
+            tr = pt.get("track_record") or {}
+            ra_summary["probability_triplet_summary"] = (
+                f"baseline={base.get('prob_pct')}% (n={base.get('n')}) "
+                f"ta={ta.get('prob_pct')}% (src={ta.get('source')}) "
+                f"track={tr.get('win_rate_raw_pct')}% (n_dec={tr.get('n_decided')}, "
+                f"ci={tr.get('ci_pct')})"
+            )
+            warn = (pt.get("significance") or {}).get("warning_lines") or []
+            if warn:
+                ra_summary["probability_triplet_warnings"] = warn
         if ra_summary:
             minimal["recent_accuracy"] = ra_summary
 

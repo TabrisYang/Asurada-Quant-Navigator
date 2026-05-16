@@ -22,6 +22,7 @@ import pandas as pd
 from loguru import logger
 
 from app.core.config.settings import settings
+from app.core.stats_utils import wilson_ci as _wilson_ci
 
 
 # ─── 常量 ────────────────────────────────────────────
@@ -634,23 +635,6 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     if na == 0 or nb == 0:
         return 0.0
     return float(dot / (na * nb))
-
-
-def _wilson_ci(hits: int, total: int, z: float = 1.96) -> tuple[float, float]:
-    """Wilson score confidence interval（比例的信賴區間）。
-
-    Returns:
-        (lower_bound_pct, upper_bound_pct) 百分比形式
-    """
-    if total == 0:
-        return (0.0, 0.0)
-    p = hits / total
-    denom = 1 + z * z / total
-    centre = (p + z * z / (2 * total)) / denom
-    spread = z * (p * (1 - p) / total + z * z / (4 * total * total)) ** 0.5 / denom
-    lo = max(0.0, centre - spread)
-    hi = min(1.0, centre + spread)
-    return (round(lo * 100, 1), round(hi * 100, 1))
 
 
 def _estimate_movement_probability(

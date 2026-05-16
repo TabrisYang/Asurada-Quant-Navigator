@@ -1182,6 +1182,60 @@ class PredictionTracker:
             "sample_sufficient": len(preds) >= 8,
         }
 
+    def get_winrate_with_ci(
+        self,
+        symbol: Optional[str] = None,
+        days: int = 90,
+    ) -> dict:
+        """v124：回傳含 Wilson CI 的 winrate（給 P1 機率三聯顯示用）。
+
+        - 點估值 win_rate_weighted_pct：時間衰減加權（與系統現有 win_rate 一致）
+        - CI：用 raw hit_target / (hit_target + hit_stop) Wilson CI（unweighted）
+        - 分母排除 expired：expired = 時間到沒到 TP/SL，不算 hit/miss
+        - n vs n_decided：n 為總已驗證樣本（含 expired），n_decided 為 CI 分母
+        """
+        from app.core.stats_utils import wilson_ci
+
+        stats = self.get_stats(symbol=symbol, days=days)
+        if stats.get("total", 0) == 0:
+            return {
+                "status": "no_history",
+                "reason": "n=0",
+                "n": 0,
+                "n_decided": 0,
+            }
+
+        hit_target_raw = int(stats.get("hit_target", 0))
+        hit_stop_raw = int(stats.get("hit_stop", 0))
+        n_decided = hit_target_raw + hit_stop_raw
+        n_total = int(stats.get("total", 0))
+
+        if n_decided == 0:
+            return {
+                "status": "no_decided",
+                "reason": f"n_total={n_total} but n_decided=0 (all expired/active)",
+                "n": n_total,
+                "n_decided": 0,
+                "win_rate_weighted_pct": stats.get("win_rate_weighted"),
+            }
+
+        ci_lo, ci_hi = wilson_ci(hit_target_raw, n_decided)
+        win_rate_raw_pct = round(hit_target_raw / n_decided * 100, 1)
+
+        return {
+            "status": "ok",
+            "win_rate_weighted_pct": stats.get("win_rate_weighted"),
+            "win_rate_raw_pct": win_rate_raw_pct,
+            "n": n_total,
+            "n_decided": n_decided,
+            "hit_target": hit_target_raw,
+            "hit_stop": hit_stop_raw,
+            "expired": int(stats.get("expired", 0)),
+            "ci_pct": [ci_lo, ci_hi],
+            "ci_width_pp": round(ci_hi - ci_lo, 1),
+            "decay_halflife_days": stats.get("decay_halflife_days"),
+        }
+
 
     @staticmethod
     def classify_regime(regime: str) -> str:

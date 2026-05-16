@@ -109,8 +109,11 @@
 | `recent_accuracy.regime_warning` | chat.py:838 | v118 三道防線之一 |
 | `recent_accuracy.direction_balance` | chat.py:859 | v118 三道防線之一 |
 | `recent_accuracy.signal_history` | chat.py:911 | v120.5 訊號組合命中率 |
+| `recent_accuracy.probability_triplet` | chat.py:~1100 | v124 機率三聯（baseline / TA-conditional / track-record）+ Wilson CI |
 
 **規模警示**：`signal_history` 在 v120.5 加入後每 request 多 10-24KB（這是 stream 中斷的根因）。Round 2 必須精簡，見 [adapter.py:_minimal_r2_chart_state](../app/core/llm/adapter.py)。
+
+**v124 機率三聯**：~1KB / request。Round 2 壓成單行 `probability_triplet_summary` + `probability_triplet_warnings` 陣列（< 300B）。Kill switch：`settings.probability_triplet_enabled = False`。
 
 ---
 

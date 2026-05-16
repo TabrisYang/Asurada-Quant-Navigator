@@ -14,6 +14,8 @@ import pandas as pd
 
 from loguru import logger
 
+from app.core.stats_utils import wilson_ci as _wilson_ci
+
 
 # ── 進度追蹤器 ────────────────────────────────────────────
 
@@ -1700,24 +1702,6 @@ async def _exec_optimize_params(args: dict, default_symbol: str, default_tf: str
         forward_bars=forward_bars,
     )
     return result
-
-
-def _wilson_ci(hits: int, count: int, z: float = 1.96) -> tuple[float, float]:
-    """v105.5：Wilson 信賴區間（百分點）給條件機率用。
-
-    比 normal approximation 在小樣本/極端機率時更準。z=1.96 對應 95% CI。
-    """
-    import math
-    if count <= 0:
-        return (0.0, 100.0)
-    p = hits / count
-    z2 = z * z
-    denom = 1.0 + z2 / count
-    center = (p + z2 / (2 * count)) / denom
-    margin = z * math.sqrt(p * (1 - p) / count + z2 / (4 * count * count)) / denom
-    lo = max(0.0, (center - margin) * 100)
-    hi = min(100.0, (center + margin) * 100)
-    return (round(lo, 1), round(hi, 1))
 
 
 def _bayesian_shrink(hits: int, count: int, baseline_prob: float, k: float = 20.0) -> float:

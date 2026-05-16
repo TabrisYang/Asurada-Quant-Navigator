@@ -106,6 +106,11 @@ class Settings(BaseSettings):
     # 沒檔自動 fallback 經驗值。設 False 強制走經驗值。
     bias_score_data_driven_weights: bool = True
 
+    # v124：機率三聯顯示（baseline / TA 條件化 / track record + Wilson CI）
+    # 預設 True；若 shadow mode PF/勝率劣化 >10% 設 False 即可一鍵關閉，
+    # 不需 revert PR。chat.py 注入點與 function_defs.py 規則段都會檢查此 flag。
+    probability_triplet_enabled: bool = True
+
     # v132：完整分析「編排管線」— 把 seg2 monolith（13 段一次出）拆成
     # 5 個維度 focused call + 1 個 synthesis call，每維度品質對齊「單獨問」。
     # 預設 False（灰度）；確認 shadow mode 不劣化後再切 True。

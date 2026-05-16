@@ -876,6 +876,139 @@ def _inject_ml_prediction(
     return chart_state
 
 
+# v124：機率三聯 (baseline / TA-conditional / track-record) 注入用 timeframe-aware 預設參數
+# 取代「從預測卡讀」的不可行設計（注入時 LLM 尚未產出預測卡）
+_TF_BASELINE_PARAMS: dict[str, tuple[int, float]] = {
+    # timeframe → (forward_bars, target_pct)
+    "1m": (12, 1.0), "5m": (12, 1.5), "15m": (8, 2.0), "30m": (8, 2.0),
+    "1h": (6, 2.0), "2h": (6, 2.5), "4h": (6, 3.0),
+    "6h": (5, 4.0), "8h": (5, 5.0), "12h": (5, 5.0),
+    "1d": (5, 5.0), "1w": (4, 10.0), "1mo": (3, 15.0),
+}
+
+
+def _build_triplet_warnings(triplet: dict) -> list[str]:
+    """v124：依機率三聯資料產生顯著性警示列。
+
+    後端產生而非 LLM 算，因為比 CI 邊界 LLM 容易錯（會用「直覺」判斷重不重疊）。
+    """
+    lines: list[str] = []
+    base = triplet.get("baseline_unconditional") or {}
+    tr = triplet.get("track_record") or {}
+
+    if tr.get("status") == "ok":
+        cw = tr.get("ci_width_pp", 0)
+        if cw > 30:
+            lines.append(f"⚠️ track record CI 寬度 {cw}pp，點估值僅供參考")
+        n_dec = tr.get("n_decided", 0)
+        if n_dec < 10:
+            lines.append(f"⚠️ track record 已決出樣本不足 (n_decided={n_dec} < 10)，CI 寬，僅作參考")
+        if base.get("status") == "ok":
+            tr_raw = tr.get("win_rate_raw_pct")
+            base_p = base.get("prob_pct")
+            if (tr_raw is not None and base_p is not None
+                    and tr_raw < base_p and n_dec >= 10):
+                lines.append(
+                    f"⚠️ 此 symbol 你的歷史命中率 {tr_raw}% 低於純價格基線 {base_p}% "
+                    f"(n={n_dec}) — 強烈建議降倉 / 觀望 / 改用反向視角"
+                )
+
+    if base.get("status") == "ok" and base.get("n", 0) < 200:
+        lines.append(f"⚠️ baseline 樣本不足 (n={base.get('n')} < 200)，baseline 本身也不準")
+
+    return lines
+
+
+def _inject_probability_triplet(
+    chart_state: dict,
+    df,
+    symbol: str,
+    timeframe: str,
+) -> None:
+    """v124：把「純價格 baseline / TA 條件化機率 / track record」三聯注入 recent_accuracy。
+
+    使用者疑問「系統是不是只看價格」的對應措施：把三類數字並列顯示，讓 LLM
+    在報告中明確標示「TA 條件化機率」≠「純價格 baseline」≠「歷史 track record」。
+
+    掛在 recent_accuracy.probability_triplet 下（不增 top-level 欄位，維持
+    CHART_STATE_SCHEMA.md 26 欄位上限）。
+    """
+    from app.core.config.settings import settings as _settings
+    if not getattr(_settings, "probability_triplet_enabled", True):
+        _mark_status(chart_state, "probability_triplet", "skipped", "flag_disabled")
+        return
+
+    if "recent_accuracy" not in chart_state or not isinstance(
+        chart_state["recent_accuracy"], dict
+    ):
+        _mark_status(chart_state, "probability_triplet", "skipped",
+                     "recent_accuracy_missing")
+        return
+
+    triplet: dict = {}
+
+    # ── Track A：純價格 baseline ──
+    fb, tp = _TF_BASELINE_PARAMS.get(timeframe, (6, 3.0))
+    try:
+        from app.core.probability_baseline import calc_unconditional_baseline
+        baseline_a = calc_unconditional_baseline(df, fb, tp, direction="up")
+        baseline_a["params_source"] = "timeframe_default"
+        triplet["baseline_unconditional"] = baseline_a
+    except Exception as _err:
+        triplet["baseline_unconditional"] = {
+            "status": "failed", "reason": str(_err),
+            "params": {"forward_bars": fb, "target_pct": tp, "direction": "up"},
+        }
+
+    # ── Track B：TA 條件化機率（無 CI，依使用者決策） ──
+    sub = (chart_state.get("regime_subtype") or {}).get("metrics") or {}
+    bias_score = sub.get("bias_score")
+    bias_reasons = sub.get("bias_reasons") or []
+    if bias_score is not None:
+        # P(多) = clip(0.5 + bias_score × 0.5, 0.10, 0.90)，與 function_defs.py 規則一致
+        p_long_pct = round(max(10.0, min(90.0, (0.5 + bias_score * 0.5) * 100)), 1)
+        triplet["ta_conditional"] = {
+            "status": "ok",
+            "prob_pct": p_long_pct,
+            "bias_score": bias_score,
+            "bias_reasons": bias_reasons[:3],
+            "source": "bias_score_9dim",
+        }
+    else:
+        # fallback：用 currentRegime.bullish_score（非 ranging regime 時）
+        cr = chart_state.get("currentRegime") or {}
+        bs = cr.get("bullish_score")
+        if bs is not None:
+            triplet["ta_conditional"] = {
+                "status": "ok",
+                "prob_pct": round(float(bs) * 100, 1),
+                "bias_score": None,
+                "bias_reasons": [],
+                "source": "currentRegime_bullish_score",
+            }
+        else:
+            triplet["ta_conditional"] = {
+                "status": "skipped",
+                "reason": "no_bias_score_and_no_bullish_score",
+            }
+
+    # ── Track C：該 symbol track record ──
+    try:
+        tr_data = prediction_tracker.get_winrate_with_ci(symbol=symbol, days=90)
+        triplet["track_record"] = tr_data
+    except Exception as _err:
+        triplet["track_record"] = {"status": "failed", "reason": str(_err)}
+
+    # ── 顯著性警示 ──
+    triplet["significance"] = {"warning_lines": _build_triplet_warnings(triplet)}
+
+    chart_state["recent_accuracy"]["probability_triplet"] = triplet
+    _mark_status(chart_state, "probability_triplet", "ok",
+                 f"baseline={triplet['baseline_unconditional'].get('status')} "
+                 f"ta={triplet['ta_conditional'].get('status')} "
+                 f"track={triplet['track_record'].get('status')}")
+
+
 def _build_messages(
     request: ChatRequest,
     rag_fragments: Optional[list[dict]] = None,
@@ -1091,6 +1224,24 @@ def _build_messages(
                             logger.info(f"v120.5 signal_history 注入失敗: {_v120_err}")
                             _mark_status(request.chart_state, "signal_history",
                                          "failed", str(_v120_err))
+
+                        # ★ v124：機率三聯（baseline / TA 條件化 / track record）注入
+                        try:
+                            _df_t = request.chart_state.get("_cached_df")
+                            _tf_t = request.chart_state.get("timeframe", "4h")
+                            if _df_t is not None and chart_symbol:
+                                _inject_probability_triplet(
+                                    request.chart_state, _df_t, chart_symbol, _tf_t,
+                                )
+                            else:
+                                _mark_status(request.chart_state, "probability_triplet",
+                                             "skipped",
+                                             f"df={'ok' if _df_t is not None else 'none'} "
+                                             f"symbol={'ok' if chart_symbol else 'none'}")
+                        except Exception as _v124_err:
+                            logger.info(f"v124 probability_triplet 注入失敗: {_v124_err}")
+                            _mark_status(request.chart_state, "probability_triplet",
+                                         "failed", str(_v124_err))
                 except Exception as _ra_err:
                     logger.info(f"recent_accuracy 注入失敗: {_ra_err}")
                     _mark_status(request.chart_state, "recent_accuracy", "failed", str(_ra_err))
