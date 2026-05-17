@@ -1526,12 +1526,21 @@ def _build_messages(
         )
         messages.append({"role": "user", "content": cp_prefix})
     elif request.mode == "event_pattern":
+        # v135：強制兩步驟（先 query_chart_data 取最新價，再 analyze_event_patterns）
+        # + 主動計算相似度（禁止反問使用者）+ 禁互動式延伸引導（連跑模式不該需要再輸入）
         ep_prefix = (
             "[系統指令：使用者點擊了「事件型態分析」按鈕]\n"
-            "你必須呼叫 analyze_event_patterns 取得歷史事件前的 K 線指標共通特徵。\n"
-            "專注報告：歷史大漲 / 大跌 / 爆量事件前 N 根 K 線的指標分布、"
-            "共通技術特徵（如 RSI / MACD / 量能 / 結構）、"
-            "並比對當前是否符合這些前兆，給出觸發機率評估。\n\n"
+            "你必須執行以下兩步驟：\n"
+            "1. **先呼叫 query_chart_data** 取得當前最新價格與 30 天區間"
+            "（不可只用 chart_state 的快照，快照可能滯後幾分鐘到幾十分鐘）\n"
+            "2. **再呼叫 analyze_event_patterns** 取得歷史事件前的 K 線指標共通特徵\n"
+            "報告必須完成：\n"
+            "  - 歷史大漲 / 大跌 / 爆量事件前 N 根 K 線的指標分布\n"
+            "  - 共通技術特徵（如 RSI / MACD / 量能 / 結構）\n"
+            "  - **主動計算當前 vs 歷史 pattern 的相似度 %**，給出觸發機率評估"
+            "（不可只列歷史不算當前）\n"
+            "**禁止**輸出「可以說 X」「可以問我 Y」「想進一步可以...」「你可以告訴我...」"
+            "這類等候使用者再次輸入的延伸提示 — 本次必須一次完成所有相關計算與結論。\n\n"
             f"使用者備註：{request.message if request.message.strip() else '請分析當前標的歷史大漲大跌前的共通特徵'}"
         )
         messages.append({"role": "user", "content": ep_prefix})

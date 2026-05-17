@@ -38,11 +38,14 @@ _DIMENSION_LABELS = {
 }
 
 # 維度 → 需要的 function 結果（從 Round 1 的 exec_result 切片）
+# v135：backtest 與 quant 維度本來都收 run_quant_research，導致兩個 focused call
+# 都會看到 bucket_scores 並各寫一段「因子群 Bucket」→ 報告重複。
+# 拆分：backtest 只看策略比較數據（Sharpe / MDD / 勝率），quant 獨佔因子 IC / Bucket。
 _DIMENSION_FUNCTIONS: dict[str, set[str]] = {
     "regime": {"generate_scenarios"},
     "structure": {"detect_smc_structure", "generate_scenarios"},
     "momentum": {"analyze_momentum", "scan_conditional_probability"},
-    "backtest": {"compare_strategies", "run_quant_research"},
+    "backtest": {"compare_strategies"},
     "quant": {"run_quant_research"},
 }
 
