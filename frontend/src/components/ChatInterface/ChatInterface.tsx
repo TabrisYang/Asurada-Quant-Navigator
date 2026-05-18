@@ -33,12 +33,14 @@ const ANALYSIS_CATEGORIES = [
   },
   {
     tab: '市場結構與情境',
-    allPrompt: '對 {symbol} 進行完整市場結構與情境分析（SMC 結構 + 三情境預測 + 條件機率 + 事件型態）',
+    allPrompt: '對 {symbol} 進行完整市場結構與情境分析（SMC 結構 + 三情境預測 + 條件機率 + 事件型態 + 布林通道完整度）',
     items: [
       { label: 'SMC 結構分析', prompt: '對 {symbol} 進行 SMC 智慧資金結構分析（BOS / CHoCH / Order Block / FVG / 流動性掃蕩）', mode: 'smc_structure' },
       { label: '三情境預測', prompt: '預測 {symbol} 未來三種可能情境（看漲/中性/看跌）含 ML + 歷史相似度', mode: 'scenario_predict' },
       { label: '條件機率掃描', prompt: '掃描 {symbol} 各指標的條件機率，找出最佳進場區間（含 Wilson CI）', mode: 'conditional_prob' },
       { label: '事件型態分析', prompt: '分析 {symbol} 歷史上大漲大跌前的共通技術特徵', mode: 'event_pattern' },
+      // v137：完整布林通道符合度分析（綜合 8 維特徵 + 4 策略評分 + 最佳策略 entry/exit）
+      { label: '布林通道完整度分析', prompt: '對 {symbol} 進行完整布林通道分析（8 維特徵評分 + 4 策略匹配度 + 最佳策略進出場規劃）', mode: 'bollinger_full' },
     ],
   },
   {

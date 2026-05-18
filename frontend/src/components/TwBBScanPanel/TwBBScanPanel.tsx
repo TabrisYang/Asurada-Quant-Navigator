@@ -223,7 +223,14 @@ export default function TwBBScanPanel() {
     window.dispatchEvent(new CustomEvent('symbols-updated'));
     setSymbol(sym);
     setTimeframe('1d');
-    setPendingChatMessage(`對 ${sym} 進行完整量化研究 + 因子驗證與監控 + 完整分析三階段`);
+    // v137：若有 Bollinger 訊號，prompt 帶 context 讓 LLM 從這個訊號開始分析
+    const bs = r.bollinger_signal;
+    const bbContext = bs?.label
+      ? `（當前狀態：${bs.emoji} ${bs.label}，策略 ${bs.strategy}、regime ${bs.regime_used}，BB 百分位 ${r.bb_width_pctile.toFixed(1)}%）`
+      : `（BB 百分位 ${r.bb_width_pctile.toFixed(1)}%）`;
+    setPendingChatMessage(
+      `對 ${sym} 進行完整量化研究 + 因子驗證與監控 + 完整分析三階段 ${bbContext}`
+    );
     setShow(false);
     toast(`切換到 ${r.code} ${r.name}，AI 分析已送出`, 'success');
   }, [setSymbol, setTimeframe, setPendingChatMessage, setShow]);
@@ -550,6 +557,8 @@ export default function TwBBScanPanel() {
                   <th className="text-left py-2 px-2">產業</th>
                   <th className="text-right py-2 px-2">價格（日期）</th>
                   <Th label="BB百分位" active={sortKey === 'bb_width_pctile'} onClick={() => setSortKey('bb_width_pctile')} right />
+                  {/* v137：Bollinger 訊號欄位 */}
+                  <th className="text-left py-2 px-2" title="完整布林通道訊號 (Squeeze / 突破 / Walking / 反轉)">Bollinger</th>
                   <Th label="20日漲跌" active={sortKey === 'change_20d'} onClick={() => setSortKey('change_20d')} right />
                   <Th label="5日均量" active={sortKey === 'volume_5d_avg'} onClick={() => setSortKey('volume_5d_avg')} right />
                   <th className="text-center py-2 px-2">操作</th>
@@ -568,6 +577,30 @@ export default function TwBBScanPanel() {
                     <td className="py-1.5 px-2 text-right font-semibold"
                       style={{ color: r.bb_width_pctile < 5 ? '#dc2626' : r.bb_width_pctile < 10 ? '#f59e0b' : 'var(--text-primary)' }}>
                       {r.bb_width_pctile.toFixed(1)}%
+                    </td>
+                    {/* v137：Bollinger 訊號 cell */}
+                    <td className="py-1.5 px-2 text-xs">
+                      {r.bollinger_signal?.label ? (
+                        <span
+                          style={{
+                            background: 'rgba(63,185,80,0.15)',
+                            color: '#3fb950',
+                            borderRadius: '3px',
+                            padding: '1px 6px',
+                            fontWeight: 600,
+                            whiteSpace: 'nowrap',
+                          }}
+                          title={`策略: ${r.bollinger_signal.strategy} | regime: ${r.bollinger_signal.regime_used}${
+                            r.bollinger_signal.entry_exit?.stop
+                              ? ` | SL: ${r.bollinger_signal.entry_exit.stop.toFixed(2)} TP1: ${r.bollinger_signal.entry_exit.target_1?.toFixed(2)} (RR: ${r.bollinger_signal.entry_exit.rr_1})`
+                              : ''
+                          }`}
+                        >
+                          {r.bollinger_signal.emoji} {r.bollinger_signal.label}
+                        </span>
+                      ) : (
+                        <span style={{ color: 'var(--text-secondary)' }}>—</span>
+                      )}
                     </td>
                     <td className="py-1.5 px-2 text-right"
                       style={{ color: r.change_20d > 0 ? 'var(--accent-green, #10b981)' : r.change_20d < 0 ? '#dc2626' : 'var(--text-primary)' }}>

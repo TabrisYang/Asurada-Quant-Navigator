@@ -39,6 +39,8 @@ class TwBBScanRequest(BaseModel):
     persistence_bars: int = Field(default=1, ge=1, le=10, description="壓縮持續性：最近 N 根都要 < 門檻")
     min_abs_bb_width: float = Field(default=0.0, ge=0.0, le=50.0, description="絕對 BB Width 下限 %（排除常年低波動）")
     history_days: int = Field(default=400, ge=220, le=3000, description="抓取歷史天數（日曆日）；下限 220 ≈ 150 交易日")
+    # v137：v136 Bollinger 訊號（預設開）；設 False 可 fallback 純 BB Width 掃描
+    enable_v136: bool = Field(default=True, description="是否算 v136 完整布林通道訊號（Squeeze / 突破 / Walking / 反轉）")
 
 
 def _sse_event(event_type: str, data: dict) -> str:
@@ -63,6 +65,7 @@ async def scan_tw_bb_width(request: TwBBScanRequest):
                 persistence_bars=request.persistence_bars,
                 min_abs_bb_width=request.min_abs_bb_width,
                 history_days=request.history_days,
+                enable_v136=request.enable_v136,
             ):
                 evt_type = evt.pop("type")
                 if evt_type == "result":

@@ -22,6 +22,7 @@ import pandas as pd
 from loguru import logger
 
 from app.core.indicators.technical import calc_vol_squeeze
+from app.core.bollinger_signals import classify_bollinger_signal
 from app.data.fetchers.tw_stock_engine import TwStockEngine
 from app.data.fetchers.tw_universe import TwStock, tw_universe
 
@@ -80,6 +81,8 @@ class ScanResult:
     bb_width: float           # 絕對寬度（%）
     volume_5d_avg: int        # 5 日均量（張）
     change_20d: float         # 近 20 根漲跌幅（%）
+    # v137：v136 Bollinger 完整訊號（若 enable_v136 為 False 則為 None）
+    bollinger_signal: Optional[dict] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -125,6 +128,7 @@ class TwBBWidthScanner:
         persistence_bars: int = 1,            # 最近 N 根都要壓縮（>1 = 要求持續性）
         min_abs_bb_width: float = 0.0,        # 絕對 BB Width 下限 %（排除常年低波動標的）
         history_days: int = _HISTORY_DAYS,    # 抓取歷史天數（日曆日）
+        enable_v136: bool = True,             # v137：是否算 v136 Bollinger 訊號（fallback 用）
     ) -> AsyncIterator[dict]:
         """執行全市場掃描。
 
@@ -164,6 +168,7 @@ class TwBBWidthScanner:
                         persistence_bars=persistence_bars,
                         min_abs_bb_width=min_abs_bb_width,
                         history_days=history_days,
+                        enable_v136=enable_v136,
                     )
                     if res is not None:
                         state["found"] += 1
@@ -259,6 +264,7 @@ class TwBBWidthScanner:
         persistence_bars: int = 1,
         min_abs_bb_width: float = 0.0,
         history_days: int = _HISTORY_DAYS,
+        enable_v136: bool = True,
     ) -> Optional[ScanResult]:
         """評估單一標的是否符合 BB 壓縮 + 進階過濾條件。"""
         symbol = f"{stock.code}/TWD"
@@ -349,6 +355,15 @@ class TwBBWidthScanner:
         else:
             change_20d = 0.0
 
+        # v137：算 v136 完整 Bollinger 訊號（含 8 維特徵 + classify）
+        bollinger_signal_result = None
+        if enable_v136:
+            try:
+                adx_for_bollinger = _compute_adx(df, period=14) if len(df) >= 30 else None
+                bollinger_signal_result = _compute_v136_bollinger(df, adx_for_bollinger)
+            except Exception as _bb_err:
+                logger.debug(f"[v137] {stock.code} bollinger 計算失敗: {_bb_err}")
+
         return ScanResult(
             code=stock.code,
             name=stock.name,
@@ -360,7 +375,133 @@ class TwBBWidthScanner:
             bb_width=round(float(bb_width_abs), 2),
             volume_5d_avg=volume_5d_avg,
             change_20d=round(change_20d, 2),
+            bollinger_signal=bollinger_signal_result,
         )
+
+
+def _compute_v136_bollinger(df: pd.DataFrame, adx_val: Optional[float]) -> Optional[dict]:
+    """v137：依台股單支 df 算 v136 Bollinger 8 個特徵並呼叫 classify_bollinger_signal。
+
+    與 auto_scanner.py 對應路徑等價，但用 pandas 計算（df 模式），不依賴 numpy 預計算。
+    """
+    if len(df) < 30:
+        return None
+
+    try:
+        closes = df["close"].astype(float).values
+        highs = df["high"].astype(float).values
+        lows = df["low"].astype(float).values
+        volumes = df["volume"].astype(float).values if "volume" in df.columns else np.zeros(len(df))
+
+        # BB 20 + std
+        sma20 = pd.Series(closes).rolling(20).mean().values
+        std20 = pd.Series(closes).rolling(20).std().values
+        bb_upper = sma20 + 2 * std20
+        bb_lower = sma20 - 2 * std20
+        bb_width = (bb_upper - bb_lower) / (sma20 + 1e-10) * 100
+        bb_pos = (closes - bb_lower) / (bb_upper - bb_lower + 1e-10) * 100  # 0-100 %
+
+        # ATR(14)
+        tr = np.maximum(
+            highs - lows,
+            np.maximum(
+                np.abs(highs - np.roll(closes, 1)),
+                np.abs(lows - np.roll(closes, 1)),
+            ),
+        )
+        atr14 = pd.Series(tr).rolling(14).mean().values
+        atr_50_avg = float(np.nanmean(atr14[-60:-10])) if len(atr14) >= 60 else float(atr14[-1])
+        atr_relative = float(atr14[-1] / (atr_50_avg + 1e-10)) if atr_50_avg > 0 else 1.0
+
+        # OBV
+        price_change_sign = np.sign(np.diff(closes, prepend=closes[0]))
+        obv = np.cumsum(price_change_sign * volumes)
+
+        # Keltner
+        keltner_upper = sma20 + 1.5 * atr14
+        keltner_lower = sma20 - 1.5 * atr14
+
+        # is_squeeze + duration
+        is_squeeze = (bb_upper < keltner_upper) & (bb_lower > keltner_lower)
+        squeeze_duration = np.zeros(len(is_squeeze), dtype=int)
+        run = 0
+        for i in range(len(is_squeeze)):
+            if is_squeeze[i]:
+                run += 1
+            else:
+                run = 0
+            squeeze_duration[i] = run
+
+        last = len(closes) - 1
+        # 8 個 v136 特徵組裝成 dict（與 auto_scanner._compute_features 對齊）
+        features = {
+            "bb_position": float(bb_pos[last]) if not np.isnan(bb_pos[last]) else 50.0,
+            "bb_position_lag1": (
+                float(bb_pos[last - 1]) if last >= 1 and not np.isnan(bb_pos[last - 1]) else 50.0
+            ),
+            "bb_width": float(bb_width[last]) if not np.isnan(bb_width[last]) else 0.0,
+            "bb_width_roc": (
+                float(bb_width[last] / bb_width[last - 4] - 1) * 100
+                if last >= 4 and not np.isnan(bb_width[last - 4]) and bb_width[last - 4] > 1e-10
+                else 0.0
+            ),
+            "z_score_20": (
+                float((closes[last] - sma20[last]) / std20[last])
+                if not np.isnan(std20[last]) and std20[last] > 1e-10
+                else 0.0
+            ),
+            "atr_relative": atr_relative,
+            "obv_slope_10": (
+                float(np.polyfit(np.arange(10), obv[-10:], 1)[0] / (np.mean(np.abs(obv[-10:])) + 1e-10))
+                if last >= 10 else 0.0
+            ),
+            "is_squeeze": bool(is_squeeze[last]),
+            "squeeze_duration": int(squeeze_duration[last]),
+            "adx": float(adx_val) if adx_val is not None else 0.0,
+            "pct_6bar": (
+                float((closes[last] - closes[last - 6]) / closes[last - 6] * 100)
+                if last >= 6 and closes[last - 6] > 0 else 0.0
+            ),
+        }
+
+        prev_features = {
+            "bb_position": float(bb_pos[last - 1]) if last >= 1 and not np.isnan(bb_pos[last - 1]) else 50.0,
+            "bb_position_lag1": float(bb_pos[last - 2]) if last >= 2 and not np.isnan(bb_pos[last - 2]) else 50.0,
+            "is_squeeze": bool(is_squeeze[last - 1]) if last >= 1 else False,
+            "squeeze_duration": int(squeeze_duration[last - 1]) if last >= 1 else 0,
+        }
+
+        recent_bb_positions = [float(bb_pos[i]) for i in range(max(0, last - 4), last + 1) if not np.isnan(bb_pos[i])]
+
+        # inline regime 推斷（與 auto_scanner._derive_regime_from_features 對齊）
+        adx_v = features.get("adx", 0)
+        pct_6 = features.get("pct_6bar", 0)
+        bp = features.get("bb_position", 50)
+        if adx_v >= 25:
+            if pct_6 > 0.5 or bp > 60:
+                regime = "trending_up"
+            elif pct_6 < -0.5 or bp < 40:
+                regime = "trending_down"
+            else:
+                regime = "ranging"
+        else:
+            regime = "ranging"
+
+        close = float(closes[last])
+        result = classify_bollinger_signal(
+            features, prev_features, recent_bb_positions, regime,
+            close=close,
+            sma20=float(sma20[last]) if not np.isnan(sma20[last]) else close,
+            bb_upper=float(bb_upper[last]) if not np.isnan(bb_upper[last]) else close * 1.02,
+            bb_lower=float(bb_lower[last]) if not np.isnan(bb_lower[last]) else close * 0.98,
+            atr=float(atr14[last]) if not np.isnan(atr14[last]) else close * 0.01,
+        )
+        if result:
+            result["regime_used"] = regime
+        return result
+    except Exception as e:
+        logger.debug(f"[v137] _compute_v136_bollinger 失敗: {e}")
+        return None
 
 
 def _compute_adx(df: pd.DataFrame, period: int = 14) -> Optional[float]:

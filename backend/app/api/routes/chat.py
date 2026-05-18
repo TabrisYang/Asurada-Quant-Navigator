@@ -1554,6 +1554,34 @@ def _build_messages(
             f"使用者備註：{request.message if request.message.strip() else '請規劃當前標的的分批進場價位'}"
         )
         messages.append({"role": "user", "content": cl_prefix})
+    elif request.mode == "bollinger_full":
+        # v137：完整布林通道符合度分析（綜合 8 維特徵 + 4 策略評分 + 最佳策略 entry/exit）
+        bf_prefix = (
+            "[系統指令：使用者點擊了「布林通道完整度分析」按鈕]\n"
+            "你必須執行以下步驟：\n"
+            "1. 先呼叫 query_chart_data 取得當前最新 OHLCV + BB / SMA20 / ATR / 量能數據\n"
+            "2. 從數據算 8 個布林通道核心特徵：\n"
+            "   - PctB (bb_position): 當前 %B 值（0-100 區間位置）\n"
+            "   - PctB_lag1: 前一根 %B（跨軌瞬間判斷）\n"
+            "   - Bandwidth_ROC: bb_width 近 4 根變動率（波動爆發）\n"
+            "   - Z_Score_20: (close - sma20) / std20（σ 偏離倍數）\n"
+            "   - ATR_Ratio: atr14 / 過去 50 根平均 atr14\n"
+            "   - OBV_Slope_10: 近 10 根 OBV 線性回歸斜率（量能動能）\n"
+            "   - is_squeeze: BB 是否收進 Keltner（squeeze 標準定義）\n"
+            "   - squeeze_duration: squeeze 連續根數\n"
+            "3. 評分 4 個布林策略各自的當下匹配度（0-100 分）：\n"
+            "   - The Squeeze 待發程度（is_squeeze=True 加分 / squeeze_duration 越長越高）\n"
+            "   - Squeeze Breakout 剛發生程度（prev is_squeeze + 本根釋放 + bandwidth_roc>0 + 量配合）\n"
+            "   - Walk the Band 進行程度（ADX>25 + 連續觸軌）\n"
+            "   - Mean Reversion 觸發程度（ranging regime + 觸軌後回到通道）\n"
+            "4. 選最高分策略，依該策略給對應 entry / stop / target / RR\n"
+            "5. 標明當前 regime + 該策略在此 regime 的歷史適配度\n"
+            "報告主結論必須含「**綜合完整度評分 X / 100**」（4 個策略最高分），\n"
+            "並列出 8 個特徵當下值與符合方向（✅/⚠️/❌）。\n"
+            "**禁止**反問使用者或輸出延伸引導句型，本次必須一次完成所有計算。\n\n"
+            f"使用者備註：{request.message if request.message.strip() else '請評估當前標的的完整布林通道符合度'}"
+        )
+        messages.append({"role": "user", "content": bf_prefix})
     elif request.mode == "sector_analysis":
         sec_prefix = (
             "[系統指令：使用者點擊了「族群分析」按鈕]\n"

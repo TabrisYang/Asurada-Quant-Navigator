@@ -469,6 +469,23 @@ export interface TwScanResult {
   bb_width: number;
   volume_5d_avg: number;  // 張
   change_20d: number;     // %
+  // v137：v136 Bollinger 完整訊號（含 entry/exit 規劃）
+  bollinger_signal?: {
+    signal?: string;            // SIGNAL_SQUEEZE_ACTIVE / SQUEEZE_BREAKOUT_UP / WALKING_UPPER_BAND 等
+    label?: string;             // 中文標籤如「Squeeze 突破上軌」
+    emoji?: string;             // ⚡ / 🟢 / ⬆️
+    strategy?: string;          // squeeze_breakout / walk_the_band / mean_reversion / the_squeeze
+    regime_used?: string;       // trending_up / trending_down / ranging / unknown
+    entry_exit?: {
+      entry?: number;
+      stop?: number | null;
+      target_1?: number | null;
+      target_2?: number | null;
+      rr_1?: number;
+      rr_2?: number;
+    };
+    features_used?: Record<string, unknown>;
+  } | null;
 }
 
 export interface TwScanProgress {
