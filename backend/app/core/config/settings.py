@@ -111,6 +111,17 @@ class Settings(BaseSettings):
     # 不需 revert PR。chat.py 注入點與 function_defs.py 規則段都會檢查此 flag。
     probability_triplet_enabled: bool = True
 
+    # v136：完整布林通道策略系統（3 核心策略 + regime 切換 + entry/exit/stop）
+    # 預設 True；若想暫時關閉，設 False 即可，auto_scanner 會 fallback 原行為。
+    bollinger_signals_enabled: bool = True
+    # 布林策略 threshold 微調（可從 .env 覆蓋）
+    bollinger_squeeze_min_duration: int = 5
+    bollinger_breakout_bandwidth_roc: float = 5.0
+    bollinger_walk_band_min_touches: int = 3
+    bollinger_walk_band_min_adx: float = 25.0
+    bollinger_upper_band_threshold: float = 0.9
+    bollinger_lower_band_threshold: float = 0.1
+
     # v132：完整分析「編排管線」— 把 seg2 monolith（13 段一次出）拆成
     # 5 個維度 focused call + 1 個 synthesis call，每維度品質對齊「單獨問」。
     # 預設 False（灰度）；確認 shadow mode 不劣化後再切 True。

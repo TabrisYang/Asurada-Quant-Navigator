@@ -23,6 +23,76 @@ from loguru import logger
 
 from app.core.config.settings import settings
 from app.core.stats_utils import wilson_ci as _wilson_ci
+from app.core.bollinger_signals import classify_bollinger_signal as _classify_bollinger
+
+
+def _derive_regime_from_features(features: dict) -> str:
+    """v136：依當下 ADX + bb_position 簡易推斷 regime（不依賴 regime_filter）。
+
+    這是 bollinger_signals 用的「inline regime」，不是系統正式 regime。
+    正式 regime 判定在 regime_filter.py，但 auto_scanner 流程未呼叫它。
+    """
+    adx = features.get("adx", 0)
+    bb_pos = features.get("bb_position", 50)
+    pct_6bar = features.get("pct_6bar", 0)
+
+    if adx >= 25:
+        if pct_6bar > 0.5 or bb_pos > 60:
+            return "trending_up"
+        elif pct_6bar < -0.5 or bb_pos < 40:
+            return "trending_down"
+    return "ranging"
+
+
+def _compute_bollinger_status(ind: dict, features: dict, idx: list[int]) -> dict | None:
+    """v136：依當下特徵 + 前一根特徵 + 近 5 根 bb_position 偵測 Bollinger 訊號。
+
+    回傳 classify_bollinger_signal 的結果，或 None。
+    """
+    if not getattr(settings, "bollinger_signals_enabled", True):
+        return None
+
+    last = idx[-1]
+    bb_pos_arr = ind.get("bb_pos")
+    if bb_pos_arr is None or last < 1:
+        return None
+
+    # 取前一根的精簡特徵（給 breakout / reversion detector 用）
+    prev_features = {
+        "bb_position": float(bb_pos_arr[last - 1]) if not np.isnan(bb_pos_arr[last - 1]) else 50,
+        "bb_position_lag1": float(bb_pos_arr[last - 2]) if last >= 2 and not np.isnan(bb_pos_arr[last - 2]) else 50,
+        "is_squeeze": bool(ind["is_squeeze"][last - 1]) if "is_squeeze" in ind else False,
+        "squeeze_duration": int(ind["squeeze_duration"][last - 1]) if "squeeze_duration" in ind else 0,
+    }
+
+    # 近 5 根 bb_position（給 walk_the_band detector 用）
+    recent_bb_positions = []
+    for i in range(max(0, last - 4), last + 1):
+        v = bb_pos_arr[i]
+        if not np.isnan(v):
+            recent_bb_positions.append(float(v))
+
+    # 推斷 regime
+    regime = _derive_regime_from_features(features)
+
+    # 取當下價格、通道值、ATR（給 entry/exit 計算用）
+    close = float(ind["closes"][last])
+    sma20 = float(ind["ma20"][last]) if not np.isnan(ind["ma20"][last]) else close
+    bb_upper = float(ind.get("bb_upper", [close])[last]) if "bb_upper" in ind else close * 1.02
+    bb_lower = float(ind.get("bb_lower", [close])[last]) if "bb_lower" in ind else close * 0.98
+    atr = float(ind["atr14"][last]) if not np.isnan(ind["atr14"][last]) else close * 0.01
+
+    try:
+        result = _classify_bollinger(
+            features, prev_features, recent_bb_positions, regime,
+            close, sma20, bb_upper, bb_lower, atr,
+        )
+        if result:
+            result["regime_used"] = regime
+        return result
+    except Exception as e:
+        logger.debug(f"[v136] bollinger_signal 偵測失敗: {e}")
+        return None
 
 
 # ─── 常量 ────────────────────────────────────────────
@@ -58,6 +128,13 @@ def _compute_features(
     plus_di: np.ndarray,
     minus_di: np.ndarray,
     idx: list[int],
+    # v136：布林通道完整策略系統 — 進階特徵（向後相容，可選參數）
+    bb_std: np.ndarray | None = None,
+    obv: np.ndarray | None = None,
+    keltner_upper: np.ndarray | None = None,
+    keltner_lower: np.ndarray | None = None,
+    is_squeeze: np.ndarray | None = None,
+    squeeze_duration: np.ndarray | None = None,
 ) -> dict:
     """計算一個 6 根窗口的全部前兆特徵。"""
     c = closes[idx]
@@ -154,6 +231,51 @@ def _compute_features(
     # 6 根漲跌
     f["pct_6bar"] = float((c[-1] - c[0]) / (c[0] + 1e-10) * 100)
 
+    # ── v136 布林通道完整策略 — 進階特徵 ──
+    # PctB_lag1：前一根的 %B（跨軌瞬間判斷）
+    if last >= 1 and not np.isnan(bb_pos[last - 1]):
+        f["bb_position_lag1"] = float(bb_pos[last - 1])
+    else:
+        f["bb_position_lag1"] = float(bb_pos[last])
+
+    # Bandwidth_ROC：bb_width 近 4 根變動率（抓波動爆發）
+    if last >= 4 and not np.isnan(bb_width[last - 4]) and bb_width[last - 4] > 1e-10:
+        f["bb_width_roc"] = float(bb_width[last] / bb_width[last - 4] - 1) * 100
+    else:
+        f["bb_width_roc"] = 0.0
+
+    # Z_Score：(close - sma20) / std20（價格偏離均線 σ 倍數）
+    if bb_std is not None and last < len(bb_std) and not np.isnan(bb_std[last]) and bb_std[last] > 1e-10:
+        f["z_score_20"] = float((c[-1] - ma20[last]) / bb_std[last])
+    else:
+        f["z_score_20"] = 0.0
+
+    # OBV_Slope：近 10 根 OBV 線性回歸斜率（量能動能）
+    if obv is not None and last >= 10:
+        recent_obv = obv[last - 9 : last + 1]
+        if not np.any(np.isnan(recent_obv)):
+            x = np.arange(10)
+            try:
+                slope = float(np.polyfit(x, recent_obv, 1)[0])
+                # 標準化到 -1~+1 區間，除以平均 OBV 量級避免數值爆炸
+                obv_mean = float(np.mean(np.abs(recent_obv)) + 1e-10)
+                f["obv_slope_10"] = slope / obv_mean
+            except (np.linalg.LinAlgError, ValueError):
+                f["obv_slope_10"] = 0.0
+        else:
+            f["obv_slope_10"] = 0.0
+    else:
+        f["obv_slope_10"] = 0.0
+
+    # Keltner Channel + Squeeze 偵測（The Squeeze 策略的標準做法）
+    if keltner_upper is not None and keltner_lower is not None:
+        f["keltner_upper"] = float(keltner_upper[last]) if not np.isnan(keltner_upper[last]) else 0.0
+        f["keltner_lower"] = float(keltner_lower[last]) if not np.isnan(keltner_lower[last]) else 0.0
+    if is_squeeze is not None:
+        f["is_squeeze"] = bool(is_squeeze[last])
+    if squeeze_duration is not None:
+        f["squeeze_duration"] = int(squeeze_duration[last])
+
     return f
 
 
@@ -206,6 +328,28 @@ def _precompute_indicators(df: pd.DataFrame) -> dict:
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
     adx = pd.Series(dx).rolling(14).mean().values
 
+    # v136 布林通道完整策略 — 進階指標
+    # OBV：On-Balance Volume 累積值
+    price_change_sign = np.sign(np.diff(closes, prepend=closes[0]))
+    obv = np.cumsum(price_change_sign * volumes)
+
+    # Keltner Channel：sma20 ± 1.5 × atr14（squeeze 偵測標準）
+    keltner_upper = bb_ma + 1.5 * atr14
+    keltner_lower = bb_ma - 1.5 * atr14
+
+    # is_squeeze：BB 收進 Keltner 內（John Bollinger 標準定義）
+    is_squeeze = (bb_upper < keltner_upper) & (bb_lower > keltner_lower)
+
+    # squeeze_duration：is_squeeze 連續 True 根數（squeeze 越久爆發越強）
+    squeeze_duration = np.zeros(len(is_squeeze), dtype=int)
+    run = 0
+    for i in range(len(is_squeeze)):
+        if is_squeeze[i]:
+            run += 1
+        else:
+            run = 0
+        squeeze_duration[i] = run
+
     return {
         "closes": closes,
         "opens": opens,
@@ -218,10 +362,19 @@ def _precompute_indicators(df: pd.DataFrame) -> dict:
         "rsi14": rsi14,
         "bb_pos": bb_pos,
         "bb_width": bb_width,
+        "bb_std": bb_std,
+        "bb_upper": bb_upper,
+        "bb_lower": bb_lower,
         "atr14": atr14,
         "adx": adx,
         "plus_di": plus_di,
         "minus_di": minus_di,
+        # v136 布林通道進階特徵
+        "obv": obv,
+        "keltner_upper": keltner_upper,
+        "keltner_lower": keltner_lower,
+        "is_squeeze": is_squeeze,
+        "squeeze_duration": squeeze_duration,
     }
 
 
@@ -687,6 +840,12 @@ def _estimate_movement_probability(
             ind["rsi14"], ind["bb_pos"], ind["bb_width"],
             ind["atr14"], ind["adx"], ind["plus_di"], ind["minus_di"],
             idx,
+            bb_std=ind.get("bb_std"),
+            obv=ind.get("obv"),
+            keltner_upper=ind.get("keltner_upper"),
+            keltner_lower=ind.get("keltner_lower"),
+            is_squeeze=ind.get("is_squeeze"),
+            squeeze_duration=ind.get("squeeze_duration"),
         )
 
         # 特徵向量相似度篩選
@@ -908,6 +1067,9 @@ class AutoScanner:
 
             signals = _detect_signals(features, calibrations, feature_profiles)
 
+            # v136：布林通道完整策略系統 — 偵測 Bollinger signal 並附到所有 alerts
+            bollinger_result = _compute_bollinger_status(ind, features, idx)
+
             if not signals:
                 return []
 
@@ -984,6 +1146,8 @@ class AutoScanner:
                                     "triggered": sig["triggered"],
                                     "features": features,
                                     "probability": sig.get("probability"),
+                                    # v136：附 Bollinger 訊號狀態給前端 / LLM 報告引用
+                                    "bollinger": bollinger_result,
                                 },
                                 ensure_ascii=False,
                             ),
@@ -1006,6 +1170,13 @@ class AutoScanner:
                                 sig["probability"]["evidence_summary"]
                                 if sig.get("probability") else None
                             ),
+                            # v136：Bollinger 訊號狀態 (signal / emoji / label / strategy / entry_exit)
+                            "bollinger_status": bollinger_result.get("signal") if bollinger_result else None,
+                            "bollinger_emoji": bollinger_result.get("emoji") if bollinger_result else None,
+                            "bollinger_label": bollinger_result.get("label") if bollinger_result else None,
+                            "bollinger_strategy": bollinger_result.get("strategy") if bollinger_result else None,
+                            "bollinger_entry_exit": bollinger_result.get("entry_exit") if bollinger_result else None,
+                            "bollinger_regime": bollinger_result.get("regime_used") if bollinger_result else None,
                         }
                     )
 
@@ -1209,6 +1380,12 @@ class AutoScanner:
             ind["rsi14"], ind["bb_pos"], ind["bb_width"],
             ind["atr14"], ind["adx"], ind["plus_di"], ind["minus_di"],
             idx,
+            bb_std=ind.get("bb_std"),
+            obv=ind.get("obv"),
+            keltner_upper=ind.get("keltner_upper"),
+            keltner_lower=ind.get("keltner_lower"),
+            is_squeeze=ind.get("is_squeeze"),
+            squeeze_duration=ind.get("squeeze_duration"),
         )
 
         from app.core.scanner_calibrator import scanner_calibrator
@@ -1273,6 +1450,12 @@ class AutoScanner:
             ind["rsi14"], ind["bb_pos"], ind["bb_width"],
             ind["atr14"], ind["adx"], ind["plus_di"], ind["minus_di"],
             idx,
+            bb_std=ind.get("bb_std"),
+            obv=ind.get("obv"),
+            keltner_upper=ind.get("keltner_upper"),
+            keltner_lower=ind.get("keltner_lower"),
+            is_squeeze=ind.get("is_squeeze"),
+            squeeze_duration=ind.get("squeeze_duration"),
         )
 
         from app.core.scanner_calibrator import scanner_calibrator

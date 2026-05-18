@@ -1592,6 +1592,20 @@ export interface Alert {
   evidence_summary?: string;
   probability_detail?: Record<string, { up_pct: number; down_pct: number; any_move_pct: number }>;
   feature_attribution?: Array<{ feature: string; presence_in_hits: number; lift: number }>;
+  // v136 完整布林通道策略系統 — 訊號狀態
+  bollinger_status?: string;       // SIGNAL_SQUEEZE_ACTIVE / SQUEEZE_BREAKOUT_UP / WALKING_UPPER_BAND 等
+  bollinger_emoji?: string;        // ⚡ / 🟢 / ⬆️ 等視覺 emoji
+  bollinger_label?: string;        // 中文標籤如「Squeeze 突破上軌」
+  bollinger_strategy?: string;     // squeeze_breakout / walk_the_band / mean_reversion / the_squeeze
+  bollinger_entry_exit?: {
+    entry?: number;
+    stop?: number | null;
+    target_1?: number | null;
+    target_2?: number | null;
+    rr_1?: number;
+    rr_2?: number;
+  };
+  bollinger_regime?: string;       // trending_up / trending_down / ranging / unknown
 }
 
 export async function fetchActiveAlerts(symbol?: string) {

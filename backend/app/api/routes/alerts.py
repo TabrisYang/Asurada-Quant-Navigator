@@ -11,7 +11,7 @@ router = APIRouter()
 
 
 def _enrich_alert(alert: dict) -> dict:
-    """從 trigger_conditions JSON 中解析 probability 欄位，附加到頂層。"""
+    """從 trigger_conditions JSON 中解析 probability + v136 bollinger 欄位，附加到頂層。"""
     tc = alert.get("trigger_conditions")
     if tc and isinstance(tc, str):
         try:
@@ -21,6 +21,15 @@ def _enrich_alert(alert: dict) -> dict:
                 alert["evidence_summary"] = prob.get("evidence_summary")
                 alert["probability_detail"] = prob.get("probability")
                 alert["feature_attribution"] = prob.get("feature_attribution")
+            # v136：附 Bollinger 訊號狀態（含 entry/exit/stop）
+            bollinger = parsed.get("bollinger")
+            if bollinger:
+                alert["bollinger_status"] = bollinger.get("signal")
+                alert["bollinger_emoji"] = bollinger.get("emoji")
+                alert["bollinger_label"] = bollinger.get("label")
+                alert["bollinger_strategy"] = bollinger.get("strategy")
+                alert["bollinger_entry_exit"] = bollinger.get("entry_exit")
+                alert["bollinger_regime"] = bollinger.get("regime_used")
         except (json.JSONDecodeError, AttributeError):
             pass
     return alert

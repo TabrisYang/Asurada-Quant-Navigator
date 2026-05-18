@@ -296,6 +296,26 @@ export default function AlertPanel() {
                           {alert.move_probability!.toFixed(0)}%波動
                         </span>
                       )}
+                      {/* v136：Bollinger 訊號狀態 tag */}
+                      {alert.bollinger_status && alert.bollinger_label && (
+                        <span
+                          style={{
+                            background: 'rgba(63,185,80,0.15)',
+                            color: '#3fb950',
+                            borderRadius: '3px',
+                            padding: '0 4px',
+                            fontSize: '10px',
+                            fontWeight: 600,
+                          }}
+                          title={`策略: ${alert.bollinger_strategy} | regime: ${alert.bollinger_regime}${
+                            alert.bollinger_entry_exit?.stop
+                              ? ` | SL: ${alert.bollinger_entry_exit.stop.toFixed(2)} TP1: ${alert.bollinger_entry_exit.target_1?.toFixed(2)} (RR: ${alert.bollinger_entry_exit.rr_1})`
+                              : ''
+                          }`}
+                        >
+                          {alert.bollinger_emoji} {alert.bollinger_label}
+                        </span>
+                      )}
                       {/* Outcome (history only) */}
                       {alert.outcome_pct != null && (
                         <span
