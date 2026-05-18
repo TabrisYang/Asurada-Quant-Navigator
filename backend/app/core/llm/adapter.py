@@ -1352,7 +1352,9 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
             full_text = ""
             usage = None
             result_data = None
-            _line_timeout = 600  # P1：與前端 STREAM_TIMEOUT_MS=600 對齊，避免後端先掛
+            # v138：原 600s 對 v132 編排管線（5 維度並行，14 分鐘是常態）太緊
+            # 拉到 1200s（20 分鐘）與前端 STREAM_TIMEOUT_MS=1200000 (ms) 對齊
+            _line_timeout = 1200
 
             while True:
                 try:
@@ -1466,7 +1468,9 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
             await proc.stdin.drain()
             proc.stdin.close()
 
-            _line_timeout = 600  # P1：與前端 STREAM_TIMEOUT_MS=600 對齊，避免後端先掛
+            # v138：原 600s 對 v132 編排管線（5 維度並行，14 分鐘是常態）太緊
+            # 拉到 1200s（20 分鐘）與前端 STREAM_TIMEOUT_MS=1200000 (ms) 對齊
+            _line_timeout = 1200
 
             while True:
                 try:
@@ -1576,7 +1580,9 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
             await proc.stdin.drain()
             proc.stdin.close()
 
-            _line_timeout = 600  # P1：與前端 STREAM_TIMEOUT_MS=600 對齊，避免後端先掛
+            # v138：原 600s 對 v132 編排管線（5 維度並行，14 分鐘是常態）太緊
+            # 拉到 1200s（20 分鐘）與前端 STREAM_TIMEOUT_MS=1200000 (ms) 對齊
+            _line_timeout = 1200
 
             while True:
                 try:

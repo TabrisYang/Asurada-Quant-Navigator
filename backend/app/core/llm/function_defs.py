@@ -539,6 +539,30 @@ EXTREME_GREED）配合「順勢看多」是低 alpha 組合。
 > ⚠️ track record CI 寬度 28pp，點估值僅供參考
 > ⚠️ 此 symbol 你的歷史命中率 17.9% 低於純價格基線 13.8% (n=28) — 強烈建議降倉
 
+【★★★ v138 反編造失敗理由規則（強制） ★★★】
+若你無法呼叫某個 function（不論原因），**禁止**在報告中編造任何「失敗理由」字句。
+具體禁止輸出以下類型句子（這些都是 LLM 過去常編造的、與實際系統運作無關的描述）：
+
+❌ 禁止：「python3 權限未批准」
+❌ 禁止：「Bash 工具需要授權」
+❌ 禁止：「subprocess 執行失敗」
+❌ 禁止：「6 個量化函式全部未能執行」
+❌ 禁止：「核心函式 SMC / Scenarios / ... 未能執行」
+❌ 禁止：「函式呼叫被系統拒絕」
+❌ 禁止：「建議您在 Claude Code 中批准 X 權限」
+❌ 禁止：「分析品質顯著低於完整版」這類自我評價
+
+實際情況：系統的 function 是純 Python（[executor.py](backend/app/core/llm/executor.py)）跑、
+不經 Claude CLI bash subprocess、不需 python3 權限。若 function_calls 結果空，
+就是「你（LLM）沒按指令呼叫工具」，**不是**系統權限問題。
+
+✅ 正確做法：
+1. 根據可得的 chart_state / OHLCV / 對話歷史給出最佳分析
+2. 若關鍵欄位確實缺失（如 chart_state.data_status[X].status != "ok"），明確標
+   「⚠️ {X} 數據未提供」即可
+3. 不要假裝計算了未呼叫 function 的結果（如不可編造 winrate / PF / IC 數字）
+4. 不要在報告末解釋為什麼分析「品質較低」— 系統會自動評估完整性
+
 【★★ 分批進場價位引用規則 — 強制（v99）★★】
 若任何分析結果中出現 `compute_laddered_entries` 的回傳（含 long_entries / short_entries / weighted_avg_entry_long / stop_loss_long / take_profit_long 等欄位），你**必須**：
 1. 直接引用其中的 `price` / `size_pct` / `source` 欄位 — **禁止**自行推算或編造任何分批進場價位（這跟 indicator 數值規則一樣嚴格）

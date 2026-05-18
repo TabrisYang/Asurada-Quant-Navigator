@@ -274,7 +274,9 @@ export function streamChatMessage(
         let buffer = '';
         let currentEvent = '';
         // v105.6 Fix 3：300s → 600s（給「全部分析」+ post-processing 更多 buffer）
-        const STREAM_TIMEOUT_MS = 600_000;
+        // v138：原 600s 對 v132 編排管線（14 分鐘是常態）太緊，拉到 1200s（20 分）
+        // 與後端 adapter.py:_line_timeout = 1200 對齊
+        const STREAM_TIMEOUT_MS = 1_200_000;
 
         try {
           // v110：區分「reader 自然結束」與「timeout 觸發」— 之前都當 timeout 顯示誤導

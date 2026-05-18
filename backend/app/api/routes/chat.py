@@ -237,6 +237,41 @@ def _try_parse_as_function_call(obj: dict) -> dict | None:
     return None
 
 
+_V138_SEGMENT_PATTERNS = [
+    # # 1 / ## 1 / ### 1 / #### 1（含 .5 副段）
+    re.compile(r'(?:^|\n)\s*#{1,4}\s*(\d+(?:\.5)?)\b'),
+    # ## 第一部分 / ## 第二、 / ### 三、 / ### 第三項（「第」可選）
+    re.compile(r'(?:^|\n)\s*#{1,4}\s*第?\s*([一二三四五六七八九十])\s*[、.部項段章]'),
+    # **1.** / **1)** / 1. / 1) — 行首加粗或裸數字編號
+    re.compile(r'(?:^|\n)\s*(?:\*{1,2})?\s*(\d+)[.\)、]\s*'),
+    # 段落 #1 / 段落 1 / 段落-1
+    re.compile(r'(?:^|\n)\s*段落\s*[#-]?\s*(\d+)\b'),
+]
+
+_CN_TO_NUM = {
+    "一": "1", "二": "2", "三": "3", "四": "4", "五": "5",
+    "六": "6", "七": "7", "八": "8", "九": "9", "十": "10",
+}
+
+
+def _detect_segments_v138(text: str) -> set[str]:
+    r"""v138：用多 pattern 偵測段落編號，支援中英文混合多種結構。
+
+    取代原本 `r'(?:^|\n)\s*#\s*(\d+(?:\.5)?)\b'` 單一 pattern（誤判率高）。
+    支援：# N / ## N / ## 第一 / **1. / 段落 #N 等常見格式。
+    """
+    if not text:
+        return set()
+    found: set[str] = set()
+    for pat in _V138_SEGMENT_PATTERNS:
+        for m in pat.finditer(text):
+            num = m.group(1)
+            if num in _CN_TO_NUM:
+                num = _CN_TO_NUM[num]
+            found.add(num)
+    return found
+
+
 def _detect_mentioned_indicators(text: str, existing_ids: set[str]) -> list[dict]:
     """從 LLM 文字中偵測提到但未透過 function call 添加的指標"""
     if not text:
@@ -3343,9 +3378,9 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
 
                         # v129: seg2 段落完整性檢測 — 字數夠但段落仍可能缺
                         # 用「#N」標題正則掃描 seg2，比對預期 12 段（含 #5.5、#6.5）
+                        # v138: 改用多 pattern 偵測（支援 ## / 第一 / **1. 等多種結構）
                         _seg2_text_only = _r2_text_buf[_seg1_end:]
-                        _section_pattern = re.compile(r'(?:^|\n)\s*#\s*(\d+(?:\.5)?)\b')
-                        _found_sections = set(_section_pattern.findall(_seg2_text_only))
+                        _found_sections = _detect_segments_v138(_seg2_text_only)
                         _expected_sections = {'1', '2', '3', '4', '5', '5.5', '6', '6.5', '7', '8', '9', '10', '11'}
                         _missing_sections = _expected_sections - _found_sections
                         if _missing_sections:
@@ -3726,8 +3761,8 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                                 "type": "plain_text_too_short",
                                 "text_len": len(display_text),
                             })
-                        _section_pattern = re.compile(r'(?:^|\n)\s*#\s*(\d+(?:\.5)?)\b')
-                        _found_sections = set(_section_pattern.findall(display_text))
+                        # v138: 用多 pattern 段落偵測（支援 # / ## / ### / 第一 / **1. / 段落 #N 等）
+                        _found_sections = _detect_segments_v138(display_text)
                         # 純文字單段走的是舊 6 段結構（function_defs.py:1576-1582）
                         _expected_sections = {'1', '2', '3', '4', '5', '6'}
                         _missing_sections = _expected_sections - _found_sections
