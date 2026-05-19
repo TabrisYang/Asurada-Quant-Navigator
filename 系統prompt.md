@@ -1,6 +1,6 @@
 # 阿斯拉量化系統 — 完整系統 Prompt 與架構規格書
 
-> **最後更新：2026-05-13** — 與實際程式碼同步（v128）
+> **最後更新：2026-05-19** — 與實際程式碼同步（v139）
 
 ## 系統定位
 
@@ -1451,3 +1451,211 @@ GET    /api/health                   # 系統健康狀態
 - 成功 → 自動 COMMIT、exception → 自動 ROLLBACK
 - 杜絕「多 execute 之間 exception 後 commit 把半截 statements 一起提交」的 partial save 風險
 - 配套 v125-A + v125-B 三層治根
+
+---
+
+## v129 → v139 變更紀錄
+
+> 2026-05-13 之後新增（對應 session 開發）。
+> ⚠️ 注意：v124 在本段是「v124 機率三聯」（commit `3d4be50`），與先前文件 L1407
+> 的「v124 啟動腳本」（commit `987af15`）是**重複編號但不同變更**，靠 commit hash 區分。
+
+| 版本 | 主題 | commit |
+|---|---|---|
+| v129 | 完整分析報告缺項三管齊下修復 | `5530dda` |
+| v130 | comprehensive_analysis 純文字路徑兜底修復 | `2113cc0` |
+| v131 | taipei_now import + watcher tz 一致化 | `0f22c13` |
+| v132 | comprehensive_analysis 編排管線 map-reduce 重構 | `0a2fa35` + `821db92` + `cb0d4f1` |
+| v124 機率三聯 | chart_state.recent_accuracy.probability_triplet | `3d4be50` |
+| v133 | UI 分析按鈕重組 7 tabs + 6 mode handler | `fa0dba4` |
+| v133.1 | 一鍵連跑 sequence 擴充到 6 條 | `e7e98fe` |
+| v134 | v130 重試 28 分鐘卡頓修復 | `74e5297` |
+| v135 | 一鍵連跑 Bucket 重複 + 事件型態互動瑕疵 | `dc28ed6` |
+| v136 | 完整布林通道策略系統（8 特徵 + 4 detector） | `d49ca5a` |
+| v137 | 台股掃描整合 v136 + 個股完整度按鈕 | `cb65cbb` |
+| v138 | 一鍵連跑 3 bug 修復（編造 / 段落 / timeout） | `4a34f19` |
+| v139 | Token 優化（sequence r2_mode + 1h cache TTL） | `532a6d6` |
+| v140 | .command 自動更新到最新版 + 文件同步 | （本次） |
+
+### v129 `5530dda` — 完整分析報告缺項三管齊下修復
+
+接續 v123 `data_status` 治根欄位，發現「完整分析」報告仍有缺項：
+- 部分 chart_state 欄位 status 標 `partial` / `failed` 但段落仍寫「N/A」沒解釋
+- LLM 不一定遵守「R6: 撰寫每段前先檢查 data_status」規則
+- 缺項段落沒固定編號（#1-#6），前端 regex 偵測不到「LLM 早收」
+
+三管齊下修復：
+1. function_defs.py 強化「data_status 必須引用」規則，加範例強迫 LLM 寫
+   「⚠️ 資料不可得：[reason]」而非省略
+2. chat.py:_seg2 完整性檢測加 `regex` 搜「# N」標題，缺則 emit `seg2_missing_sections` warning
+3. seg2 prompt 規則加「每段必須以 `# N` 開頭」強制可被偵測
+
+### v130 `2113cc0` — comprehensive_analysis 純文字路徑兜底修復
+
+問題：LLM 在 CLI 模式下偶爾不呼叫任何 function，直接給純文字回應。
+v129 偵測到「缺段落」但流程仍按「有 function call」走 → 報告半截。
+
+修復：[chat.py:2812](backend/app/api/routes/chat.py#L2812) 加 v130 強制重試 block：
+- 若 `comprehensive_analysis in intents` 且 `function_calls=0` 且 `text_len>200`
+- → emit「[重試] LLM 未呼叫必要函式」+ 第 2 輪 prompt 加「**請現在呼叫 detect_smc_structure /
+  generate_scenarios / analyze_momentum / scan_conditional_probability /
+  run_quant_research / compute_laddered_entries**」
+- 重試完成才走後續 chart_updates 流程
+
+### v131 `0f22c13` — tz 一致化 + taipei_now import 補齊
+
+`watcher.py` 多處 datetime 用 `datetime.now()` 沒帶 timezone，與 `taipei_now()` 對齊計算
+expires_at 時偶爾出現 `naive vs aware` 比較錯誤。
+
+修：
+- 補 `from app.utils.timezone import taipei_now` import
+- `datetime.now()` 全改 `taipei_now()`
+- `datetime.fromisoformat(...)` 加 `.replace(tzinfo=now.tzinfo)` 補回 tz
+
+### v132 `0a2fa35` + `821db92` + `cb0d4f1` — comprehensive_analysis 編排管線 map-reduce 重構
+
+3 個 commit 把 comprehensive_analysis 從「單一巨型 LLM call」拆成 **map-reduce 編排管線**：
+
+[backend/app/core/llm/comprehensive_pipeline.py](backend/app/core/llm/comprehensive_pipeline.py) 新增：
+- **Map 階段**：5 個 focused call 並行（Semaphore=3）：
+  - `regime`（market 環境）→ `generate_scenarios`
+  - `structure`（結構分析）→ `detect_smc_structure` + `generate_scenarios`
+  - `momentum`（動能特徵）→ `analyze_momentum` + `scan_conditional_probability`
+  - `backtest`（多策略回測）→ `compare_strategies` + `run_quant_research`
+  - `quant`（量化研究）→ `run_quant_research`
+- **Reduce 階段**：1 個 synthesis call 整合 5 維度輸出，套統合報告 prompt
+
+效益：
+- 時間從 15-30 分降到 8-15 分（並行）
+- token 成本降 ~50%（每個 focused call 只載相關 prompt module）
+- 維度間獨立，單一維度失敗不影響其他
+
+配套：
+- `821db92` 新增 `backend/scripts/compare_shadow_reports.py`：2 週 baseline / post 比對 PF / 勝率 / 觸發頻率
+- `cb0d4f1` 前端 banner 顯示 2 週評估結果 + 一鍵回滾（feature flag `comprehensive_pipeline_enabled`）
+
+### v124 機率三聯 `3d4be50` — chart_state.recent_accuracy.probability_triplet
+
+> ⚠️ 此為「v124 重複編號」變更，與 L1400 的「v124 啟動腳本治本」是不同議題。
+
+使用者觀察分析報告「歷史命中率 15.4%」「baseline 37.3%」「100% 偏多」三個數字
+口徑不一致誤導。實際上：
+- baseline 是 path-max unconditional 純價格機率
+- 命中率是 conditional on 該 symbol 過去預測的純價格 hit_rate
+- 偏多是 9 維 bias_score 聚合的方向估計
+
+修復：[chat.py](backend/app/api/routes/chat.py) 注入 `recent_accuracy.probability_triplet`
+含三類數字 + Wilson CI：
+- 📊 baseline_unconditional：純價格 path-max + Wilson CI（[probability_baseline.py](backend/app/core/probability_baseline.py) 新檔）
+- 🧠 ta_conditional：bias_score 9 維聚合的 P(多)，無 CI（DB 無歷史 bias_score）
+- 📋 track_record：weighted win_rate + raw Wilson CI（[prediction_tracker.py:get_winrate_with_ci](backend/app/core/prediction_tracker.py)）
+
+LLM 強制照固定格式輸出三聯區塊（function_defs.py 規則 18-23）。
+
+副產品：抽 [stats_utils.py](backend/app/core/stats_utils.py) 集中 wilson_ci，重構 executor.py
++ auto_scanner.py 的兩處重複實作。
+
+### v133 `fa0dba4` — UI 分析按鈕重組 7 tabs + 6 mode handler
+
+把原本「平鋪 12 按鈕」重組為 7 個 tab 結構（每 tab 4-5 個 item）：
+1. 基礎分析（合併 GMM/HMM）
+2. **市場結構與情境** ★全新★：SMC / 三情境 / 條件機率 / 事件型態
+3. 動能分析
+4. 因子驗證（補因子衰退監控）
+5. 策略回測（加分批進場規劃 = 5 item）
+6. 基本面與族群（加族群分析）
+7. 完整分析（「全部分析」改名「完整技術分析」+ tooltip）
+
+6 個新 backend mode handler（[chat.py](backend/app/api/routes/chat.py) L1484+）每個強制
+LLM 呼叫對應 function：smc_structure / scenario_predict / conditional_prob /
+event_pattern / compute_laddered / sector_analysis。
+
+### v133.1 `e7e98fe` — 一鍵連跑 sequence 擴充到 6 條
+
+原 Tab 7「一鍵連跑」item 只 4 條 sequence（技術 + 基本面 + 族群 + 事件，涵蓋 21/28 item），
+擴充為 6 條補 Tab 5 工具型 item（校準 + 分批），達 28/28 100% 涵蓋。
+前端 `messageQueueRef` 自動接力處理。
+
+### v134 `74e5297` — v130 重試 28 分鐘卡頓修復
+
+v130 強制重試邏輯沒 hard timeout（`while not _retry_task.done()` 無限等），
+第 1 條 comprehensive 14 分鐘完成、retry 又 14 分鐘 → 累計 28+ 分鐘 UI 卡死。
+
+修復：
+- A：純文字 ≥3000 字（LLM 已給完整分析）→ 跳過重試
+- B：重試加 5 分鐘 hard timeout，超過 cancel + 用原始 response
+- C：心跳訊息標明「重試中... (XXX秒 / 最多 300 秒)」
+
+### v135 `dc28ed6` — 一鍵連跑 Bucket 重複 + 事件型態互動瑕疵
+
+- **Bucket 重複**：[comprehensive_pipeline.py:45](backend/app/core/llm/comprehensive_pipeline.py#L45)
+  `_DIMENSION_FUNCTIONS` 的 `backtest` 與 `quant` 維度都收 `run_quant_research`
+  結果 → 兩維度都寫「因子群 Bucket」段重複。修：`backtest` 只看 `compare_strategies`，
+  `quant` 獨佔 `run_quant_research`。
+- **事件型態互動瑕疵**：event_pattern mode prefix 未強制取最新價、未禁互動引導 →
+  LLM 用滯後 priceOverview + 末尾加「可以說『分析 ADA 當前狀態』」要使用者再次輸入。
+  修：強制兩步驟 query_chart_data → analyze_event_patterns + 主動算當前 vs 歷史
+  相似度 + 禁「可以說 X」「想進一步」等延伸引導。
+
+### v136 `d49ca5a` — 完整布林通道策略系統
+
+從「只看 BB Width 百分位」升級為「真正可商品化的布林策略系統」。
+
+**Day 1：8 個新特徵**（[auto_scanner.py:_compute_features](backend/app/core/auto_scanner.py)）：
+- PctB / PctB_lag1 / Bandwidth_ROC / Z_Score / ATR_Ratio / OBV_Slope
+- Keltner Channel overlay + is_squeeze + squeeze_duration
+
+**Day 2-3：3 + 1 個策略 detector**（新檔 [bollinger_signals.py](backend/app/core/bollinger_signals.py)）：
+- `detect_squeeze_state`：The Squeeze（BB 收進 Keltner ≥5 根）
+- `detect_squeeze_breakout`：Squeeze 釋放 + bandwidth ROC > 5% + 量配合
+- `detect_walk_the_band`：ADX > 25 + 近 5 根 ≥3 根觸軌
+- `detect_mean_reversion`：盤整中觸軌反轉
+- `classify_bollinger_signal`：regime-aware 主入口，自動選優先順序
+
+**Day 4：auto_scanner.py 整合** — 每個 alert 含 bollinger_status / emoji /
+strategy / entry_exit。前端 AlertPanel 顯示 badge：`⚡ Squeeze` / `🟢 Squeeze 突破上軌`
+/ `⬆️ Walking 上軌` 等，hover 顯 SL/TP/RR。
+
+Kill switch：`settings.bollinger_signals_enabled = False`。
+
+### v137 `cb65cbb` — 台股掃描整合 v136 + 個股完整度按鈕
+
+把 v136 Bollinger 邏輯擴展到台股：
+- [tw_bb_scanner.py](backend/app/core/tw_bb_scanner.py) 加 `_compute_v136_bollinger` helper
+  + ScanResult 加 `bollinger_signal` 欄位
+- API 加 `enable_v136` query param（fallback 用）
+- 前端 [TwBBScanPanel.tsx](frontend/src/components/TwBBScanPanel/TwBBScanPanel.tsx)
+  加「Bollinger」欄位顯示 badge，「分析」按鈕的 prompt 帶 bollinger context
+
+Tab 2 加第 5 個 item「布林通道完整度分析」（mode=`bollinger_full`）：
+強制 LLM 算 8 維特徵 + 4 策略匹配度評分 + 最佳策略 entry/exit + 主結論
+「**綜合完整度評分 X/100**」。
+
+### v138 `4a34f19` — 一鍵連跑 3 bug 修復
+
+3 個獨立 bug：
+1. **LLM 編造「python3 權限未批准」**：function_defs.py 加 v138 反編造規則明確禁止
+   8 種句型（系統不跑 python3 subprocess，function 純 Python 在 executor.py 執行）
+2. **段落 #1-#6 誤判**：抽 `_detect_segments_v138()` helper，支援 5 種 pattern
+   （# N / ## N / ## 第一 / **1. / 段落 #N）
+3. **600s timeout 太緊**：前後端對齊 600 → 1200 秒（與 v132 編排 14 分鐘常態對齊）
+
+### v139 `532a6d6` — Token 優化（10-15% 省料）
+
+兩個無損優化：
+- **A: Sequence 第 2-6 條自動 r2_mode**：safe intent（fundamental / sector / calibrate）
+  走 `_minimal_r2_chart_state` 精簡邏輯，省 100-150K tokens/連跑。
+  Blocked intent（event / scenario / smc / comprehensive 等）保留 full chart_state。
+- **B: Anthropic prompt cache TTL 5min → 1h（beta）**：[adapter.py](backend/app/core/llm/adapter.py)
+  改 `_CACHE_CONTROL_1H` + 加 `extended-cache-ttl-2025-04-11` beta header，
+  含 try/except fallback 5min。省 30-40K tokens/連跑。
+
+前端 ChatInterface.tsx 排隊 push 時帶 `isSequenceFollow=true`，後端 chat.py 算
+`_use_r2_for_sequence` 判定後傳 `adapter.chat(..., r2_mode=True)`。
+
+### v140 — .command 自動更新到最新版 + 文件同步（本次）
+
+兩件事：
+- `阿斯拉量化系統.command` 加版本同步段（git fetch + pull --ff-only，失敗 silent fallback）
+  → 每次點擊都嘗試拉最新、顯示當前 commit。離線 / 無 remote / 衝突都安全跳過。
+- 本文件補 v129-v139 段落 + 更新「最後更新」標記。

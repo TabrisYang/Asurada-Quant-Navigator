@@ -182,6 +182,37 @@ echo -e "${YELLOW}[6/6]${NC} 啟動服務..."
 # 確保 data 目錄存在
 mkdir -p "$ROOT_DIR/backend/data"
 
+# ─── v140：版本同步（嘗試拉最新版本，失敗 silent fallback 用當前版） ───
+# 解決「.command 跑的可能是舊版」問題 — 每次啟動嘗試 fetch + 快進 pull
+# 失敗時不影響啟動，使用者用當前 working tree 繼續。
+echo -e "  ${YELLOW}[版本同步]${NC}"
+
+# 偵測未 commit 的本地修改（警告但不阻擋）
+if [ -n "$(git -C "$ROOT_DIR" status --porcelain 2>/dev/null)" ]; then
+    echo -e "  ${YELLOW}[!]${NC} 偵測到未 commit 的本地修改（會用當前版本啟動）"
+fi
+
+# 嘗試 fetch + 快進 pull（無 remote / 無網路 / 不可 ff 都靜默跳過）
+if git -C "$ROOT_DIR" fetch --quiet 2>/dev/null; then
+    LOCAL=$(git -C "$ROOT_DIR" rev-parse @ 2>/dev/null)
+    REMOTE=$(git -C "$ROOT_DIR" rev-parse '@{u}' 2>/dev/null)
+    if [ -n "$REMOTE" ] && [ "$LOCAL" != "$REMOTE" ]; then
+        if git -C "$ROOT_DIR" pull --ff-only --quiet 2>/dev/null; then
+            echo -e "  ${GREEN}[✓]${NC} 已從遠端更新到最新版本"
+        else
+            echo -e "  ${YELLOW}[!]${NC} 遠端有更新但無法快進（本地分歧），使用當前版本"
+        fi
+    else
+        echo -e "  ${GREEN}[✓]${NC} 已是最新版本（與遠端同步）"
+    fi
+else
+    echo -e "  ${YELLOW}[i]${NC} 無法連遠端（離線 / 無 remote），使用當前版本"
+fi
+
+# 顯示當前版本（讓使用者一眼看到跑的是哪個 commit）
+CURRENT_VERSION=$(git -C "$ROOT_DIR" log --oneline -1 2>/dev/null || echo "(無 git 紀錄)")
+echo -e "  ${CYAN}當前版本: ${CURRENT_VERSION}${NC}"
+
 # ─── v124：啟動前自我清理（解「SIGKILL 後 process / DB / .pyc 殘留」根因）───
 # 根因：VSCode 強制關專案 / kill -9 backend 會留下：
 #   (1) SQLite WAL/SHM 殘留 → 下次新 process connect 卡 busy_timeout 3s × 多個 DB
