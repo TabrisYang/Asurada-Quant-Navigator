@@ -1719,3 +1719,36 @@ Tab 2 加第 5 個 item「布林通道完整度分析」（mode=`bollinger_full`
 - trending_up n=5 hit=0% / trending_down n=4 hit=33.3% / unknown n=3 hit=0% / ranging n=2 hit=100%
 - JSON：`backend/data/db/shadow_report_20260519.json`
 - P3 啟動門檻：足樣本 case ≥ 10 + regime hit 下降 ≤ 10pp + 觸發頻率變動 ≤ 20%（見 plan）
+
+### v142 — P3 等待期自動提醒機制（working tree 暫存、未 commit）
+
+**為何**：原 plan 等待路線需要每天手動跑 shadow_mode 觀察進度，使用者明示「會忘記」。在 .command 啟動時背景檢查 Checklist 狀態 + 達標時跳 macOS dialog + 預備剪貼簿訊息，把「記得跑」這件事從人腦移到系統。
+
+**實作**：
+
+1. **新建** [backend/scripts/check_p3_ready.py](backend/scripts/check_p3_ready.py)
+   - sentinel `~/.p3_done` 存在 → silent exit 0
+   - 讀最新 shadow_report JSON（>6 小時舊則重跑 shadow_mode.py）
+   - 5/19 baseline hardcode 進腳本（避免讀 plan markdown）
+   - 三條件評估：
+     - 足樣本 case ≥ 10（THRESHOLD_FULL_SAMPLES）
+     - 各 regime hit rate 跌幅 ≤ 10pp（HIT_DROP_LIMIT_PP）
+     - A/C/F 觸發頻率變動 ≤ 20%（TRIGGER_DRIFT_LIMIT_PCT）
+   - 未達標：印一行 `⏳ P3 等待中：足樣本 X/10` 到 stdout
+   - 達標：pbcopy 預備訊息 + osascript display dialog
+
+2. **修改** [阿斯拉量化系統.command](阿斯拉量化系統.command:181)
+   - 步驟 [6/6] 開頭加一行背景觸發：
+     ```bash
+     ("$VENV_DIR/bin/python3" "$ROOT_DIR/backend/scripts/check_p3_ready.py" 2>/dev/null &)
+     ```
+   - 背景 fork 不阻擋啟動；shadow_mode 跑 5-10 秒後若達標才跳 dialog
+
+**剪貼簿訊息模板**（腳本自動填當日真實數據）：
+- 已驗證樣本 / 足樣本 case 數 / A/C/F 觸發頻率
+- 各 regime hit rate vs 5/19 baseline 差異（pp）
+- 行為驗證 checkbox（compute_factor_ic 呼叫率 / SMC 四要素完整度 / RR<1.5 觸發率）
+
+**狀態**：本段 + .command + check_p3_ready.py **暫留 working tree 不 commit**。等執行完 P3 後一起整理 commit + push（避免提醒機制與 P3 程式碼分批治理混亂）。
+
+**手動標記完成**：執行完 P3 後 `touch ~/.p3_done` 永久關閉提醒。

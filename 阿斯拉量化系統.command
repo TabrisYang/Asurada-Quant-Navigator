@@ -179,6 +179,11 @@ fi
 # ---------- 6. 啟動服務 ----------
 echo -e "${YELLOW}[6/6]${NC} 啟動服務..."
 
+# ─── P3 Checklist 自動提醒（背景執行，不阻擋啟動）───
+# 達標時 pbcopy 回報訊息 + osascript dialog；未達標印一行進度；~/.p3_done 存在則 silent。
+# plan: /Users/tonyy/.claude/plans/melodic-prancing-catmull.md
+("$VENV_DIR/bin/python3" "$ROOT_DIR/backend/scripts/check_p3_ready.py" 2>/dev/null &)
+
 # 確保 data 目錄存在
 mkdir -p "$ROOT_DIR/backend/data"
 
@@ -260,13 +265,18 @@ echo "8000" > "$ROOT_DIR/backend/.port"
 # 啟動後端（背景執行）
 # ★ v101 修復：明確用 .venv python（避免 system python 版本不符 segfault）
 # ★ v101 修復：限制 OpenMP / MKL 執行緒，避免 lightgbm/sklearn/shap/numpy 同時搶 native threads → segfault
+# ★ v141.2：stderr 寫到 ~/.asurada_backend.log（每次啟動 append，保留診斷紀錄）
+#   stdout 仍走 terminal（讓使用者看得到啟動進度），stderr 含 logger.warning/error
 echo -e "  ${YELLOW}啟動後端 (port 8000)...${NC}"
+echo -e "  ${CYAN}backend stderr → ~/.asurada_backend.log${NC}"
 cd "$ROOT_DIR/backend"
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export KMP_DUPLICATE_LIB_OK=TRUE
-"$VENV_DIR/bin/python3" -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --log-level warning &
+# log 啟動時間分隔線
+echo -e "\n\n====== $(date '+%Y-%m-%d %H:%M:%S') backend 啟動 ======\n" >> "$HOME/.asurada_backend.log"
+"$VENV_DIR/bin/python3" -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --log-level warning 2>> "$HOME/.asurada_backend.log" &
 BACKEND_PID=$!
 cd "$ROOT_DIR"
 
