@@ -19,6 +19,13 @@ from app.core.llm.function_defs import FUNCTION_DEFINITIONS, SYSTEM_PROMPT, SYST
 _LLM_TIMEOUT = settings.llm_timeout
 _LLM_STREAM_TIMEOUT = settings.llm_stream_timeout
 
+# v139：Anthropic prompt caching TTL — 預設用 1h（beta），讓「一鍵連跑」6 條訊息
+# 都能命中 CORE cache。Anthropic 接受 ttl: "1h" + extended-cache-ttl beta header；
+# 若不支援會 silently fallback 到 5min（系統行為一致）。
+# 若想暫時關閉，把下方 dict 改回 {"type": "ephemeral"} 即可。
+_CACHE_CONTROL_1H = {"type": "ephemeral", "ttl": "1h"}
+_ANTHROPIC_CACHE_BETA_HEADER = {"anthropic-beta": "extended-cache-ttl-2025-04-11"}
+
 
 def _minimal_r2_chart_state(chart_state: Optional[dict]) -> Optional[dict]:
     """R1：round2 用的精簡 chart_state。
@@ -987,7 +994,7 @@ class ClaudeAdapter(BaseLLMAdapter):
                 {
                     "type": "text",
                     "text": static_sys,
-                    "cache_control": {"type": "ephemeral"},  # 5 分鐘 TTL
+                    "cache_control": _CACHE_CONTROL_1H,  # v139：1h TTL（beta，連跑 6 條都命中）
                 }
             ]
             if dynamic_sys:
@@ -1004,13 +1011,34 @@ class ClaudeAdapter(BaseLLMAdapter):
                 tools = self._convert_functions_to_claude()
                 if tools:
                     # 在最後一個 tool 加 cache_control，cache 整個 tools 區塊
-                    tools[-1] = {**tools[-1], "cache_control": {"type": "ephemeral"}}
+                    tools[-1] = {**tools[-1], "cache_control": _CACHE_CONTROL_1H}  # v139
                 create_kwargs["tools"] = tools
 
-            response = await asyncio.wait_for(
-                client.messages.create(**create_kwargs),
-                timeout=_LLM_TIMEOUT,
-            )
+            # v139：附加 1h cache TTL beta header（若 SDK / API 不支援會 silently 忽略）
+            create_kwargs["extra_headers"] = _ANTHROPIC_CACHE_BETA_HEADER
+
+            try:
+                response = await asyncio.wait_for(
+                    client.messages.create(**create_kwargs),
+                    timeout=_LLM_TIMEOUT,
+                )
+            except Exception as _cache_err:
+                # v139 fallback：若 API 不接受 1h ttl，回退到 5 min 預設
+                if "ttl" in str(_cache_err).lower() or "extended-cache" in str(_cache_err).lower():
+                    logger.warning(f"[v139] 1h cache TTL 失敗，fallback 5min: {_cache_err}")
+                    create_kwargs.pop("extra_headers", None)
+                    for blk in create_kwargs.get("system", []):
+                        if isinstance(blk, dict) and blk.get("cache_control", {}).get("ttl") == "1h":
+                            blk["cache_control"] = {"type": "ephemeral"}
+                    for tl in create_kwargs.get("tools", []) or []:
+                        if isinstance(tl, dict) and tl.get("cache_control", {}).get("ttl") == "1h":
+                            tl["cache_control"] = {"type": "ephemeral"}
+                    response = await asyncio.wait_for(
+                        client.messages.create(**create_kwargs),
+                        timeout=_LLM_TIMEOUT,
+                    )
+                else:
+                    raise
 
             # 解析回應
             text = ""
@@ -1094,7 +1122,7 @@ class ClaudeAdapter(BaseLLMAdapter):
             # Prompt caching：靜態 + 動態 兩 block
             static_sys, dynamic_sys = self._build_system_blocks(chart_state, system_prompt)
             system_blocks: list[dict] = [
-                {"type": "text", "text": static_sys, "cache_control": {"type": "ephemeral"}}
+                {"type": "text", "text": static_sys, "cache_control": _CACHE_CONTROL_1H}  # v139
             ]
             if dynamic_sys:
                 system_blocks.append({"type": "text", "text": dynamic_sys})
@@ -1109,8 +1137,11 @@ class ClaudeAdapter(BaseLLMAdapter):
             if not force_text:
                 tools = self._convert_functions_to_claude()
                 if tools:
-                    tools[-1] = {**tools[-1], "cache_control": {"type": "ephemeral"}}
+                    tools[-1] = {**tools[-1], "cache_control": _CACHE_CONTROL_1H}  # v139
                 create_kwargs["tools"] = tools
+
+            # v139：附加 1h cache TTL beta header；若不支援會 silently 忽略
+            create_kwargs["extra_headers"] = _ANTHROPIC_CACHE_BETA_HEADER
 
             # 真串流：邊收事件邊 yield
             current_tool: Optional[dict] = None

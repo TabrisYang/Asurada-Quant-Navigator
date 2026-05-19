@@ -197,6 +197,7 @@ export function streamChatMessage(
   chatHistory?: Array<{ role: string; content: string }>,
   mode?: string,
   chartScreenshot?: string,
+  isSequenceFollow?: boolean,  // v139：一鍵連跑後續訊息標記，後端據此走精簡 chart_state
 ): StreamHandle {
   const controller = new AbortController();
 
@@ -213,6 +214,9 @@ export function streamChatMessage(
   }
   if (chartScreenshot) {
     body.chart_screenshot = chartScreenshot;
+  }
+  if (isSequenceFollow) {
+    body.is_sequence_follow = true;  // v139 token 優化標記
   }
 
   let doneEmitted = false;

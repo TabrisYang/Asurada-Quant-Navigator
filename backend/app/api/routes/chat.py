@@ -2654,6 +2654,26 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
             _dynamic_prompt = assemble_system_prompt(_intents, teaching_mode=_teaching)
             logger.info(f"意圖偵測: {_intents}, 教學模式={'ON' if _teaching else 'OFF'} → SYSTEM_PROMPT 模組已動態組裝")
 
+            # v139：sequence 後續訊息 + 某些 intent → 走精簡 chart_state 省 token
+            # opt-in safe intents（這些不依賴完整 indicators，可走 r2_mode）
+            _R2_SAFE_INTENTS = {"fundamental_analysis", "sector_analysis", "calibrate"}
+            _use_r2_for_sequence = bool(
+                request.is_sequence_follow
+                and (_intents & _R2_SAFE_INTENTS)
+                # 排除：event_analysis（需要 indicators 算 pattern 相似度）
+                # 排除：compute_laddered / scenario / smc 等需精確 indicator 值的 mode
+                and not (_intents & {
+                    "event_analysis", "scenario", "smc", "conditional_prob",
+                    "deep_analysis", "deep_phase1", "deep_phase2", "deep_phase3",
+                    "comprehensive_analysis",
+                })
+            )
+            if _use_r2_for_sequence:
+                logger.info(
+                    f"[v139] sequence 後續訊息 + safe intent {_intents & _R2_SAFE_INTENTS}, "
+                    f"走 r2_mode 精簡 chart_state（省 token）"
+                )
+
             yield _sse_event("status", {"message": "正在載入分析數據..."})
 
             # ★ 自動校準：分析意圖 + 該幣種無校準數據或已過期（>7天）→ 快速校準
@@ -2856,10 +2876,12 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
 
         try:
             # 2. 第一輪 LLM 呼叫（使用意圖驅動的動態 SYSTEM_PROMPT，帶心跳）
+            # v139：sequence 後續訊息 + safe intent 走 r2_mode 精簡 chart_state 省 token
             _llm_task = asyncio.create_task(adapter.chat(
                 messages, chart_state=request.chart_state,
                 system_prompt=_dynamic_prompt,
                 chart_screenshot=request.chart_screenshot,
+                r2_mode=_use_r2_for_sequence,
             ))
             _active_tasks.append(_llm_task)
             _hb_sec = 0

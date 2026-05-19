@@ -179,7 +179,8 @@ export default function ChatInterface() {
   const isComposingRef = useRef(false);
   const streamingMsgIdRef = useRef<string | null>(null);
   const abortStreamRef = useRef<(() => void) | null>(null);
-  const messageQueueRef = useRef<{ text: string; mode?: string }[]>([]);
+  // v139：sequence 標記讓後端走精簡 chart_state 省 token
+  const messageQueueRef = useRef<{ text: string; mode?: string; isSequenceFollow?: boolean }[]>([]);
   const [queueLength, setQueueLength] = useState(0);
   const MAX_QUEUE = 3;
   const messages = useChartStore((s) => s.messages);
@@ -435,7 +436,8 @@ export default function ChatInterface() {
         timestamp: new Date().toISOString(),
       };
       addMessage(startNotice);
-      await _executeSend(next.text, next.mode, false);
+      // v139：傳遞 isSequenceFollow flag 給 _executeSend，讓後端走精簡 chart_state
+      await _executeSend(next.text, next.mode, false, next.isSequenceFollow ?? false);
     }
   };
 
@@ -506,7 +508,8 @@ export default function ChatInterface() {
   }, []);
 
   // 普通函式（非 useCallback）— 每次呼叫時讀取最新的 store 狀態
-  const _executeSend = async (trimmed: string, sendMode?: string, addUserMsg: boolean = true) => {
+  // v139：isSequenceFollow=true 標明為一鍵連跑後續訊息，後端走精簡 chart_state 省 token
+  const _executeSend = async (trimmed: string, sendMode?: string, addUserMsg: boolean = true, isSequenceFollow: boolean = false) => {
     const store = useChartStore.getState();
     const currentLlmConfig = store.llmConfig;
     const currentConversationId = store.conversationId;
@@ -924,6 +927,7 @@ export default function ChatInterface() {
       chatHistory,
       sendMode,
       screenshot,
+      isSequenceFollow,  // v139 token 優化：sequence 後續訊息走精簡 chart_state
     );
 
     // 保存 abort 函式，讓 handleAbort 可以真正斷開連線
@@ -1188,9 +1192,10 @@ export default function ChatInterface() {
                     setInput(first);
                     setTimeout(() => handleSend(itemMode), 50);
                     // 第 2-N 條：排隊（_processQueue 會在前一條完成後自動接力）
+                    // v139：標記 isSequenceFollow=true 讓後端走精簡 chart_state 省 token
                     for (let k = 1; k < seq.length; k++) {
                       const text = seq[k].replace('{symbol}', sym);
-                      messageQueueRef.current.push({ text });
+                      messageQueueRef.current.push({ text, isSequenceFollow: true });
                     }
                     setQueueLength(messageQueueRef.current.length);
                   } else if (itemMode) {

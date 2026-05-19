@@ -66,6 +66,8 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None       # 優先：使用 session token（安全）
     api_key: Optional[str] = None          # 向下相容：直接傳 key（不建議）
     mode: Optional[str] = None             # "quant_research" = 強制量化回測分析
+    # v139：一鍵連跑 sequence 後續訊息標記（非第 1 條），讓後端走精簡 chart_state 省 token
+    is_sequence_follow: bool = False
 
 
 class ChartDataRequest(BaseModel):
