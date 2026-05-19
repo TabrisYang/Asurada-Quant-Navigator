@@ -36,6 +36,7 @@ _FUNC_DISPLAY_NAMES: dict[str, str] = {
     "scan_conditional_probability": "條件機率掃描",
     "generate_scenarios": "情境預測",
     "detect_smc_structure": "SMC 結構分析",
+    "compute_factor_ic": "因子 IC 校準",
 }
 
 
@@ -108,6 +109,7 @@ ALLOWED_FUNCTIONS = {
     "generate_scenarios",
     "detect_smc_structure",
     "compute_laddered_entries",
+    "compute_factor_ic",
 }
 
 
@@ -183,6 +185,7 @@ async def execute_function_calls(
         "run_quant_research", "optimize_indicator_params",
         "scan_conditional_probability", "generate_scenarios",
         "detect_smc_structure", "compute_laddered_entries",
+        "compute_factor_ic",
     }
 
     # 分離：輕量同步/依序 vs 重量級可並行（保留原始 index）
@@ -302,6 +305,9 @@ async def execute_function_calls(
                     return {"function": name, "result": result}
                 elif name == "detect_smc_structure":
                     result = await _exec_detect_smc(args, default_symbol, default_timeframe)
+                    return {"function": name, "result": result}
+                elif name == "compute_factor_ic":
+                    result = await _exec_compute_factor_ic(args, default_symbol, default_timeframe)
                     return {"function": name, "result": result}
                 elif name == "compute_laddered_entries":
                     result = await _exec_compute_laddered_entries(args, default_symbol, default_timeframe)
@@ -2381,6 +2387,106 @@ async def _exec_compute_laddered_entries(args: dict, default_symbol: str, defaul
     result["symbol"] = symbol
     result["timeframe"] = timeframe
     return result
+
+
+def _ic_strength(ic_abs: float) -> str:
+    if ic_abs >= 0.2:
+        return "強"
+    if ic_abs >= 0.1:
+        return "中"
+    if ic_abs >= 0.05:
+        return "弱"
+    return "可忽略"
+
+
+async def _exec_compute_factor_ic(args: dict, default_symbol: str, default_tf: str) -> dict:
+    """因子 IC 校準 — 對 ADX/RSI/MACD/ATR 等因子做未來收益 Spearman IC 預測力驗證"""
+    import numpy as np
+    from app.core.indicators import registry
+    from app.core.backtest.factor_analysis import _spearman_ic
+
+    symbol = args.get("symbol", default_symbol)
+    timeframe = args.get("timeframe", default_tf)
+    factors = args.get("factors") or ["adx", "rsi", "macd", "atr"]
+    forward_periods = args.get("forward_periods") or [1, 5, 10]
+    lookback = int(args.get("lookback", 250))
+
+    df = _load_local_data(symbol, timeframe)
+    if df is None or df.empty:
+        return {"status": "error", "message": f"找不到 {symbol} {timeframe} 的本地數據"}
+    if len(df) < 60:
+        return {"status": "error", "message": f"樣本不足（{len(df)} 根 < 60）"}
+
+    df = df.tail(lookback).copy()
+    closes = df["close"].values.astype(float)
+    n = len(closes)
+
+    fwd_rets: dict[int, np.ndarray] = {}
+    for fp in forward_periods:
+        if fp >= n - 10:
+            continue
+        fr = np.full(n, np.nan)
+        safe = closes.copy()
+        safe[safe == 0] = np.nan
+        fr[: n - fp] = (closes[fp:] - closes[: n - fp]) / safe[: n - fp]
+        fwd_rets[fp] = fr
+
+    factor_ics: list[dict] = []
+    for fname in factors:
+        try:
+            ind_res = registry.calculate(fname, df)
+            if not ind_res:
+                factor_ics.append({"factor": fname, "error": "指標計算回傳空"})
+                continue
+            arr = None
+            if fname in ind_res and isinstance(ind_res[fname], list):
+                arr = ind_res[fname]
+            else:
+                for v in ind_res.values():
+                    if isinstance(v, list) and v:
+                        arr = v
+                        break
+            if arr is None:
+                factor_ics.append({"factor": fname, "error": "無法擷取指標序列"})
+                continue
+            f_arr = np.array([
+                float(x) if x is not None and not (isinstance(x, float) and np.isnan(x)) else np.nan
+                for x in arr
+            ], dtype=float)
+            if len(f_arr) != n:
+                # 長度補齊（registry 有時回較短序列）
+                pad = np.full(n - len(f_arr), np.nan)
+                f_arr = np.concatenate([pad, f_arr]) if len(f_arr) < n else f_arr[-n:]
+
+            per_period = {}
+            for fp, fr in fwd_rets.items():
+                valid = ~(np.isnan(f_arr) | np.isnan(fr))
+                sample_n = int(valid.sum())
+                if sample_n < 20:
+                    per_period[str(fp)] = {"ic": None, "pval": None, "sample_n": sample_n, "note": "樣本不足"}
+                    continue
+                ic, pval = _spearman_ic(f_arr[valid], fr[valid])
+                per_period[str(fp)] = {
+                    "ic": round(ic, 4),
+                    "pval": round(pval, 4),
+                    "sample_n": sample_n,
+                    "significant": pval < 0.05,
+                    "strength": _ic_strength(abs(ic)),
+                }
+            factor_ics.append({"factor": fname, "per_forward_period": per_period})
+        except Exception as e:
+            factor_ics.append({"factor": fname, "error": str(e)})
+
+    return {
+        "status": "success",
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "lookback_used": len(df),
+        "factors_analyzed": len(factor_ics),
+        "forward_periods": list(fwd_rets.keys()),
+        "results": factor_ics,
+        "note": "Spearman IC：|IC|>=0.2 強、>=0.1 中、>=0.05 弱、<0.05 可忽略。pval<0.05 表示統計顯著。",
+    }
 
 
 async def _exec_detect_smc(args: dict, default_symbol: str, default_tf: str) -> dict:

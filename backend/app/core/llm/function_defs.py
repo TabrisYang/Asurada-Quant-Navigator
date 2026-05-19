@@ -1506,6 +1506,16 @@ _PROMPT_MODULES["smc"] = """
 - 引用 sweep_events 說明機構行為證據（成交量特徵）
 - 引用 parameters_used 披露使用的樣本數和閾值
 
+🏦 SMC 四要素標註（必出，引用回傳欄位）：
+- 💧 BSL/SSL Liquidity：引用 sweep_events，列出最近 BSL/SSL Sweep 的 level_price、vol_ratio、reasoning
+- 🧱 Order Block (OB)：引用 order_blocks，列出 bullish/bearish OB 的 [high, low] 區間 + tested 狀態
+  - 未測試（tested=false）的 OB 視為一級支撐/壓力
+  - 已測試（tested=true）的 OB 強度降低
+- ⚡ FVG：引用 fvg_zones，列出未填補 FVG（filled=false）的 [high, low] 區間，視為磁鐵區
+- 🎯 Premium/Discount：引用 premium_discount 欄位（"premium"/"discount"/"equilibrium"）+ fib_50 線
+  - 當前價 > fib_50 = 溢價區（適合做空，禁止市價追多）
+  - 當前價 < fib_50 = 折價區（適合做多，禁止市價追空）
+
 🎯 交易執行計劃：
 - 建議：引用 bias 欄位（BUY/SELL/WAIT/NO_TRADE）
 - Entry/SL/TP：直接引用計算值，不可自行推算
@@ -1746,12 +1756,15 @@ _PROMPT_MODULES["comprehensive_analysis_seg1"] = """
 ⚡ 30 秒結論：
   方向：[做多/做空/雙向計劃/觀望]｜信心：[高/中/低]｜建議倉位：[X-Y%]
   關鍵：[一句話：等什麼觸發，不超過 30 字]
-  失效：[一句話：何時退場，不超過 30 字]
+  失效：[一句話：何時退場，需指明關鍵 OB / sweep 位 或結構位，不超過 30 字]
+  風報比：[RR 數值，引用 compute_laddered_entries 的 rr 欄位；若 RR < 1.5 必須在「方向」欄位改成「觀望」並說明「RR 不足」]
 ═══════════════════════════════════════════════
 
 2. 📋 分批進場建議（呼叫 compute_laddered_entries 取得，不可推算）：
-   - 直接引用 long_entries / short_entries 的 price + size_pct + source 欄位
+   - 直接引用 long_entries / short_entries 的 price + size_pct + source 欄位（金字塔配比由系統依 regime 自動選擇 50/30/20、25/35/40 或 33/33/34）
    - 含 weighted_avg_entry / stop_loss / take_profit / rr
+   - **止損必須註記 ATR 倍數**：引用 stop_loss 並附「= 關鍵 OB / Sweep 位外側 - X×ATR」（X 為從 stop_loss 與 entry 距離除以 chart_state.indicatorValues.atr 推算的倍數，保留 1 位小數）
+   - **RR 強制 ≥ 1.5**：若回傳 rr < 1.5 → 必須改寫為「⚠️ 風報比 [rr] < 1.5，放棄此次交易，等更好的進場點」並省略分批表
    - 引用 ratio_strategy 說明配比邏輯
    - 若 enabled=false → 改為「regime 信心 X% 過低，建議單一進場 + 小倉位試單」並省略表格
 
@@ -1810,11 +1823,43 @@ _PROMPT_MODULES["comprehensive_analysis_seg2"] = """
 
 ★ 第 2 段必須輸出（嚴格依此順序、全 12 段不可省略）：
 
-  1. 📊 市場環境（regime 分類 + currentRegime + sector/basket breadth + crossStockSignals + 衍生品矩陣完整列出 funding/OI/OB/LS/premium/fear_greed）
-  2. 🏛 結構分析（SMC + 趨勢方向 + STL 分解結果）
+  1. 📊 市場環境與體制驗證（regime 分類 + currentRegime + sector/basket breadth + crossStockSignals + 衍生品矩陣完整列出 funding/OI/OB/LS/premium/fear_greed）
+     - **必含「Regime 模型衝突揭露」小段**：明確比對三個 regime 模型結論（來源 chart_state.scenarios 或 generate_scenarios 回傳）：
+       * GMM 體制機率（取 regime_probs 最高者）vs 系統 currentRegime
+       * HMM 狀態方向 vs SMC bias 方向（detect_smc_structure 的 bias 欄位）
+       * GARCH 預測波動率 vs 當前 ATR/Donchian 寬度
+       若任一資料未注入或 chart_state.data_status 為非 ok → 該行寫「⚠️ 資料不可得：[原因]」
+       若三模型結論一致 → 明寫「✅ 三模型共振」並引用具體機率值
+       若有衝突 → 明寫「⚠️ 衝突點：[模型A 結論] vs [模型B 結論]」並說明系統如何化解（採用哪個訊號、降權哪個）
+     - **必含「衍生品/情緒逆向解讀」小段**：引用 external_signals 給出反向視角：
+       * Funding Rate 極端值（|funding_rate_pct| > 0.05%/8h）→ 「市場過度看[多/空]，潛在反向風險」
+       * Fear & Greed < 20 或 > 80 → 「[極度恐慌反彈/極度貪婪回調]概率提高」
+       * 兩指標皆中性 → 明寫「情緒/籌碼中性，無逆向訊號」
+  2. 🏛 SMC 高階結構與流動性（強制四要素，引用 detect_smc_structure 回傳的對應欄位，禁止推算）
+     **2.1 💧 流動性地圖（Liquidity Map）** — 引用 sweep_events
+        - BSL（買方流動性）：列出最近 sweep_events 中 type="BSL" 的 level_price，狀態（已掃掠 = sweep 事件存在；未觸及 = chart_state 顯示前高未被觸及）
+        - SSL（賣方流動性）：列出最近 sweep_events 中 type="SSL" 的 level_price，狀態同上
+        - 最近一次 Sweep 對訂單流的影響（引用 vol_ratio：> 1.5x 視為機構獵取流動性）
+     **2.2 🧱 訂單塊（Order Block）** — 引用 order_blocks
+        - 看跌 OB（bearish）：列出 type="bearish" 的 [low, high] 區間，作為一級壓力
+        - 看多 OB（bullish）：列出 type="bullish" 的 [low, high] 區間，作為一級支撐
+        - 標註 tested 狀態：未測試 OB 強度高，已測試 OB 強度降低
+     **2.3 ⚡ 公允價值缺口（FVG）** — 引用 fvg_zones
+        - 列出最近 2-3 個 filled=false 的 FVG，標註 type（bullish/bearish）與 [low, high]
+        - 說明該 FVG 是否為本次進場 / 停利錨點（與 compute_laddered_entries 結果對照）
+     **2.4 🎯 區間估值（Premium / Discount）** — 引用 premium_discount + fib_50
+        - 當前價 vs fib_50：明寫「位於 [溢價區 / 折價區 / 平衡點]」
+        - 結論：當前位置對於本次方向是否具備盈虧比優勢（溢價區做空 / 折價區做多 = 順向；反之 = 逆向，需在 #6 跨維度結論降權）
+     - 趨勢方向 + STL 分解結果（保留既有寫法，引用 trend_htf / trend_ltf / mtf_aligned 與 decomposition）
   3. ⚡ 動能特徵（多週期動量 + 加速度 + 相對強弱 + RSI 背離 + 條件機率掃描 bin 具體數值）
   4. 🧪 多策略回測比較（系統已預跑 8 策略；引用 per_regime_metrics + Wilson CI + 具體 PF/Sharpe/MDD/MC/CPCV）
-  5. 🔬 量化研究（IC + Decay 狀態 rising/stable/decaying + Walk Forward + Monte Carlo + 因子有效性）
+  5. 🔬 量化因子與歷史特徵校準（IC + Decay 狀態 rising/stable/decaying + Walk Forward + Monte Carlo + 因子有效性）
+     - **強制呼叫 compute_factor_ic**（factors=["adx","rsi","macd","atr"], forward_periods=[1,5,10], lookback=250）
+       引用回傳的 per_forward_period 結果，列出每個因子在不同 forward period 的 ic / pval / significant / strength
+     - 結合 IC 強度（強/中/弱/可忽略）對 #6 跨維度結論做方向修正：
+       * 若主要因子 IC 強度為「強」且 significant=true → 該因子訊號可信
+       * 若 IC 強度為「弱」或「可忽略」→ 該因子在 #5.5 Alpha 動態監控分級表應歸入「⬇️ 降權」或「❌ 淘汰」
+     - 結合 run_quant_research 既有的 WF / MC / Decay 結果做交叉驗證
 
   5.5 🔄 Alpha 動態監控分級表（mandatory，v123 新增）：
        固定 6 欄分級，每個 IC 因子或策略歸入其中一類：
@@ -1838,6 +1883,13 @@ _PROMPT_MODULES["comprehensive_analysis_seg2"] = """
 
   7. 📋 正式結論卡（v100 結構化結論卡 — 詳見 CORE prompt）— 但**不重複 30 秒結論**
   8. ⚠️ 策略風險與前提假設（教學重點，必須含「風險清單嚴重度表」格式：# / 風險項 / 嚴重度 / 觸發條件，最少 5 列）
+     **8.1 3 大黑天鵝 / 宏觀事件**（mandatory，依當下標的判定）：
+        - 列出本次交易最怕遇到的 3 個外部事件（如 CPI/FOMC 公佈、ETF 流動性變化、監管新聞、大型清算等）
+        - 來源優先 chart_state.upcoming_events；若 calendar_meta 為過期 / partial → 寫「⚠️ 行事曆資料可能過期，請手動確認近期事件」
+     **8.2 🛡️ 防禦性備案（被打掉止損後的下一個 SMC 結構位）**：
+        - 多單被打掉 SL → 下一個可重新介入的 bullish OB 區間（引用 order_blocks 中 type="bullish" 的較低區間）或 SSL Sweep 後的反彈點
+        - 空單被打掉 SL → 下一個可重新介入的 bearish OB 區間或 BSL Sweep 後的回落點
+        - 若無下一個明確結構位 → 寫「無明確備案位，建議停損後觀望至少 1-2 根 K 線確認結構」
   9. 🎓 延伸學習建議（1-2 個可進一步探索的相關主題）
   10. 📊 完整分析摘要表（綜合 #1-9 的結論）
   11. 🎯 附錄：4 種高機率進場策略（v122 新增，獨立於主推薦的金字塔加碼）
@@ -1896,6 +1948,7 @@ _PROMPT_MODULES["comprehensive_analysis_seg2"] = """
   - detect_smc_structure / generate_scenarios / analyze_momentum
   - scan_conditional_probability → 給 #4
   - run_quant_research → 給 #5
+  - **compute_factor_ic** → 給 #5（mandatory，提供 ADX/RSI/MACD/ATR 在 1/5/10 期 forward returns 的 Spearman IC）
   - 已在第 1 段呼叫過的不必重呼
 
 ★ 結尾格式：
@@ -2973,9 +3026,12 @@ FUNCTION_DEFINITIONS = [
         "function": {
             "name": "detect_smc_structure",
             "description": (
-                "SMC 訂單流結構分析：偵測 BOS/CHoCH、Fair Value Gap、流動性 Sweep、"
-                "多時區共振（MTF Alignment），計算交易建議（BUY/SELL/WAIT）和信心分數。"
-                "適用場景：「訂單流分析」「SMC 結構」「聰明錢」「機構行為」「BOS/CHoCH」「流動性」。"
+                "SMC 訂單流結構分析：偵測 BOS/CHoCH、Fair Value Gap (fvg_zones)、"
+                "流動性 Sweep (sweep_events，BSL/SSL)、Order Block (order_blocks，bullish/bearish 機構訂單塊)、"
+                "Premium/Discount 區域 (premium_discount + fib_50 線)、多時區共振（MTF Alignment），"
+                "計算交易建議（BUY/SELL/WAIT）和信心分數。"
+                "回傳完整 SMC 四要素：BSL/SSL (sweep_events) + OB (order_blocks) + FVG (fvg_zones) + Premium-Discount (premium_discount, fib_50)。"
+                "適用場景：「訂單流分析」「SMC 結構」「聰明錢」「機構行為」「BOS/CHoCH」「流動性」「訂單塊」「公允價值缺口」「溢價折價區」。"
                 "所有結構判定由後端精確計算，非 LLM 推算。"
             ),
             "parameters": {
@@ -2988,6 +3044,43 @@ FUNCTION_DEFINITIONS = [
                         "type": "integer",
                         "description": "回溯 K 線數量（預設 120）",
                         "default": 120,
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    # ─── 因子 IC 校準 ───
+    {
+        "type": "function",
+        "function": {
+            "name": "compute_factor_ic",
+            "description": (
+                "對 ADX/RSI/MACD/ATR 等技術因子計算 Spearman IC (Information Coefficient)，"
+                "驗證因子對未來 N 期收益的預測力。回傳每個因子在 forward_periods (例如 1/5/10 K 線) "
+                "的 ic、pval、sample_n、significant 標記、strength 分級（強/中/弱/可忽略）。"
+                "適用場景：「因子預測力」「IC 校準」「指標有效性」「歷史 IC」「因子驗證」「方向修正」。"
+                "用於分析報告的「量化因子校準」章節。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "交易對（留空使用當前）"},
+                    "timeframe": {"type": "string", "description": "時間框架"},
+                    "factors": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "因子清單，預設 [adx, rsi, macd, atr]",
+                    },
+                    "forward_periods": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "未來 N 期，預設 [1, 5, 10]",
+                    },
+                    "lookback": {
+                        "type": "integer",
+                        "description": "回溯 K 線數量（預設 250）",
+                        "default": 250,
                     },
                 },
                 "required": [],

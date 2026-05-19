@@ -120,6 +120,7 @@ class SMCResult:
     fvg_zones: list[dict]    = field(default_factory=list)
     sweep_events: list[dict] = field(default_factory=list)
     equal_levels: list[dict] = field(default_factory=list)
+    order_blocks: list[dict] = field(default_factory=list)
 
     # 交易建議
     bias: str = "WAIT"       # "BUY" / "SELL" / "WAIT" / "NO_TRADE"
@@ -156,6 +157,7 @@ class SMCResult:
             "fvg_zones": self.fvg_zones,
             "sweep_events": self.sweep_events,
             "equal_levels": self.equal_levels,
+            "order_blocks": self.order_blocks,
             "bias": self.bias,
             "premium_discount": self.premium_discount,
             "fib_50": round(self.fib_50, 2),
@@ -369,6 +371,102 @@ def _detect_bos_choch(
     choch_events = choch_events[-3:]
 
     return bos_events, choch_events
+
+
+# ─── Order Block 偵測 ────────────────────────────
+
+def _detect_order_blocks(
+    df: pd.DataFrame,
+    bos_points: list[dict],
+    max_lookback: int = 10,
+) -> list[dict]:
+    """偵測 Order Block（機構訂單塊）
+
+    定義：引發 BOS 突破前的最後一根反向 K 線。
+    - Bullish OB: 上升 BOS（實體收盤突破前高）前最後一根陰線（close < open）
+    - Bearish OB: 下降 BOS（實體收盤跌破前低）前最後一根陽線（close > open）
+
+    OB 區間：該 K 線的 high 與 low。
+    tested 狀態：BOS 之後價格是否回測進入該區間（最低點 ≤ OB.high 且最高點 ≥ OB.low）。
+    """
+    if not bos_points:
+        return []
+
+    opens = df["open"].values
+    highs = df["high"].values
+    lows = df["low"].values
+    closes = df["close"].values
+    timestamps = df["timestamp"].values if "timestamp" in df.columns else [str(i) for i in range(len(df))]
+
+    order_blocks: list[dict] = []
+
+    for bos in bos_points:
+        bos_idx = bos.get("bar_index")
+        if bos_idx is None or bos_idx <= 0:
+            continue
+
+        # 判定 BOS 方向：突破前高 = bullish、跌破前低 = bearish
+        # 由 close > level_price 判定方向（與 _detect_bos_choch 一致）
+        bos_price = bos.get("price", 0)
+        level_price = bos.get("level_price", 0)
+        if bos_price > level_price:
+            ob_type = "bullish"
+            target_candle = "bearish"  # 找最後一根陰線
+        elif bos_price < level_price:
+            ob_type = "bearish"
+            target_candle = "bullish"  # 找最後一根陽線
+        else:
+            continue
+
+        # 往前回溯找最後一根目標方向 K 線
+        start = max(0, bos_idx - max_lookback)
+        ob_candle_idx = None
+        for j in range(bos_idx - 1, start - 1, -1):
+            is_bear_candle = closes[j] < opens[j]
+            is_bull_candle = closes[j] > opens[j]
+            if target_candle == "bearish" and is_bear_candle:
+                ob_candle_idx = j
+                break
+            if target_candle == "bullish" and is_bull_candle:
+                ob_candle_idx = j
+                break
+
+        if ob_candle_idx is None:
+            continue
+
+        ob_high = round(float(highs[ob_candle_idx]), 2)
+        ob_low = round(float(lows[ob_candle_idx]), 2)
+
+        # 檢查 BOS 之後是否被回測
+        tested = False
+        for k in range(bos_idx + 1, len(df)):
+            if lows[k] <= ob_high and highs[k] >= ob_low:
+                tested = True
+                break
+
+        order_blocks.append({
+            "type": ob_type,
+            "high": ob_high,
+            "low": ob_low,
+            "candle_idx": int(ob_candle_idx),
+            "bos_idx": int(bos_idx),
+            "timestamp": str(timestamps[ob_candle_idx]),
+            "tested": tested,
+        })
+
+    # 去重：同一根 K 線只保留一次（不同 BOS 可能指向同一個 OB）
+    seen_idx = set()
+    unique_obs: list[dict] = []
+    for ob in order_blocks:
+        if ob["candle_idx"] in seen_idx:
+            continue
+        seen_idx.add(ob["candle_idx"])
+        unique_obs.append(ob)
+
+    # 只保留最近 6 個（未測試優先）
+    untested = [ob for ob in unique_obs if not ob["tested"]][-4:]
+    tested_recent = [ob for ob in unique_obs if ob["tested"]][-2:]
+    return untested + tested_recent
 
 
 # ─── 結構方向判定 ─────────────────────────────────
@@ -870,6 +968,9 @@ class SMCDetector:
         # ── Step 6: Sweep ──
         sweep_events = _detect_sweeps(df_analysis, swings, vol_threshold=vol_threshold)
 
+        # ── Step 6.5: Order Blocks ──
+        order_blocks = _detect_order_blocks(df_analysis, bos_points)
+
         # ── Step 7: Equal Levels ──
         eq_tolerance = 0.002 if is_tw else 0.001
         equal_levels = _find_equal_levels(df_analysis, swings, tolerance=eq_tolerance)
@@ -1001,6 +1102,7 @@ class SMCDetector:
             fvg_zones=fvg_zones,
             sweep_events=sweep_events,
             equal_levels=equal_levels,
+            order_blocks=order_blocks,
             bias=bias,
             premium_discount=premium_discount,
             fib_50=fib_50,
@@ -1020,7 +1122,7 @@ class SMCDetector:
             f"SMC [{symbol} {timeframe}]: 完成 — "
             f"趨勢={trend_ltf}, 共振={'是' if mtf_aligned else '否'}, "
             f"BOS={len(bos_points)}, CHoCH={len(choch_points)}, "
-            f"FVG={len(fvg_zones)}, Sweep={len(sweep_events)}, "
+            f"FVG={len(fvg_zones)}, Sweep={len(sweep_events)}, OB={len(order_blocks)}, "
             f"建議={bias}, 信心={confidence}%"
         )
 

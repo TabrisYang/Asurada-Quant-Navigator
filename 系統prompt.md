@@ -1659,3 +1659,63 @@ Tab 2 加第 5 個 item「布林通道完整度分析」（mode=`bollinger_full`
 - `阿斯拉量化系統.command` 加版本同步段（git fetch + pull --ff-only，失敗 silent fallback）
   → 每次點擊都嘗試拉最新、顯示當前 commit。離線 / 無 remote / 衝突都安全跳過。
 - 本文件補 v129-v139 段落 + 更新「最後更新」標記。
+
+### v141 — 分析報告 prompt 重構 P1+P2（SMC 四要素 + IC 校準 + RR 強制）
+
+依 plan `/Users/tonyy/.claude/plans/melodic-prancing-catmull.md` 第一、二階段執行。整體目標：分析報告強制按使用者規範的 SMC 四要素 + GMM/HMM/GARCH 衝突揭露 + IC 因子校準格式輸出。P3 熔斷層另計（等樣本累積到 ≥10-threshold 才啟動）。
+
+#### P1：底層偵測器 + function call
+
+1. **Order Block 偵測器** — [smc_detector.py](backend/app/core/ml/smc_detector.py:222)
+   - 新增 `_detect_order_blocks(df, bos_points, max_lookback=10)` 函式
+   - 定義：BOS 突破前最後一根反向 K 線（bullish OB = 上升 BOS 前最後陰 K、bearish OB = 下降 BOS 前最後陽 K）
+   - 回傳 `[{type, high, low, candle_idx, bos_idx, timestamp, tested}]`，tested 標記 BOS 後是否被回測
+   - `SMCResult.order_blocks` 欄位 + `to_dict()` 整合，仿 `fvg_zones` 結構
+   - `SMCDetector.detect()` Step 6.5 呼叫並組裝
+
+2. **compute_factor_ic function call** — [executor.py](backend/app/core/llm/executor.py:2386)
+   - `_exec_compute_factor_ic(args, default_symbol, default_tf)` 呼叫 `factor_analysis._spearman_ic` 對 ADX/RSI/MACD/ATR 在 forward_periods=[1,5,10] 計算 Spearman IC
+   - 回傳每因子的 `ic / pval / sample_n / significant / strength`（強/中/弱/可忽略）
+   - 註冊到 `ALLOWED_FUNCTIONS` + `_PARALLEL_FUNCS` + dispatch + `_FUNC_DISPLAY_NAMES`
+   - function_defs.py 加 schema
+
+3. **detect_smc_structure schema** — function_defs.py:2974
+   - description 明列回傳含 `order_blocks` + `fvg_zones` + `sweep_events` + `premium_discount` + `fib_50`（四要素全在單一函式回傳）
+
+4. **smc prompt module** — function_defs.py:1500
+   - 加「SMC 四要素標註必出」段落，引導 LLM 引用 `order_blocks` / `sweep_events` / `fvg_zones` / `premium_discount + fib_50`
+
+**P1 真實 IC 驗證**：BTC/USDT 1d lookback=300 — ADX/ATR 對 5-10 期 forward returns 顯著（pval<0.05, |IC|≈0.23-0.28, 強等級）；RSI/MACD 短期可忽略。邏輯正確。
+
+#### P2：comprehensive_analysis seg1/seg2 prompt 強化
+
+**策略**：增強現有 12 段架構而非取代（保留 v123 alpha 監控 + RL 戰略結論 + 跨維度交叉驗證）。9 個強化點：
+
+1. **seg1 30 秒結論卡新增「風報比」欄位**：引用 `compute_laddered_entries.rr`；RR<1.5 強制改觀望
+2. **seg1 分批進場**：止損強制註記 ATR 倍數（從 stop_loss-entry 距離推算）
+3. **seg2 #1 Regime 模型衝突揭露**：GMM 機率 vs currentRegime / HMM 方向 vs SMC bias / GARCH 波動率 vs ATR — 共振或衝突明寫
+4. **seg2 #1 衍生品/情緒逆向解讀**：Funding |pct|>0.05% → 過度看多/空潛在反向；F&G <20 或 >80 → 反彈/回調概率
+5. **seg2 #2 SMC 四要素強制 4 子節**：💧 BSL/SSL 流動性地圖 / 🧱 Order Block / ⚡ FVG / 🎯 Premium-Discount + Fib 0.5
+6. **seg2 #5 強制呼叫 compute_factor_ic**：IC 強度接入 #5.5 Alpha 監控分級表（弱→降權、可忽略→淘汰）
+7. **seg2 #5 命名改為「量化因子與歷史特徵校準」**
+8. **seg2 #8 加 3 大黑天鵝**：依當下標的列出 3 個外部事件，來源 `chart_state.upcoming_events`
+9. **seg2 #8 加防禦性備案**：被打掉止損後下一個可介入的 SMC 結構位（下一個 OB 區間或 Sweep 反彈點）
+
+**強制函式清單新增**：seg2 強制呼叫 `compute_factor_ic`（mandatory）。
+
+#### 治理數據（行數 / 模組）
+
+- function_defs.py: 3249/3500 行（緩衝剩 251 行）
+- executor.py: 2689/3000 行
+- chat.py: 4411/4500 行（未動）
+- _PROMPT_MODULES 數: 31 個（未新增，取代而非新增）
+- pytest: 275 passed（test_v113 pre-existing failure 與本次無關）
+
+#### P2 上線當日 shadow mode baseline 凍結
+
+- 日期：2026-05-19
+- 已驗證樣本：14 筆，足樣本 case 0/14
+- A=0% / C=14.3% / F=35.7%
+- trending_up n=5 hit=0% / trending_down n=4 hit=33.3% / unknown n=3 hit=0% / ranging n=2 hit=100%
+- JSON：`backend/data/db/shadow_report_20260519.json`
+- P3 啟動門檻：足樣本 case ≥ 10 + regime hit 下降 ≤ 10pp + 觸發頻率變動 ≤ 20%（見 plan）
