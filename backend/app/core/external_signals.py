@@ -67,17 +67,22 @@ def _fetch_with_retry(fn, *args, max_retries: int = 3, base_backoff: float = 0.5
     重試一兩次幾乎都能成功。
     """
     last_err: Optional[Exception] = None
+    last_falsy_attempt = 0
     for attempt in range(max_retries):
         try:
             result = fn(*args)
             if result:
                 return result
+            last_falsy_attempt = attempt + 1  # fn 回 None/empty 但沒 raise
         except Exception as e:
             last_err = e
         if attempt < max_retries - 1:
             time.sleep(base_backoff * (2 ** attempt))
+    # v141.2：debug → warning（升級 log level，讓 production 看得到全失敗）
     if last_err:
-        logger.debug(f"[external] retry exhausted ({fn.__name__}): {last_err}")
+        logger.warning(f"[external] retry exhausted ({getattr(fn, '__name__', repr(fn))}): {last_err}")
+    elif last_falsy_attempt:
+        logger.warning(f"[external] retry exhausted ({getattr(fn, '__name__', repr(fn))}): all {max_retries} attempts returned falsy")
     return None
 
 
@@ -430,6 +435,17 @@ def get_signals_snapshot(symbol: str, include_macro: bool = True) -> dict:
     cache_key = f"{symbol}|{include_macro}"
     cached = _cached(cache_key)
     if cached:
+        # v141.2：cache hit 也 log，幫忙抓「cache 卡 empty」這類 poisoning 問題
+        _c_deriv = len(cached.get("derivatives") or {})
+        _c_sent = len(cached.get("sentiment") or {})
+        _c_macro = len(cached.get("macro") or {})
+        if _c_deriv == 0 and _c_sent == 0 and _c_macro == 0:
+            logger.warning(
+                f"[external] CACHE HIT EMPTY {cache_key} — cache 卡 empty，"
+                f"重啟 backend 或呼叫 clear_cache() 可清除"
+            )
+        else:
+            logger.info(f"[external] cache HIT {cache_key} deriv={_c_deriv} sent={_c_sent} macro={_c_macro}")
         return {**cached, "cached": True}
 
     sym = _to_binance_symbol(symbol)
@@ -479,6 +495,21 @@ def get_signals_snapshot(symbol: str, include_macro: bool = True) -> dict:
             )
             return {**payload, "cached": True, "stale": True, "stale_seconds": int(age)}
 
+    # v141.2：fresh fetch 結束時 log，diagnose 多 API 失敗模式
+    _deriv = len(out["derivatives"])
+    _sent = len(out["sentiment"])
+    _macro = len(out["macro"])
+    if _deriv == 0 and _sent == 0 and _macro == 0:
+        logger.error(
+            f"[external] FRESH FETCH ALL FAILED {cache_key} — "
+            f"derivatives/sentiment/macro 全空、cache 也無 stale fallback 可用。"
+            f"檢查網路 / API 限制 / SSL；後續 30 分鐘 cache 會回 empty。"
+        )
+    else:
+        logger.info(
+            f"[external] fresh fetch {cache_key} "
+            f"deriv={_deriv} sent={_sent} macro={_macro}"
+        )
     _store(cache_key, out)
     return out
 

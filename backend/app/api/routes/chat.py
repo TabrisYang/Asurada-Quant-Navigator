@@ -2610,6 +2610,11 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
         total_usage = None
         final_text = ""
         _active_tasks: list[asyncio.Task] = []
+        # v141.1：保留 pre-compress 版 chart_state 給 _post_process_chat_message。
+        # 必要：context_compressor 對部分 intent（backtest/regime/calibrate）會剝掉
+        # external_signals dict，導致 _capture_signals 寫入的 buckets_json 全 UNKNOWN
+        # → shadow_mode 的 combo_stats 永遠 samples=0 → P3 等待路線 deadlock。
+        _chart_state_for_post_process: Optional[dict] = None
 
         # 1. 立即告知前端「正在思考」
         yield _sse_event("thinking", {})
@@ -2715,11 +2720,14 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
             request.chart_state = _inject_ml_prediction(request.chart_state, _intents)
 
             # v106 D3：依 intent 壓縮 chart_state（節省 token / 提升 cache hit）
+            # v141.1：壓縮前保存完整版給 _post_process_chat_message，避免 prediction
+            # _capture_signals 拿不到 external_signals.derivatives/sentiment → buckets 全 UNKNOWN
             try:
                 from app.core.context_compressor import (
                     compress_chart_state, estimate_token_savings,
                 )
                 _orig_state = request.chart_state
+                _chart_state_for_post_process = _orig_state  # v141.1: pre-compress ref
                 _compressed = compress_chart_state(request.chart_state, _intents)
                 if _compressed and _orig_state:
                     _stats = estimate_token_savings(_orig_state, _compressed)
@@ -4046,7 +4054,8 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
             _post_process_chat_message,
             final_text=final_text,
             request_message=request.message,
-            chart_state=request.chart_state,
+            # v141.1: 用 pre-compress 版本，否則 _capture_signals 拿不到 external_signals.derivatives
+            chart_state=_chart_state_for_post_process or request.chart_state,
             chart_symbol_for_save=chart_symbol_for_save,
             conversation_id=conversation_id,
             total_usage=total_usage,

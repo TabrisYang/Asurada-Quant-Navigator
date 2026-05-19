@@ -86,6 +86,15 @@ async def lifespan(app: FastAPI):
     analysis_cache.cleanup()
     semantic_cache.cleanup()
 
+    # v141.2：啟動時清 external_signals in-memory cache，避免「cache 卡 empty」
+    # 30 分鐘 cache poisoning（某次採集全失敗 → 後續 30 分鐘都拿空）
+    try:
+        from app.core.external_signals import clear_cache as _clear_ext_cache
+        _cleared = _clear_ext_cache()
+        logger.info(f"[external_signals] 啟動清快取（{_cleared} 個 key）")
+    except Exception as _e:
+        logger.warning(f"[external_signals] 啟動清快取失敗（不影響）: {_e}")
+
     # 後台預載嵌入模型 + 種子知識（不阻塞啟動）
     import threading
     from app.core import embedding_service
