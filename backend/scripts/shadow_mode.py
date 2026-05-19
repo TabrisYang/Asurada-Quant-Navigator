@@ -326,6 +326,14 @@ def _summarize(per_row: list[dict]) -> dict:
                 and r["regime_warning"]["samples"] >= REGIME_WARN_MIN_SAMPLES
                 and r["combo_stats"]["samples"] >= COMBO_MIN_SAMPLES
             ),
+            # v141.3：核心 2 條件計數（不含 combo_stats）。combo 因 buckets 組合空間
+            # 大（~3000+ 種）/ 歷史筆數有限，sparsity 使 full_samples 結構性難達標。
+            # P3 啟動 gate 改用此 2 條件計數，combo_stats 降為 informational。
+            "rows_with_core_samples": sum(
+                1 for r in per_row
+                if r["direction_balance"]["samples"] >= DIR_BALANCE_MIN_SAMPLES
+                and r["regime_warning"]["samples"] >= REGIME_WARN_MIN_SAMPLES
+            ),
         },
     }
 

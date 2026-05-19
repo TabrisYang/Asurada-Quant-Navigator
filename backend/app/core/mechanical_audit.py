@@ -23,6 +23,16 @@ _NUM_TOL_PCT = 5.0  # 數值差異 ≥ 5% 才算不一致
 # 抓「RSI=72」「RSI 約 72」「RSI: 72」「RSI 為 72」這類
 _RSI_PAT = re.compile(r"RSI[\s:=約為]*?([0-9]+\.?[0-9]*)", re.IGNORECASE)
 _ATR_PAT = re.compile(r"ATR[\s:=約為]*?([0-9]+\.?[0-9]*)", re.IGNORECASE)
+
+# v141.3：只抓「明確宣稱當前 RSI」的句型，避免誤抓歷史統計（如「大漲前 RSI 中位數 59.3」
+# 「RSI 60-70 甜蜜區」「RSI 65.3–70.2 條件機率」）造成 false positive。
+# 必須 RSI 前 10 字內出現「當前/目前/現值/最新/latest/current」等當下語境關鍵字。
+_RSI_CURRENT_PAT = re.compile(
+    r"(?:當前|目前|現價|現值|現為|現在|最新|此刻|latest|current)[^。\n]{0,10}?RSI[\s:=約為（(]*?([0-9]+\.?[0-9]*)",
+    re.IGNORECASE,
+)
+# 排除「RSI 60-70」這種區間（後面緊跟 - – ~ 到 / 表示是範圍非點值）
+_RSI_RANGE_SUFFIX = re.compile(r"^[\s]*[-–~/到至]")
 _FUNDING_PAT = re.compile(r"funding[_\s]*rate[\s:=約為]*?([+\-]?[0-9]+\.?[0-9]*)\s*%", re.IGNORECASE)
 _PRICE_PAT = re.compile(r"(?:lastClose|last_close|現價|當前價|目前價)[\s:=約為]*?\$?([0-9]+[,0-9]*\.?[0-9]*)", re.IGNORECASE)
 
@@ -61,8 +71,8 @@ def _check_value_consistency(
     price_ov = (chart_state or {}).get("priceOverview") or {}
     deriv = ((chart_state or {}).get("external_signals") or {}).get("derivatives") or {}
 
-    # RSI
-    written_rsi = _extract_first_match(_RSI_PAT, final_text)
+    # RSI — v141.3：只比對「明確宣稱當前 RSI」的句型，避免誤抓歷史統計/區間
+    written_rsi = _extract_first_match(_RSI_CURRENT_PAT, final_text)
     actual_rsi_obj = inds.get("rsi") or inds.get("RSI") or {}
     actual_rsi_vals = actual_rsi_obj.get("values") if isinstance(actual_rsi_obj, dict) else None
     if written_rsi is not None and actual_rsi_vals:
@@ -70,7 +80,7 @@ def _check_value_consistency(
         last = next((v for v in reversed(actual_rsi_vals) if v is not None), None)
         if last is not None and _diff_pct(last, written_rsi) > _NUM_TOL_PCT:
             issues.append(
-                f"RSI 數值不一致：報告寫 {written_rsi:.1f}，實際 {last:.1f}"
+                f"當前 RSI 數值不一致：報告寫 {written_rsi:.1f}，實際 {last:.1f}"
             )
 
     # lastClose
