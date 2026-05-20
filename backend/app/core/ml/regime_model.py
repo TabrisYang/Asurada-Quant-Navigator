@@ -310,5 +310,55 @@ class RegimeModel:
             return {"status": "error", "message": str(e)}
 
 
+def assess_timing(garch_result: dict, hmm_result: dict) -> dict:
+    """v145：GARCH 波動率方向 vs HMM 盤整持續時間 的擇時仲裁（Q7）。
+
+    解決「波動率擴張（即將變盤）vs 盤整還要持續 N 根」的時間框架矛盾 ——
+    不再讓兩個原始數字並列、靠 LLM 文字和稀泥，而是給明確擇時結論。
+
+    Returns: {"timing_conflict": bool, "timing_signal": str}
+    """
+    if not garch_result or garch_result.get("status") != "success":
+        return {"timing_conflict": False, "timing_signal": ""}
+    if not hmm_result or hmm_result.get("status") != "success":
+        return {"timing_conflict": False, "timing_signal": ""}
+
+    vol_dir = garch_result.get("vol_direction", "")
+    cur_state = (hmm_result.get("current_state") or "").lower()
+    dur = hmm_result.get("expected_duration_bars", {}).get(
+        hmm_result.get("current_state", ""), 0
+    )
+    is_range = ("盤整" in cur_state) or ("range" in cur_state) or ("低波" in cur_state) or ("low" in cur_state)
+
+    if vol_dir == "expanding" and is_range:
+        # 核心矛盾：波動擴張（領先變盤）但 HMM 說盤整還會持續
+        return {
+            "timing_conflict": True,
+            "timing_signal": (
+                f"⚡ 擇時仲裁：GARCH 波動率擴張是**領先訊號**，HMM 盤整預期持續 {dur:.0f} 根是"
+                f"**狀態慣性估計**。兩者衝突時優先信任波動率領先性 → 判定為「盤整末段蓄勢」。"
+                f"擇時建議：**不要預設盤整會持續到底、不要在區間中段重倉**；改為等突破方向確認"
+                f"（實體收盤帶量突破區間邊界）後順勢進場。突破前以輕倉區間操作或觀望為宜。"
+            ),
+        }
+    if vol_dir == "contracting" and is_range:
+        return {
+            "timing_conflict": False,
+            "timing_signal": (
+                f"GARCH 波動收斂 + HMM 盤整預期持續 {dur:.0f} 根 → 訊號一致，"
+                f"盤整延續機率高，區間邊界操作（觸軌反轉）為主。"
+            ),
+        }
+    if vol_dir == "expanding" and not is_range:
+        return {
+            "timing_conflict": False,
+            "timing_signal": (
+                "GARCH 波動擴張 + HMM 趨勢狀態 → 訊號一致，趨勢延續且波動放大，"
+                "可順勢但需放寬止損（用 GARCH 建議倍率）。"
+            ),
+        }
+    return {"timing_conflict": False, "timing_signal": ""}
+
+
 # Singleton
 regime_model = RegimeModel()

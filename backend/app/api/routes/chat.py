@@ -1398,11 +1398,18 @@ def _build_messages(
                 logger.warning(f"校準數據載入失敗: {e}")
 
         if rag_fragments:
+            # v145：碎片標註來源標的（避免把別標的的勝率當成當前標的的歷史勝率 = Q8 前視偏差）
             frag_texts = [
-                f"• [{f['type']}] {f['content']}（相關度 {f['similarity']:.0%}）"
+                f"• [{f['type']}｜來源:{f.get('symbol', '通用')}] {f['content']}（相關度 {f['similarity']:.0%}）"
                 for f in rag_fragments
             ]
-            context_parts.append("【歷史分析經驗碎片】\n" + "\n".join(frag_texts))
+            context_parts.append(
+                "【歷史分析經驗碎片】\n" + "\n".join(frag_texts) + "\n"
+                "⚠️ 碎片隔離鐵則：碎片內的勝率/IC/統計數字**只屬於該碎片的來源標的與當時行情**，"
+                "**嚴禁**當成「當前標的的歷史勝率」引用。當前標的的真實勝率/命中率以 "
+                "chart_state.recent_accuracy / probability_triplet（track_record）為唯一依據。"
+                "引用碎片數字時必須標明來源標的（如「BTC 歷史上…」），不可裸寫「歷史勝率 67%」。"
+            )
 
         if context_parts:
             merged = "\n\n---\n\n".join(context_parts)
@@ -1865,20 +1872,35 @@ def _format_function_results(function_calls: list[dict], exec_result: dict) -> s
                 parts.append(f"📊 SMC 訂單流分析 — {r.get('symbol', '?')} {r.get('timeframe', '?')}")
                 parts.append(f"結構方向: HTF={r.get('trend_htf', '?')} / LTF={r.get('trend_ltf', '?')} / 共振={'✅' if r.get('mtf_aligned') else '❌'}")
                 parts.append(f"溢價/折價: {r.get('premium_discount', '?')} (Fib 0.5 = {r.get('fib_50', '?')})")
-                # BOS/CHoCH 事件
+                # BOS/CHoCH 事件（price=突破收盤、level_price=被破結構位，皆精確值）
                 for evt in r.get("bos_points", []) + r.get("choch_points", []):
                     if evt.get("filtered"):
                         continue
                     tag = "🔴" if evt.get("type") == "CHoCH" else "🔵"
-                    parts.append(f"  {tag} {evt['type']} @ {evt['price']} (量比 {evt.get('vol_ratio', '?')}x)")
-                # Sweep 事件
+                    parts.append(
+                        f"  {tag} {evt['type']} 收盤 {evt['price']} 突破結構位 {evt.get('level_price', '?')} (量比 {evt.get('vol_ratio', '?')}x)"
+                    )
+                # Sweep 事件（level_price=被掃結構位、price=影線極值，皆精確值）
                 for sw in r.get("sweep_events", []):
                     if not sw.get("filtered"):
-                        parts.append(f"  💧 {sw['type']} Sweep @ {sw['price']} (量比 {sw.get('vol_ratio', '?')}x)")
-                # FVG
+                        parts.append(
+                            f"  💧 {sw['type']} Sweep 結構位 {sw.get('level_price', '?')} 影線觸及 {sw['price']} (量比 {sw.get('vol_ratio', '?')}x)"
+                        )
+                # Order Block（機構訂單塊，精確 [low, high] 區間）
+                for ob in r.get("order_blocks", []):
+                    ob_tag = "🟩" if ob.get("type") == "bullish" else "🟥"
+                    tested = "已測試" if ob.get("tested") else "未測試"
+                    parts.append(
+                        f"  {ob_tag} {ob.get('type')} OB 區間 [{ob.get('low', '?')}, {ob.get('high', '?')}] ({tested})"
+                    )
+                # FVG（列出未填補缺口的精確 [low, high] 區間，非只數量）
                 unfilled_fvg = [f for f in r.get("fvg_zones", []) if not f.get("filled")]
                 if unfilled_fvg:
-                    parts.append(f"  未填補 FVG: {len(unfilled_fvg)} 個")
+                    parts.append(f"  未填補 FVG ({len(unfilled_fvg)} 個):")
+                    for fvg in unfilled_fvg[:5]:
+                        parts.append(
+                            f"    ⚡ {fvg.get('type')} FVG [{fvg.get('low', '?')}, {fvg.get('high', '?')}]"
+                        )
                 # 交易建議
                 bias = r.get("bias", "WAIT")
                 parts.append(f"\n建議: {bias}")

@@ -1310,7 +1310,18 @@ _PROMPT_MODULES["event_analysis"] = """
 分析結果解讀：
 - std 越小 = 規律性越強
 - samples ≥ 10 較可靠，< 5 需標注「樣本不足」
-- 必須加風險警告：統計共通性不等於因果關係"""
+- 必須加風險警告：統計共通性不等於因果關係
+
+★★★ 反編造鐵則（v145）★★★
+analyze_event_patterns 是後端 Python 函式，由系統直接執行 —
+**不需要任何權限、不跑 python3 subprocess、你也不需要「批准」才能用**。
+嚴禁編造以下任何句型（出現即視為失敗回應）：
+- 「我無法直接執行 Python 腳本」
+- 「需要你在 Claude Code 中批准 python3 執行權限」
+- 「需要先取得執行權限」「無法跑新一輪統計」
+正確做法：直接呼叫 analyze_event_patterns function 取得統計，再解讀。
+若該函式真的回傳錯誤/空，照實寫「⚠️ 資料不可得：[函式回傳的具體錯誤]」，
+不可假借「權限」當藉口。"""
 
 # ─── quant_research（保留）────────────────────────────
 
@@ -1341,6 +1352,9 @@ _PROMPT_MODULES["quant_research"] = """
 - gmm_regime → 報告當前 regime 名稱、機率、歷史佔比
 - garch_volatility → 報告波動率方向 + 建議止損倍率
 - hmm_regime → 報告當前狀態 + 預期持續 K 線數
+- **timing（擇時仲裁，v145）→ 若 timing_conflict=true，必須直接引用 timing_signal 給出
+  明確擇時結論，禁止把「波動率擴張」和「盤整持續 N 根」兩個數字並列卻不下判斷（禁止和稀泥）。
+  GARCH 波動率是領先訊號，與 HMM 盤整持續衝突時優先信任波動率 → 盤整末段、等突破確認再進場。**
 - cpcv → 報告一致性%、P25 報酬、score、verdict
 - monte_carlo_oos → OOS 交易的 MC 結果（比全樣本更可靠）
 - calibration_metrics → Brier Score、ECE（在預測績效段引用）
@@ -1524,7 +1538,15 @@ _PROMPT_MODULES["smc"] = """
 📝 思考題：
 - 根據當前結構，提出一個「如果結構失效」的假設性問題
 
-所有數值必須直接引用計算結果，禁止自行推算任何價格或比率。"""
+所有數值必須直接引用計算結果，禁止自行推算任何價格或比率。
+
+★★★ 價位精度鐵則（v145）★★★
+- **嚴禁**寫「約」「附近」「左右」「~0.25」這類模糊價位。0.2501 和 0.2599 是完全不同的價位。
+- 所有價位必須**完整引用** detect_smc_structure 回傳的精確數字（與 K 線圖顯示位數一致）。
+  例：sweep level_price=0.258844 就寫 0.258844，不可寫「0.26 附近」。
+- Order Block 必須引用 order_blocks 的精確 [low, high] 區間（如 [0.244196, 0.244460]），
+  作為一級支撐/壓力與交易計畫的進場/止損依據，**不可**用布林帶/Donchian 含糊代替。
+- FVG 必須引用 fvg_zones 的精確 [low, high]。"""
 
 # ─── 三階段完整分析 ─────────────────────────────────
 
@@ -2737,7 +2759,19 @@ FUNCTION_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "compare_strategies",
-            "description": "同時執行 2-5 個不同策略的回測並比較績效（勝率、Sharpe、報酬、回撤）。適合用於策略優化和參數調優。結果會按 Sharpe Ratio 排名。",
+            "description": (
+                "同時執行 2-5 個不同策略的回測並比較績效（勝率、Sharpe、報酬、回撤）。結果按 Sharpe 排名。\n"
+                "★ 條件的 series 名稱必須用以下精確值（大小寫需正確，寫錯=該條件永不成立=0 交易）：\n"
+                "  - macd：series 用 'MACD' / 'Signal' / 'Histogram'\n"
+                "  - adx：series 用 'ADX' / '+DI' / '-DI'\n"
+                "  - stochrsi：series 用 '%K' / '%D'\n"
+                "  - bb：series 用 'BB_Upper' / 'BB_Middle' / 'BB_Lower' / 'BB_Width'\n"
+                "  - rsi/roc/atr/obv/bias：單一序列，可省略 series\n"
+                "  - supertrend：**只有 'Supertrend' 價格線、無方向序列**。要判斷多空方向請用 "
+                "close 與 Supertrend 比較（如 entry 用 indicator='close' 或改用 ADX +DI/-DI），"
+                "**禁止使用不存在的 'Supertrend_Direction'**。\n"
+                "★ 進場條件勿過度嚴苛（多條件 AND 易 0 交易），優先用單一明確條件 + SL/TP。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {

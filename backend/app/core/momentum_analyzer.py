@@ -341,8 +341,8 @@ def _backtest_momentum_strategies(df: pd.DataFrame, timeframe: str) -> dict:
             "sharpe": m.get("sharpe_ratio", 0),
             "mdd": m.get("max_drawdown_pct", 0),
         }
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"動能策略 rsi_momentum 回測失敗: {e}")
 
     # 策略 2：動量反轉（RSI < 30 超賣反彈）
     try:
@@ -358,8 +358,8 @@ def _backtest_momentum_strategies(df: pd.DataFrame, timeframe: str) -> dict:
             "sharpe": m.get("sharpe_ratio", 0),
             "mdd": m.get("max_drawdown_pct", 0),
         }
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"動能策略 rsi_reversal 回測失敗: {e}")
 
     # 策略 3：ADX 強趨勢追蹤（ADX > 30 + DI+ > DI-）
     try:
@@ -377,8 +377,8 @@ def _backtest_momentum_strategies(df: pd.DataFrame, timeframe: str) -> dict:
             "sharpe": m.get("sharpe_ratio", 0),
             "mdd": m.get("max_drawdown_pct", 0),
         }
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"動能策略 adx_trend 回測失敗: {e}")
 
     # 找最佳策略
     best = None

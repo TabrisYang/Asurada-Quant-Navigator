@@ -27,6 +27,7 @@ import pandas as pd
 from loguru import logger
 
 from app.core.indicators import registry
+from app.utils.price import round_price
 
 
 # ─── 常量 ────────────────────────────────────────
@@ -148,7 +149,7 @@ class SMCResult:
         return {
             "symbol": self.symbol,
             "timeframe": self.timeframe,
-            "current_price": round(self.current_price, 2),
+            "current_price": round_price(self.current_price),
             "trend_htf": self.trend_htf,
             "trend_ltf": self.trend_ltf,
             "mtf_aligned": self.mtf_aligned,
@@ -160,10 +161,10 @@ class SMCResult:
             "order_blocks": self.order_blocks,
             "bias": self.bias,
             "premium_discount": self.premium_discount,
-            "fib_50": round(self.fib_50, 2),
-            "entry": round(self.entry, 2) if self.entry else None,
-            "stop_loss": round(self.stop_loss, 2) if self.stop_loss else None,
-            "take_profit": round(self.take_profit, 2) if self.take_profit else None,
+            "fib_50": round_price(self.fib_50),
+            "entry": round_price(self.entry) if self.entry else None,
+            "stop_loss": round_price(self.stop_loss) if self.stop_loss else None,
+            "take_profit": round_price(self.take_profit) if self.take_profit else None,
             "rr_ratio": round(self.rr_ratio, 2) if self.rr_ratio else None,
             "confidence": self.confidence,
             "confidence_breakdown": self.confidence_breakdown,
@@ -301,8 +302,8 @@ def _detect_bos_choch(
                 is_filtered = vol_ratio is not None and vol_ratio < vol_threshold
 
                 event = {
-                    "price": round(close_i, 2),
-                    "level_price": round(sh.price, 2),
+                    "price": round_price(close_i),
+                    "level_price": round_price(sh.price),
                     "timestamp": ts,
                     "vol_ratio": vol_ratio,
                     "filtered": is_filtered,
@@ -340,8 +341,8 @@ def _detect_bos_choch(
                 is_filtered = vol_ratio is not None and vol_ratio < vol_threshold
 
                 event = {
-                    "price": round(close_i, 2),
-                    "level_price": round(sl.price, 2),
+                    "price": round_price(close_i),
+                    "level_price": round_price(sl.price),
                     "timestamp": ts,
                     "vol_ratio": vol_ratio,
                     "filtered": is_filtered,
@@ -434,8 +435,8 @@ def _detect_order_blocks(
         if ob_candle_idx is None:
             continue
 
-        ob_high = round(float(highs[ob_candle_idx]), 2)
-        ob_low = round(float(lows[ob_candle_idx]), 2)
+        ob_high = round_price(float(highs[ob_candle_idx]))
+        ob_low = round_price(float(lows[ob_candle_idx]))
 
         # 檢查 BOS 之後是否被回測
         tested = False
@@ -512,9 +513,9 @@ def _detect_fvg(df: pd.DataFrame) -> list[dict]:
             gap_width = float(lows[i] - highs[i - 2])
             fvg_zones.append({
                 "type": "bullish",
-                "high": round(float(lows[i]), 2),       # FVG 上界
-                "low": round(float(highs[i - 2]), 2),    # FVG 下界
-                "width": round(gap_width, 2),
+                "high": round_price(float(lows[i])),       # FVG 上界
+                "low": round_price(float(highs[i - 2])),    # FVG 下界
+                "width": round_price(gap_width),
                 "timestamp": str(timestamps[i - 1]),      # 中間 K 線時間
                 "bar_index": i - 1,
                 "filled": _is_fvg_filled(df, i, float(highs[i - 2]), float(lows[i]), "bullish"),
@@ -525,9 +526,9 @@ def _detect_fvg(df: pd.DataFrame) -> list[dict]:
             gap_width = float(lows[i - 2] - highs[i])
             fvg_zones.append({
                 "type": "bearish",
-                "high": round(float(lows[i - 2]), 2),    # FVG 上界
-                "low": round(float(highs[i]), 2),         # FVG 下界
-                "width": round(gap_width, 2),
+                "high": round_price(float(lows[i - 2])),    # FVG 上界
+                "low": round_price(float(highs[i])),         # FVG 下界
+                "width": round_price(gap_width),
                 "timestamp": str(timestamps[i - 1]),
                 "bar_index": i - 1,
                 "filled": _is_fvg_filled(df, i, float(highs[i]), float(lows[i - 2]), "bearish"),
@@ -596,8 +597,8 @@ def _detect_sweeps(
                 is_filtered = vol_ratio is not None and vol_ratio < vol_threshold
                 sweep_events.append({
                     "type": "BSL",
-                    "price": round(float(highs[i]), 2),
-                    "level_price": round(sh.price, 2),
+                    "price": round_price(float(highs[i])),
+                    "level_price": round_price(sh.price),
                     "timestamp": str(timestamps[i]),
                     "vol_ratio": vol_ratio,
                     "filtered": is_filtered,
@@ -618,8 +619,8 @@ def _detect_sweeps(
                 is_filtered = vol_ratio is not None and vol_ratio < vol_threshold
                 sweep_events.append({
                     "type": "SSL",
-                    "price": round(float(lows[i]), 2),
-                    "level_price": round(sl.price, 2),
+                    "price": round_price(float(lows[i])),
+                    "level_price": round_price(sl.price),
                     "timestamp": str(timestamps[i]),
                     "vol_ratio": vol_ratio,
                     "filtered": is_filtered,
@@ -668,7 +669,7 @@ def _find_equal_levels(df: pd.DataFrame, swings: list[SwingPoint], tolerance: fl
                 avg_price = sum(p.price for p in cluster) / len(cluster)
                 equal_levels.append({
                     "type": level_type,
-                    "price": round(avg_price, 2),
+                    "price": round_price(avg_price),
                     "count": len(cluster),
                     "timestamps": [p.timestamp for p in cluster[-3:]],
                 })
@@ -999,17 +1000,17 @@ class SMCDetector:
                 if buy_fvgs:
                     entry = buy_fvgs[-1]["high"]  # FVG 上界
                 else:
-                    entry = round(fib_50, 2)
+                    entry = round_price(fib_50)
 
                 # 止損：POI 下方 0.5 ATR
                 recent_lows = [s for s in swings if s.swing_type == "low"]
                 poi = recent_lows[-1].price if recent_lows else entry
-                stop_loss = round(_calc_atr_stoploss(df_analysis, poi, "BUY"), 2)
+                stop_loss = round_price(_calc_atr_stoploss(df_analysis, poi, "BUY"))
 
                 # 止盈：最近 swing high
                 recent_highs = [s for s in swings if s.swing_type == "high"]
                 if recent_highs:
-                    take_profit = round(recent_highs[-1].price, 2)
+                    take_profit = round_price(recent_highs[-1].price)
                 else:
                     atr_data = registry.calculate("atr", df_analysis)
                     atr_val = 0.0
@@ -1017,22 +1018,22 @@ class SMCDetector:
                         atr_vals = [v for v in atr_data["atr"] if v is not None]
                         if atr_vals:
                             atr_val = atr_vals[-1]
-                    take_profit = round(entry + atr_val * 2, 2)
+                    take_profit = round_price(entry + atr_val * 2)
 
             else:  # SELL
                 sell_fvgs = [f for f in unfilled_fvg if f.get("type") == "bearish"]
                 if sell_fvgs:
                     entry = sell_fvgs[-1]["low"]
                 else:
-                    entry = round(fib_50, 2)
+                    entry = round_price(fib_50)
 
                 recent_highs = [s for s in swings if s.swing_type == "high"]
                 poi = recent_highs[-1].price if recent_highs else entry
-                stop_loss = round(_calc_atr_stoploss(df_analysis, poi, "SELL"), 2)
+                stop_loss = round_price(_calc_atr_stoploss(df_analysis, poi, "SELL"))
 
                 recent_lows = [s for s in swings if s.swing_type == "low"]
                 if recent_lows:
-                    take_profit = round(recent_lows[-1].price, 2)
+                    take_profit = round_price(recent_lows[-1].price)
                 else:
                     atr_data = registry.calculate("atr", df_analysis)
                     atr_val = 0.0
@@ -1040,7 +1041,7 @@ class SMCDetector:
                         atr_vals = [v for v in atr_data["atr"] if v is not None]
                         if atr_vals:
                             atr_val = atr_vals[-1]
-                    take_profit = round(entry - atr_val * 2, 2)
+                    take_profit = round_price(entry - atr_val * 2)
 
             # RR Ratio
             if entry and stop_loss and take_profit:

@@ -361,7 +361,7 @@ class KnowledgeFragmentStore:
             params.extend([now, ttl_seconds])
 
             rows = self._conn.execute(
-                f"SELECT id, content, embedding, fragment_type, created_at, hit_count "
+                f"SELECT id, content, embedding, fragment_type, created_at, hit_count, symbol "
                 f"FROM fragments {where_clause}",
                 params,
             ).fetchall()
@@ -370,7 +370,7 @@ class KnowledgeFragmentStore:
                 return []
 
             results = []
-            for row_id, content, emb_blob, ftype, created_at, hit_count in rows:
+            for row_id, content, emb_blob, ftype, created_at, hit_count, frag_symbol in rows:
                 cached_vec = np.frombuffer(emb_blob, dtype=np.float32)
                 if cached_vec.shape[0] != embedding_service.get_vector_dim():
                     continue
@@ -391,6 +391,9 @@ class KnowledgeFragmentStore:
                     "similarity": round(sim, 4),
                     "score": round(score, 4),
                     "created_at": created_at,
+                    # v145：回傳碎片來源標的（'' = 通用碎片），供 prompt 標註，
+                    # 避免 LLM 把別標的的勝率當成當前標的的歷史勝率（Q8 前視偏差）
+                    "symbol": frag_symbol or "通用",
                 })
 
             results.sort(key=lambda x: x["score"], reverse=True)

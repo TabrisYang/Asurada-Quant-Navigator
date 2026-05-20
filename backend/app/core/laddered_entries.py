@@ -413,14 +413,13 @@ def _compute_sl_tp(
 
 
 def _round_price(p: Optional[float]) -> Optional[float]:
-    """根據量級自動小數位（價格 > 1000 取 0 位、> 10 取 2 位、其餘 4 位）。"""
-    if p is None:
-        return None
-    if p >= 1000:
-        return round(p, 0)
-    if p >= 10:
-        return round(p, 2)
-    return round(p, 4)
+    """價格精度對齊 K 線圖（共用 app.utils.price.round_price）。
+
+    v145：原本 >1000→0位、>10→2位、其餘 4 位，與 K 線圖不一致
+    （ADA $0.25 圖上顯示 6 位 0.251700，舊版只給 4 位）。改用共用 helper。
+    """
+    from app.utils.price import round_price
+    return round_price(p)
 
 
 def compute_laddered_entries(

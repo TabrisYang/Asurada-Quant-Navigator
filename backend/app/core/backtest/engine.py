@@ -162,6 +162,45 @@ class BacktestResult:
         }
 
 
+# v145：series 名稱別名表（LLM 常寫的錯名 → registry 實際 key）
+_SERIES_ALIASES = {
+    "macd_hist": "Histogram", "macd_histogram": "Histogram", "hist": "Histogram",
+    "macd_signal": "Signal", "signal_line": "Signal",
+    "di_plus": "+DI", "plus_di": "+DI", "di+": "+DI",
+    "di_minus": "-DI", "minus_di": "-DI", "di-": "-DI",
+    "stochrsi_k": "%K", "stoch_k": "%K", "k": "%K",
+    "stochrsi_d": "%D", "stoch_d": "%D", "d": "%D",
+    "bb_upper": "BB_Upper", "bb_lower": "BB_Lower", "bb_middle": "BB_Middle", "bb_width": "BB_Width",
+}
+
+
+def _resolve_series(name: str, calc: dict) -> Optional[str]:
+    """解析 condition 指定的 series 名稱到 calc 實際 key。
+
+    順序：精確匹配 → 大小寫不敏感 → 去底線/特殊字後比對 → 別名表。
+    找不到回 None（呼叫端應視為條件永不成立 + log error）。
+    注意：supertrend 只有 'Supertrend' 價格線，無 'Supertrend_Direction'，
+    方向判定應改用 close vs Supertrend 比較（由 prompt 指引 LLM）。
+    """
+    if name in calc:
+        return name
+    keys = list(calc.keys())
+    lower_map = {k.lower(): k for k in keys}
+    nl = name.lower()
+    if nl in lower_map:
+        return lower_map[nl]
+    # 去底線/加減號正規化
+    norm = nl.replace("_", "").replace("-", "").replace("+", "")
+    norm_map = {k.lower().replace("_", "").replace("-", "").replace("+", ""): k for k in keys}
+    if norm in norm_map:
+        return norm_map[norm]
+    # 別名表
+    alias = _SERIES_ALIASES.get(nl)
+    if alias and alias in calc:
+        return alias
+    return None
+
+
 def _build_condition_mask(
     df: pd.DataFrame, conditions: list[dict], logic: str = "AND",
     indicator_cache: dict | None = None,
@@ -185,11 +224,19 @@ def _build_condition_mask(
             continue
 
         # 支援 condition 中指定 series（如 ADX 的 "+DI"/"-DI"）
+        # v145：series 解析強化 — LLM 常寫錯名（histogram vs Histogram、Supertrend_Direction
+        # 不存在）。先精確匹配 → 大小寫/底線不敏感 → 常見別名。仍找不到 → all-False mask
+        # （不再 silent continue，避免 AND 邏輯被偷偷放寬；同時 log error 讓問題可見）。
         series_name = cond.get("series") or list(calc.keys())[0]
-        if series_name not in calc:
-            logger.warning(f"回測：指標 {indicator_id} 沒有 series '{series_name}'，可用：{list(calc.keys())}")
+        resolved = _resolve_series(series_name, calc)
+        if resolved is None:
+            logger.error(
+                f"回測：指標 {indicator_id} 找不到 series '{series_name}'（可用：{list(calc.keys())}）"
+                f" → 該條件視為永不成立"
+            )
+            masks.append(np.zeros(len(df), dtype=bool))
             continue
-        values = np.array(calc[series_name], dtype=float)
+        values = np.array(calc[resolved], dtype=float)
 
         op = cond.get("operator", ">")
         try:

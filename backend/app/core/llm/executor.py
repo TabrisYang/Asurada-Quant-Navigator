@@ -1484,6 +1484,9 @@ async def _exec_quant_research(args: dict, default_symbol: str, default_tf: str,
                 )
                 if hmm_result.get("status") == "success":
                     report["hmm_regime"] = hmm_result
+                # v145：GARCH vs HMM 擇時仲裁（Q7）
+                from app.core.ml.regime_model import assess_timing
+                report["timing"] = assess_timing(report.get("garch_volatility", {}), hmm_result)
                 logger.info(f"量化研究 [{symbol}]: HMM 完成 ({_time.time()-_t0:.1f}s)")
             except asyncio.TimeoutError:
                 logger.warning(f"量化研究 [{symbol}]: HMM 逾時 (60s)，跳過")
@@ -2341,6 +2344,9 @@ async def _exec_generate_scenarios(args: dict, default_symbol: str, default_tf: 
                     hmm_result = regime_model.fit_hmm(df)
                     if hmm_result.get("status") == "success":
                         output["hmm_regime"] = hmm_result
+                        # v145：GARCH vs HMM 擇時仲裁（Q7）
+                        from app.core.ml.regime_model import assess_timing
+                        output["timing"] = assess_timing(output.get("garch_volatility", {}), hmm_result)
             except Exception as e_regime:
                 logger.warning(f"情境預測附加 regime 分析失敗: {e_regime}")
 

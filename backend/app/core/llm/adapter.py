@@ -104,6 +104,12 @@ def _minimal_r2_chart_state(chart_state: Optional[dict]) -> Optional[dict]:
         if ext_summary:
             minimal["external_signals_summary"] = ext_summary
 
+    # v145：保留 rl_strategic_insight（RL 戰略結論）— 它已是精簡格式，Round 2 報告
+    # 的 #6.5 RL 戰略結論段需要它，否則只能寫「資料不可得」。直接 copy 不展開。
+    rl = chart_state.get("rl_strategic_insight")
+    if rl:
+        minimal["rl_strategic_insight"] = rl
+
     minimal["_r2_note"] = (
         "Round 2 精簡狀態：完整 indicators / signal_history / external_signals 已在 Round 1 提供，"
         "此處僅保留核心識別與摘要。請依對話歷史中的 Round 1 結果做綜合分析。"
