@@ -1871,27 +1871,29 @@ def _format_function_results(function_calls: list[dict], exec_result: dict) -> s
             elif fname == "detect_smc_structure":
                 parts.append(f"📊 SMC 訂單流分析 — {r.get('symbol', '?')} {r.get('timeframe', '?')}")
                 parts.append(f"結構方向: HTF={r.get('trend_htf', '?')} / LTF={r.get('trend_ltf', '?')} / 共振={'✅' if r.get('mtf_aligned') else '❌'}")
-                parts.append(f"溢價/折價: {r.get('premium_discount', '?')} (Fib 0.5 = {r.get('fib_50', '?')})")
+                # v145：價位用 format_price 補滿小數位，與 K 線圖完全一致（0.251700 而非 0.2517）
+                from app.utils.price import format_price as _fp
+                parts.append(f"溢價/折價: {r.get('premium_discount', '?')} (Fib 0.5 = {_fp(r.get('fib_50'))})")
                 # BOS/CHoCH 事件（price=突破收盤、level_price=被破結構位，皆精確值）
                 for evt in r.get("bos_points", []) + r.get("choch_points", []):
                     if evt.get("filtered"):
                         continue
                     tag = "🔴" if evt.get("type") == "CHoCH" else "🔵"
                     parts.append(
-                        f"  {tag} {evt['type']} 收盤 {evt['price']} 突破結構位 {evt.get('level_price', '?')} (量比 {evt.get('vol_ratio', '?')}x)"
+                        f"  {tag} {evt['type']} 收盤 {_fp(evt.get('price'))} 突破結構位 {_fp(evt.get('level_price'))} (量比 {evt.get('vol_ratio', '?')}x)"
                     )
                 # Sweep 事件（level_price=被掃結構位、price=影線極值，皆精確值）
                 for sw in r.get("sweep_events", []):
                     if not sw.get("filtered"):
                         parts.append(
-                            f"  💧 {sw['type']} Sweep 結構位 {sw.get('level_price', '?')} 影線觸及 {sw['price']} (量比 {sw.get('vol_ratio', '?')}x)"
+                            f"  💧 {sw['type']} Sweep 結構位 {_fp(sw.get('level_price'))} 影線觸及 {_fp(sw.get('price'))} (量比 {sw.get('vol_ratio', '?')}x)"
                         )
                 # Order Block（機構訂單塊，精確 [low, high] 區間）
                 for ob in r.get("order_blocks", []):
                     ob_tag = "🟩" if ob.get("type") == "bullish" else "🟥"
                     tested = "已測試" if ob.get("tested") else "未測試"
                     parts.append(
-                        f"  {ob_tag} {ob.get('type')} OB 區間 [{ob.get('low', '?')}, {ob.get('high', '?')}] ({tested})"
+                        f"  {ob_tag} {ob.get('type')} OB 區間 [{_fp(ob.get('low'))}, {_fp(ob.get('high'))}] ({tested})"
                     )
                 # FVG（列出未填補缺口的精確 [low, high] 區間，非只數量）
                 unfilled_fvg = [f for f in r.get("fvg_zones", []) if not f.get("filled")]
@@ -1899,13 +1901,13 @@ def _format_function_results(function_calls: list[dict], exec_result: dict) -> s
                     parts.append(f"  未填補 FVG ({len(unfilled_fvg)} 個):")
                     for fvg in unfilled_fvg[:5]:
                         parts.append(
-                            f"    ⚡ {fvg.get('type')} FVG [{fvg.get('low', '?')}, {fvg.get('high', '?')}]"
+                            f"    ⚡ {fvg.get('type')} FVG [{_fp(fvg.get('low'))}, {_fp(fvg.get('high'))}]"
                         )
                 # 交易建議
                 bias = r.get("bias", "WAIT")
                 parts.append(f"\n建議: {bias}")
                 if r.get("entry"):
-                    parts.append(f"  Entry: {r['entry']} / SL: {r.get('stop_loss', '?')} / TP: {r.get('take_profit', '?')}")
+                    parts.append(f"  Entry: {_fp(r.get('entry'))} / SL: {_fp(r.get('stop_loss'))} / TP: {_fp(r.get('take_profit'))}")
                     parts.append(f"  RR: {r.get('rr_ratio', '?')} / 信心: {r.get('confidence', '?')}%")
                 # 信心分項
                 bd = r.get("confidence_breakdown", {})

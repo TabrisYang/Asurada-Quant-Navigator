@@ -36,3 +36,19 @@ def round_price(price: Optional[float]) -> Optional[float]:
     except (TypeError, ValueError):
         return price
     return round(p, price_precision(p))
+
+
+def format_price(price: Optional[float]) -> str:
+    """格式化成與 K 線圖完全一致的字串（含尾隨 0）。
+
+    round_price 回傳 float（0.2517），但 float 會吃掉尾隨 0；K 線圖顯示 0.251700。
+    報告要「寫得跟圖一樣」需用固定位數字串：format_price(0.2517) → '0.251700'。
+    None 回 '?'。
+    """
+    if price is None:
+        return "?"
+    try:
+        p = float(price)
+    except (TypeError, ValueError):
+        return str(price)
+    return f"{p:.{price_precision(p)}f}"
