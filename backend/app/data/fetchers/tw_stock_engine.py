@@ -7,6 +7,7 @@
 import asyncio
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import Optional, Callable
 
@@ -24,6 +25,12 @@ YF_TIMEFRAME_MAP = {
     "1d": "1d",
     "1w": "1wk",
 }
+
+# yfinance 專用 bounded thread pool（與全系統共用的 asyncio 預設池隔離）。
+# 為何：yfinance 下載會卡在 Yahoo 網路 I/O；若用預設 to_thread 池，台股掃描（高並發）
+# 會把池佔滿，導致 LLM 分析的校準 to_thread / 其他端點 starve → 整個後端凍結。
+# 用獨立 bounded 池後，即使 yfinance 全卡死，預設池仍空著給分析/DB/評估端點用。
+_YF_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="yf")
 
 
 # ─────────────────────────────────────────────
@@ -97,6 +104,13 @@ class TwStockEngine:
         self.data_dir = settings.ohlcv_path
         self._metadata_path = self.data_dir / "sync_metadata.json"
 
+    async def _download(self, ticker, interval, start, end):
+        """在 yfinance 專用池跑同步下載，避免佔用全系統共用的 asyncio 預設 to_thread 池。"""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            _YF_EXECUTOR, self._download_from_yfinance, ticker, interval, start, end
+        )
+
     # ─────────────────────────────────────────────
     # 主要抓取方法
     # ─────────────────────────────────────────────
@@ -165,8 +179,7 @@ class TwStockEngine:
                     # 往前補抓歷史數據
                     if need_backfill:
                         _report(f"往前補抓: {start_date.strftime('%Y-%m-%d')} ~ {first_date.strftime('%Y-%m-%d')}")
-                        earlier_df = await asyncio.to_thread(
-                            self._download_from_yfinance,
+                        earlier_df = await self._download(
                             yf_ticker, yf_interval, start_date, first_date,
                         )
                         if earlier_df is not None and not earlier_df.empty:
@@ -196,8 +209,7 @@ class TwStockEngine:
             _report(f"正在從 Yahoo Finance 抓取 {yf_ticker} {yf_interval}...")
 
             try:
-                new_df = await asyncio.to_thread(
-                    self._download_from_yfinance,
+                new_df = await self._download(
                     yf_ticker, yf_interval, start_date, end_date,
                 )
             except Exception as e:
@@ -218,8 +230,7 @@ class TwStockEngine:
                 alt_ticker = fix_yf_ticker_if_failed(code)
                 _report(f"yfinance {yf_ticker} 無數據，嘗試 {alt_ticker}...")
                 try:
-                    new_df = await asyncio.to_thread(
-                        self._download_from_yfinance,
+                    new_df = await self._download(
                         alt_ticker, yf_interval, start_date, end_date,
                     )
                     if new_df is not None and not new_df.empty:
@@ -293,6 +304,8 @@ class TwStockEngine:
                     interval=interval,
                     auto_adjust=True,
                     progress=False,
+                    threads=False,  # 我們已在 asyncio 層平行化；yfinance 內部多執行緒會放大執行緒/連線數
+                    timeout=15,     # 硬性逾時，避免 Yahoo 卡慢時 worker thread 永久阻塞（→ CLOSE_WAIT 洩漏）
                 )
                 if df is None or df.empty:
                     # 「無資料」也算失敗（多半是 ticker 不存在 / 下市）

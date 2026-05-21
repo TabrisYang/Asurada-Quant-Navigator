@@ -263,8 +263,10 @@ async def lifespan(app: FastAPI):
                 cfg = auto_scanner._load_scan_config()
 
                 if cfg.get("scan_enabled", True):
-                    results = auto_scanner.scan_all_symbols()
-                    auto_scanner.validate_expired_alerts()
+                    # scan_all_symbols 是同步 CPU-bound（讀本地 CSV + 指標計算），
+                    # 直接呼叫會卡住事件迴圈 → 用 to_thread 移出，避免每 4 小時凍結請求處理
+                    results = await asyncio.to_thread(auto_scanner.scan_all_symbols)
+                    await asyncio.to_thread(auto_scanner.validate_expired_alerts)
                     if results:
                         logger.info(f"[自動掃描] 發現 {len(results)} 個預警信號")
                     else:

@@ -27,7 +27,7 @@ from app.data.fetchers.tw_stock_engine import TwStockEngine
 from app.data.fetchers.tw_universe import TwStock, tw_universe
 
 
-_DEFAULT_CONCURRENCY = 25
+_DEFAULT_CONCURRENCY = 8  # 對齊 yfinance 專用池（_YF_EXECUTOR max_workers=8），避免下載排隊塞爆 + 對 Yahoo 較友善
 _MIN_BARS_REQUIRED = 150  # 120 根 lookback + 20~30 根容忍
 _HISTORY_DAYS = 400       # 掃描需要的歷史天數（日曆日 ~= 270 交易日，遠超 _MIN_BARS_REQUIRED）
 _MAX_FAIL_RATE = 0.10     # 失敗率 > 10% 中止
