@@ -107,6 +107,8 @@ export default function ChatInterface() {
   const [quickQuestions, setQuickQuestions] = useState<string[]>(loadQuickQuestions);
   const [editingQuick, setEditingQuick] = useState(false);
   const [analysisBarOpen, setAnalysisBarOpen] = useState(true);
+  // v146：多選打包 — 已勾選的維度按鈕索引
+  const [selectedActions, setSelectedActions] = useState<Set<number>>(new Set());
   const [showKnowledgePanel, setShowKnowledgePanel] = useState(false);
   const [knowledgeFragments, setKnowledgeFragments] = useState<FragmentItem[]>([]);
   const [knowledgeTotal, setKnowledgeTotal] = useState(0);
@@ -310,8 +312,9 @@ export default function ChatInterface() {
     }
   }, [messages]);
 
-  const handleSend = useCallback(async (sendMode?: string) => {
-    const trimmed = input.trim();
+  const handleSend = useCallback(async (sendMode?: string, explicitText?: string) => {
+    // v146.1：explicitText 讓批次送出直接帶文字（不靠 stale input state closure）
+    const trimmed = (explicitText ?? input).trim();
     if (!trimmed) return;
 
     const currentlyLoading = useChartStore.getState().chatLoading;
@@ -1073,38 +1076,89 @@ export default function ChatInterface() {
         </div>
         {analysisBarOpen && (
           <div className="flex flex-wrap gap-1.5 px-3 py-2" style={{ background: 'var(--bg-secondary)' }}>
-            {ANALYSIS_ACTIONS.map((item, i) => (
-              <button
-                key={i}
-                onClick={() => {
-                  const sym = useChartStore.getState().symbol || 'BTC/USDT';
-                  if (item.sequence && item.sequence.length > 0) {
-                    // 一鍵連跑：第 1 條直接送（無 mode → 走 intent 偵測），第 2-N 條排隊接力
-                    const seq = item.sequence;
-                    setInput(seq[0].replace('{symbol}', sym));
-                    setTimeout(() => handleSend(), 50);
-                    for (let k = 1; k < seq.length; k++) {
-                      messageQueueRef.current.push({ text: seq[k].replace('{symbol}', sym), isSequenceFollow: true });
+            {ANALYSIS_ACTIONS.map((item, i) => {
+              // v146：一鍵連跑（有 sequence）維持立即送；其餘 11 維度改勾選式打包
+              const isSequence = !!(item.sequence && item.sequence.length > 0);
+              const isSelected = selectedActions.has(i);
+              return (
+                <button
+                  key={i}
+                  onClick={() => {
+                    const sym = useChartStore.getState().symbol || 'BTC/USDT';
+                    if (isSequence) {
+                      const seq = item.sequence!;
+                      setInput(seq[0].replace('{symbol}', sym));
+                      setTimeout(() => handleSend(), 50);
+                      for (let k = 1; k < seq.length; k++) {
+                        messageQueueRef.current.push({ text: seq[k].replace('{symbol}', sym), isSequenceFollow: true });
+                      }
+                      setQueueLength(messageQueueRef.current.length);
+                    } else {
+                      // 維度按鈕：toggle 勾選（不立即送）
+                      setSelectedActions(prev => {
+                        const next = new Set(prev);
+                        if (next.has(i)) next.delete(i); else next.add(i);
+                        return next;
+                      });
                     }
-                    setQueueLength(messageQueueRef.current.length);
-                  } else if (item.mode) {
-                    // 帶 mode → 後端注入該模式 prefix，自動送出
-                    setInput(item.prompt.replace('{symbol}', sym));
-                    setTimeout(() => handleSend(item.mode), 50);
-                  } else if (item.autoSend) {
-                    // 無 mode 但自動送：聚焦 prompt，不帶 mode prefix（讓 LLM 只出該段）
-                    setInput(item.prompt.replace('{symbol}', sym));
-                    setTimeout(() => handleSend(), 50);
-                  } else {
-                    setInput(item.prompt.replace('{symbol}', sym));
+                  }}
+                  className="px-2.5 py-1 rounded text-xs cursor-pointer transition-colors"
+                  style={
+                    isSequence
+                      ? { background: 'var(--accent-blue)', color: '#fff', fontWeight: 500 }
+                      : isSelected
+                        ? { background: 'var(--accent-blue)', color: '#fff', border: '1px solid var(--accent-blue)' }
+                        : { background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid transparent' }
                   }
-                }}
-                className="px-2.5 py-1 rounded text-xs cursor-pointer transition-colors"
-                style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)' }}
-              >
-                {item.label}
-              </button>
-            ))}
+                >
+                  {!isSequence && isSelected ? '✓ ' : ''}{item.label}
+                </button>
+              );
+            })}
+            {/* v146：送出選取 + 清除（依勾選順序打包，各帶自己的 mode 接力送出）*/}
+            {selectedActions.size > 0 && (
+              <>
+                <button
+                  onClick={() => {
+                    const sym = useChartStore.getState().symbol || 'BTC/USDT';
+                    const idxs = Array.from(selectedActions).sort((a, b) => a - b);
+                    const ts = Date.now();
+                    idxs.forEach((idx, order) => {
+                      const it = ANALYSIS_ACTIONS[idx];
+                      const text = it.prompt.replace('{symbol}', sym);
+                      if (order === 0) {
+                        // 第 1 個立即送（explicitText 不靠 stale input；_executeSend 會加 user 泡泡）
+                        setInput('');
+                        const m = it.mode;
+                        setTimeout(() => handleSend(m, text), 50);
+                      } else {
+                        // 其餘：立即加唯一 id 的 user 泡泡（全部可見）+ 排隊接力
+                        addMessage({
+                          id: `user-batch-${ts}-${idx}`,
+                          role: 'user',
+                          content: text,
+                          timestamp: new Date().toISOString(),
+                        });
+                        messageQueueRef.current.push({ text, mode: it.mode, isSequenceFollow: true });
+                      }
+                    });
+                    setQueueLength(messageQueueRef.current.length);
+                    setSelectedActions(new Set());
+                  }}
+                  className="px-2.5 py-1 rounded text-xs cursor-pointer font-medium"
+                  style={{ background: 'var(--accent-green, #3fb950)', color: '#fff' }}
+                >
+                  ▶ 送出選取 ({selectedActions.size})
+                </button>
+                <button
+                  onClick={() => setSelectedActions(new Set())}
+                  className="px-2 py-1 rounded text-xs cursor-pointer"
+                  style={{ background: 'var(--bg-tertiary)', color: 'var(--text-secondary)' }}
+                >
+                  清除
+                </button>
+              </>
+            )}
           </div>
         )}
       </div>
