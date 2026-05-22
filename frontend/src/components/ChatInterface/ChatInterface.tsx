@@ -33,8 +33,8 @@ interface AnalysisAction {
 
 const ANALYSIS_ACTIONS: AnalysisAction[] = [
   { label: '市場環境維度', prompt: '分析 {symbol} 的市場環境維度（GMM/HMM/GARCH 三模型 + 情境概率 + 因子 Bucket + regime 相容性）', mode: 'regime_analysis' },
-  { label: '協議基本面概覽', prompt: '只輸出 {symbol} 的「協議基本面概覽」這一段（代幣經濟學 + 技術路線圖 + 生態活躍度），不要其他段落', autoSend: true },
-  { label: '基本面 vs 技術面交叉驗證', prompt: '只輸出 {symbol} 的「基本面 vs 技術面交叉驗證」這一段，不要其他段落', autoSend: true },
+  { label: '協議基本面概覽', prompt: '輸出 {symbol} 的協議基本面概覽（代幣經濟學 + 生態活躍度 + 技術路線圖含非即時免責），不要其他段落', mode: 'crypto_fundamental' },
+  { label: '基本面 vs 技術面交叉驗證', prompt: '對 {symbol} 進行加密基本面 vs 技術面交叉驗證，不要其他段落', mode: 'crypto_fundamental' },
   { label: '結構分析維度', prompt: '對 {symbol} 進行 SMC 結構分析（BOS / CHoCH / Order Block / FVG / 流動性掃蕩 / Premium-Discount）', mode: 'smc_structure' },
   { label: '動能特徵維度', prompt: '對 {symbol} 進行完整動能分析（多週期動量 + 加速度 + 相對強弱 + 反轉偵測）', mode: 'momentum_analysis' },
   { label: '多策略回測維度分析', prompt: '對 {symbol} 進行多策略回測（回測 + Monte Carlo + Walk Forward + CPCV 交叉驗證）', mode: 'strategy_backtest' },

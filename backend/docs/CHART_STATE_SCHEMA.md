@@ -101,15 +101,20 @@
 | `mlPrediction` | chat.py:706 | LLM prompt + fact_checker | ✅ |
 | `rl_strategic_insight` | chat.py:994 | LLM prompt（v101 imitation learning） | ✅ |
 
-### H. recent_accuracy 統計（1 個 + 3 sub）
+### H. recent_accuracy 統計（1 個 + 4 sub + decided 4 子欄位）
 
 | 欄位 / 子欄位 | 注入位置 | 消費者 |
 |---|---|---|
-| `recent_accuracy` | chat.py:806 | LLM prompt + 多處 |
-| `recent_accuracy.regime_warning` | chat.py:838 | v118 三道防線之一 |
-| `recent_accuracy.direction_balance` | chat.py:859 | v118 三道防線之一 |
-| `recent_accuracy.signal_history` | chat.py:911 | v120.5 訊號組合命中率 |
-| `recent_accuracy.probability_triplet` | chat.py:~1100 | v124 機率三聯（baseline / TA-conditional / track-record）+ Wilson CI |
+| `recent_accuracy` | chat.py:1138 | LLM prompt + 多處 |
+| `recent_accuracy.win_rate_decided_30d` 等 4 欄 | chat.py:1153 | v100 警示去 expired 稀釋（見下） |
+| `recent_accuracy.regime_warning` | chat.py:1172 | v118 三道防線之一 |
+| `recent_accuracy.direction_balance` | chat.py:1193 | v118 三道防線之一 |
+| `recent_accuracy.signal_history` | chat.py:1248 | v120.5 訊號組合命中率 |
+| `recent_accuracy.probability_triplet` | chat.py:~1040 | v124 機率三聯（baseline / TA-conditional / track-record）+ Wilson CI |
+
+**decided 4 子欄位**（`win_rate_decided_30d` / `n_decided_30d` / `expired_30d` / `ci_30d`，~100B）：
+複用 [prediction_tracker.get_winrate_with_ci](../app/core/prediction_tracker.py)（v124 已用）。`win_rate_30d` 是加權值且把 expired 放進分母當「非勝」，expired 佔比高時結構性偏低、誤觸 v100「命中率嚴重偏低」警示；decided 勝率 = hit_target/(hit_target+hit_stop) 才是真實方向準度。消費者：[function_defs.py v100 規則 1-2](../app/core/llm/function_defs.py)。
+**進 Round 2**：否（屬 round1 警示細節），但 [adapter.py:_minimal_r2_chart_state](../app/core/llm/adapter.py) 折成單行 `win_rate_decided_30d_summary`（~40B）避免 round2 只看加權值再誤導。
 
 **規模警示**：`signal_history` 在 v120.5 加入後每 request 多 10-24KB（這是 stream 中斷的根因）。Round 2 必須精簡，見 [adapter.py:_minimal_r2_chart_state](../app/core/llm/adapter.py)。
 
@@ -259,3 +264,4 @@ chart_state["data_status"] = {
 |---|---|---|
 | 2026-05-09 | 建立此文件 | v118-v120 累積疊加 chart_state 欄位導致 stream 中斷後的治理舉措 |
 | 2026-05-12 | 新增 `data_status` 欄位（v123） | 報告因標的而異的根因：12+ 注入點靜默 skip 導致 LLM 看不到「曾嘗試但失敗」，改為 fallback 注入 status payload |
+| 2026-05-22 | recent_accuracy 新增 decided 4 子欄位（win_rate_decided_30d / n_decided_30d / expired_30d / ci_30d） | win_rate_30d 加權值把 expired 放進分母稀釋，expired 佔比高時誤觸 v100「命中率嚴重偏低」警示（ADA/USDT 案例：weighted 28-37% 但 decided 80%）。複用 get_winrate_with_ci，round2 折單行 summary |

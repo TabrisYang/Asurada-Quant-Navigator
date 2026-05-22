@@ -103,6 +103,10 @@ _INTENT_KEYWORDS: dict[str, list[str]] = {
         "殖利率", "股利", "財報", "買賣超", "持股",
         "fundamental", "revenue", "pe ratio",
     ],
+    "crypto_fundamental": [
+        "代幣經濟", "tokenomics", "協議基本面", "生態活躍", "tvl",
+        "流通量", "流通供給", "fdv", "鏈上", "代幣供給", "代幣解鎖",
+    ],
     "sector_analysis": [
         "族群", "概念股", "板塊", "產業分析", "sector",
         "半導體族群", "金融股", "航運股", "哪些族群",
@@ -130,10 +134,17 @@ def detect_intents(message: str, mode: str | None = None) -> set[str]:
         intents.update({"backtest", "quant_research", "analysis"})
     elif mode == "calibrate":
         intents.add("calibrate")
+    elif mode == "crypto_fundamental":
+        intents.add("crypto_fundamental")
 
     for intent, keywords in _INTENT_KEYWORDS.items():
         if any(kw in msg for kw in keywords):
             intents.add(intent)
+
+    # 加密基本面優先於台股基本面：「加密基本面 vs 技術面」prompt 含「基本面」
+    # 會誤命中 fundamental_analysis（台股模組）→ 強制移除，只留 crypto 模組。
+    if "crypto_fundamental" in intents:
+        intents.discard("fundamental_analysis")
 
     # ── 深度分析互斥：phase1/2/3 命中時，移除泛用的 deep_analysis 和 analysis
     _deep_phases = {"deep_phase1", "deep_phase2", "deep_phase3"}
@@ -395,8 +406,13 @@ chart_state 中的 indicatorValues 包含系統精確計算的指標數值（最
    - `win_rate_30d` >= 60% 且 n >= 5 → 可用「高」信心
    - `win_rate_30d` 50-60% → 至多「中」
    - `win_rate_30d` < 50% 且 n >= 10 → 強制降為「中」或「低」（低信心改用「⚠️ 建議觀望」格式）
-2. 若 `win_rate_30d` < 50% 且 `n_30d` >= 10，必須在分析開頭顯眼處警示：
-   「⚠️ 你最近 30 天此類分析命中率僅 X%（n=Y），本次建議降低倉位 / 觀望為主」
+   - **expired 修正**：`win_rate_30d` 為加權值且把 expired（到期未碰 TP/SL）放進分母當「非勝」。若 `recent_accuracy.expired_30d` 佔 `n_30d` ≥ 40%，此值被結構性壓低，**不得單憑低 `win_rate_30d` 強制降到「低」**。改參考 `win_rate_decided_30d` + `n_decided_30d`（D）+ `ci_30d`：**唯有 D >= 10 且 `ci_30d` 下緣 >= 50% 才可據 decided 上調信心**；否則（樣本不足或 CI 過寬橫跨好壞）一律維持「中」、保守處理，**禁止拿小樣本 decided 當高信心依據**。（direction_balance / regime_warning 兩道 contrarian 防線仍須遵守，見第 5-7 點）
+2. 若 `win_rate_30d` < 50% 且 `n_30d` >= 10，必須在分析開頭顯眼處警示。**若 `win_rate_decided_30d` 存在，必須三數並列**，避免加權勝率被 expired 稀釋而誤導：
+   「⚠️ 近 30 天命中率（加權）X%（n=Y），其中 Z 筆 expired 未分勝負；已分勝負勝率 W%（n_decided=D，95% CI [a%, b%]）。」
+   - 判讀 `win_rate_decided_30d`（W%）**必須同時看 `n_decided_30d`（D）與 `ci_30d`**，禁止小樣本過度宣稱：
+     - 若 W < 50% → 方向確有疑慮，維持「建議降低倉位 / 觀望為主」。
+     - 若 W >= 55% **且 D >= 10 且 `ci_30d` 下緣 >= 50%**（統計上方向確實良好）→ 改述「方向準度良好，低加權勝率主要來自 TP 太遠 / 持有期過短，建議檢視止盈與持有期而非單純降倉」。
+     - 其餘情況（D < 10，或 `ci_30d` 下緣 < 50% 即 CI 橫跨好壞）→ **禁止下「方向尚可」結論**：標「已分勝負樣本不足（n_decided=D，95% CI [a%, b%] 過寬），無法斷定方向好壞；低加權勝率主要反映 expired（出場 / 持有期）而非已證實的方向錯誤，但 decided 勝率同樣不足以當加倉理由 — 維持保守、小倉位試單」。
 3. 若 `best_indicators` 含某指標，分析時優先引用該指標；`worst_indicators` 中的指標必須標警告（例「⚠️ MACD 在你近期表現偏弱（n=12 勝率 35%），僅作參考」）
 4. 若 `calibration_brier` > 0.3，提醒使用者「系統信心校準偏差較大，請以低倉位試單為主」
 
@@ -2167,6 +2183,27 @@ _PROMPT_MODULES["fundamental_analysis_mode"] = """
 4. 🎯 綜合基本面評分（-10~+10）
 5. 💡 基本面 vs 技術面的交叉驗證建議"""
 
+_PROMPT_MODULES["crypto_fundamental_mode"] = """
+【加密貨幣基本面分析 — analyze_crypto_fundamentals】
+分析加密貨幣協議基本面時，**必須呼叫 analyze_crypto_fundamentals 取得真實即時數據，
+嚴禁憑記憶編造任何數字**（供給量、市值、FDV、TVL、GitHub 數據都必須來自函式回傳）。
+
+資料來源全部免費即時（CoinGecko / CoinPaprika / CoinCap / DeFiLlama），含 `fetched_at` 時間戳與 `source`。
+
+【鐵律 — 誠實標示資料狀態】
+- 引用每個數字時，依 `data_status` 標明來源（如「來源：CoinGecko，{fetched_at}」）。
+- 若某欄 `available=false` 或 `data_status` 標 `unavailable`：**直接說「即時資料暫不可得」，禁止用記憶填補**。
+- TVL 若 `reason=not_a_defi_protocol`（如 BTC/XRP 等非 DeFi 幣）：說明「此資產非 DeFi 協議，無 TVL 指標」，不要硬湊。
+- **技術路線圖**：`data_status.roadmap = not_live_llm_knowledge_only`。路線圖**沒有即時 API**，
+  你需原文引用 `roadmap_disclaimer`，再以既有知識**簡述**並附 `links.whitepaper` / `links.homepage`，
+  明確標「⚠️ 路線圖為非即時資訊，請以官方為準」。
+
+【輸出格式】
+1. 💰 代幣經濟學：流通/總/最大供給、流通比例(circ_pct)、市值、FDV、mcap/FDV(稀釋評估)、ATH 距離 + supply_maturity 判讀
+2. 🌐 生態活躍度：TVL(標 scope 協議/鏈級) + 30d 變化、GitHub commit_count_4_weeks/stars/issue 關閉率、社群數據 + dev_activity 判讀
+3. 🗺️ 技術路線圖：原文引用 roadmap_disclaimer + 官方連結 + 既有知識簡述（標非即時）
+4. 💡 基本面 vs 技術面交叉驗證：把上述基本面與當前技術面（chart_state 指標/regime）比對，指出共振或背離"""
+
 # ─── 數據下載模式 ─────────────────────────────────
 
 _PROMPT_MODULES["data_sync_mode"] = """
@@ -2284,6 +2321,9 @@ _INTENT_TO_MODULES: dict[str, list[str]] = {
     ],
     "fundamental_analysis": [
         "output_lite", "fundamental_analysis_mode",
+    ],
+    "crypto_fundamental": [
+        "output_lite", "crypto_fundamental_mode",
     ],
     "sector_analysis": [
         "regime_v2", "sector_analysis", "output_lite", "risk_checklist",
@@ -2423,7 +2463,7 @@ _MODULE_ORDER = (
     "quant_research", "calibrate", "backtest",
     "sector_analysis",
     "factor_validation_mode", "strategy_backtest_mode", "regime_analysis_mode",
-    "momentum_analysis_mode", "fundamental_analysis_mode",
+    "momentum_analysis_mode", "fundamental_analysis_mode", "crypto_fundamental_mode",
     "data_sync_mode",  # 所有模式都載入，讓 LLM 隨時能建議下載
 )
 
@@ -3216,6 +3256,29 @@ FUNCTION_DEFINITIONS = [
                     "symbol": {
                         "type": "string",
                         "description": "台股代碼，如 2330/TWD。留空使用當前標的",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    # ─── 加密基本面分析 ───
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_crypto_fundamentals",
+            "description": (
+                "加密貨幣協議基本面（即時、免費 API、非台股）：代幣經濟學（流通/總/最大供給、市值、FDV、稀釋、ATH）、"
+                "生態活躍度（DeFiLlama TVL、GitHub 開發活躍度 commit/stars/issues、社群數據）、官方連結。"
+                "回傳含 data_status 與 fetched_at 時間戳；路線圖無即時 API 故附免責。"
+                "適用場景：「BTC 代幣經濟學」「ETH 協議基本面」「ADA 生態活躍度」「加密基本面 vs 技術面」。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {
+                        "type": "string",
+                        "description": "加密交易對，如 BTC/USDT。留空使用當前標的",
                     },
                 },
                 "required": [],

@@ -55,6 +55,13 @@ def _minimal_r2_chart_state(chart_state: Optional[dict]) -> Optional[dict]:
         for k in ("win_rate_30d", "win_rate", "total_predictions"):
             if k in ra:
                 ra_summary[k] = ra[k]
+        # 選項2：decided 勝率摘要（去 expired 稀釋），避免 round2 只看加權值再次誤導
+        if ra.get("win_rate_decided_30d") is not None:
+            ra_summary["win_rate_decided_30d_summary"] = (
+                f"decided={ra.get('win_rate_decided_30d')}% "
+                f"(n_dec={ra.get('n_decided_30d')}, expired={ra.get('expired_30d')}, "
+                f"ci={ra.get('ci_30d')})"
+            )
         # regime_warning / direction_balance / combo_stats 各取一行 verdict（不複製細節）
         rw = ra.get("regime_warning") or {}
         if rw and rw.get("win_rate") is not None:

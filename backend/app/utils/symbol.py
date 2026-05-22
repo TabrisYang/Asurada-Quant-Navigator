@@ -1,6 +1,7 @@
 """阿斯拉量化系統 — 交易對標準化工具"""
 
 import re
+from typing import Optional
 
 
 # Coinbase USDT → USD 映射（完整 20 組）
@@ -26,6 +27,87 @@ COINBASE_USD_MAP = {
     "ARB/USDT": "ARB/USD",
     "OP/USDT": "OP/USD",
 }
+
+# ─────────────────────────────────────────────────────────
+# 加密基本面資料源 — base → 各提供商 id 映射（全部免費無 key）
+# 用於 crypto_fundamental fetcher 的多源 fallback（CoinGecko → CoinPaprika → CoinCap）
+# ─────────────────────────────────────────────────────────
+
+# CoinGecko coin id（主源，資料最豐富：supply / FDV / links / dev / community）
+COINGECKO_ID_MAP: dict[str, str] = {
+    "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana", "XRP": "ripple",
+    "DOGE": "dogecoin", "ADA": "cardano", "AVAX": "avalanche-2", "LINK": "chainlink",
+    "DOT": "polkadot", "MATIC": "matic-network", "LTC": "litecoin", "UNI": "uniswap",
+    "ATOM": "cosmos", "ETC": "ethereum-classic", "XLM": "stellar", "BCH": "bitcoin-cash",
+    "FIL": "filecoin", "APT": "aptos", "ARB": "arbitrum", "OP": "optimism",
+    "BNB": "binancecoin", "TRX": "tron",
+}
+
+# CoinPaprika id（fallback 1，格式 {sym}-{name}）
+COINPAPRIKA_ID_MAP: dict[str, str] = {
+    "BTC": "btc-bitcoin", "ETH": "eth-ethereum", "SOL": "sol-solana", "XRP": "xrp-xrp",
+    "DOGE": "doge-dogecoin", "ADA": "ada-cardano", "AVAX": "avax-avalanche",
+    "LINK": "link-chainlink", "DOT": "dot-polkadot", "MATIC": "matic-polygon",
+    "LTC": "ltc-litecoin", "UNI": "uni-uniswap", "ATOM": "atom-cosmos",
+    "ETC": "etc-ethereum-classic", "XLM": "xlm-stellar", "BCH": "bch-bitcoin-cash",
+    "FIL": "fil-filecoin", "APT": "apt-aptos", "ARB": "arb-arbitrum", "OP": "op-optimism",
+    "BNB": "bnb-binance-coin", "TRX": "trx-tron",
+}
+
+# CoinCap v2 asset id（fallback 2）
+COINCAP_ID_MAP: dict[str, str] = {
+    "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana", "XRP": "xrp",
+    "DOGE": "dogecoin", "ADA": "cardano", "AVAX": "avalanche", "LINK": "chainlink",
+    "DOT": "polkadot", "MATIC": "polygon", "LTC": "litecoin", "UNI": "uniswap",
+    "ATOM": "cosmos", "ETC": "ethereum-classic", "XLM": "stellar", "BCH": "bitcoin-cash",
+    "FIL": "filecoin", "APT": "aptos", "ARB": "arbitrum", "OP": "optimism",
+    "BNB": "binance-coin", "TRX": "tron",
+}
+
+# DeFiLlama 協議 slug（/protocol/{slug}）— 真 DeFi 協議才有協議級 TVL
+DEFILLAMA_PROTOCOL_MAP: dict[str, str] = {
+    "UNI": "uniswap",
+}
+
+# DeFiLlama 鏈名（/v2/historicalChainTvl/{chain}）— L1/L2 用鏈級 TVL
+DEFILLAMA_CHAIN_MAP: dict[str, str] = {
+    "ETH": "Ethereum", "SOL": "Solana", "AVAX": "Avalanche", "ARB": "Arbitrum",
+    "OP": "Optimism", "ATOM": "Cosmos", "BNB": "BSC", "MATIC": "Polygon",
+    "TRX": "Tron", "ADA": "Cardano", "APT": "Aptos", "FIL": "Filecoin",
+}
+
+
+def _base_of(symbol: str) -> str:
+    """取交易對的 base（BTC/USDT → BTC）。"""
+    norm = normalize_symbol(symbol)
+    return norm.split("/")[0].upper() if "/" in norm else norm.upper()
+
+
+def symbol_to_coingecko_id(symbol: str) -> Optional[str]:
+    return COINGECKO_ID_MAP.get(_base_of(symbol))
+
+
+def symbol_to_coinpaprika_id(symbol: str) -> Optional[str]:
+    return COINPAPRIKA_ID_MAP.get(_base_of(symbol))
+
+
+def symbol_to_coincap_id(symbol: str) -> Optional[str]:
+    return COINCAP_ID_MAP.get(_base_of(symbol))
+
+
+def symbol_to_defillama_protocol(symbol: str) -> Optional[str]:
+    return DEFILLAMA_PROTOCOL_MAP.get(_base_of(symbol))
+
+
+def symbol_to_defillama_chain(symbol: str) -> Optional[str]:
+    return DEFILLAMA_CHAIN_MAP.get(_base_of(symbol))
+
+
+def is_crypto_pair(symbol: str) -> bool:
+    """加密貨幣交易對（有 / 且非台股 /TWD）。"""
+    norm = normalize_symbol(symbol)
+    return "/" in norm and not is_tw_stock(norm)
+
 
 SUPPORTED_QUOTE_CURRENCIES = {"USDT", "USD", "BUSD", "USDC", "BTC", "ETH", "TWD"}
 

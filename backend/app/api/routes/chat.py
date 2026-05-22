@@ -1150,6 +1150,24 @@ def _build_messages(
                         _mark_status(request.chart_state, "recent_accuracy", "ok",
                                      f"n_30d={_n30} n_90d={_n90}")
 
+                        # ★ 選項2：注入 30d decided 勝率（排除 expired）。
+                        # win_rate_30d=win_rate_weighted 把 expired 放進分母當「非勝」，
+                        # expired 佔比高時數字結構性偏低，誤觸 v100「命中率嚴重偏低」警示。
+                        # decided 勝率 = hit_target/(hit_target+hit_stop) 才是真實方向準度。複用 v124 函式。
+                        try:
+                            _wci_30 = prediction_tracker.get_winrate_with_ci(
+                                symbol=chart_symbol, days=30,
+                            )
+                            if _wci_30.get("status") == "ok":
+                                request.chart_state["recent_accuracy"].update({
+                                    "win_rate_decided_30d": _wci_30.get("win_rate_raw_pct"),
+                                    "n_decided_30d": _wci_30.get("n_decided"),
+                                    "expired_30d": _wci_30.get("expired"),
+                                    "ci_30d": _wci_30.get("ci_pct"),
+                                })
+                        except Exception as _dec_err:
+                            logger.debug(f"decided 勝率注入失敗: {_dec_err}")
+
                         # ★ v118：注入 regime_warning + direction_balance（修「看漲說漲」bias）
                         # Diagnose 發現：BULLISH regime 100% 看多但命中率僅 21.7%（賠錢領域），
                         # 系統有強烈順勢 bias 反而最差。注入這兩個欄位讓 LLM 強制權衡 contrarian。
@@ -1815,6 +1833,24 @@ def _format_function_results(function_calls: list[dict], exec_result: dict) -> s
                 score = r.get("fundamental_score", {})
                 if score:
                     parts.append(f"\n綜合基本面評分: {score.get('score', '?')}/{score.get('max_possible', 10)} → {score.get('direction', '?')}")
+            elif fname == "analyze_crypto_fundamentals":
+                parts.append(f"🪙 加密基本面 — {r.get('symbol', '?')} (status={r.get('status', '?')}, data_status={r.get('data_status', {})})")
+                t = r.get("tokenomics", {})
+                if t.get("available"):
+                    parts.append(f"  代幣經濟[{t.get('source')}]: 流通={t.get('circulating_supply')}/上限={t.get('max_supply')} (circ {t.get('circ_pct')}%) "
+                                 f"市值=${t.get('market_cap_usd')} FDV=${t.get('fdv_usd')} mcap/FDV={t.get('mcap_to_fdv_pct')}% | "
+                                 f"{t.get('dilution_assessment') or ''}{t.get('supply_maturity') or ''} | ATH=${t.get('ath_usd')}({t.get('ath_change_pct')}%)")
+                else:
+                    parts.append("  代幣經濟: ⚠️ 即時資料暫不可得（請勿編造）")
+                eco = r.get("ecosystem", {})
+                dev, tvl = eco.get("dev_community", {}), eco.get("tvl", {})
+                if dev.get("available"):
+                    parts.append(f"  開發: commit_4w={dev.get('commit_count_4_weeks')} stars={dev.get('stars')} issue關閉={dev.get('issue_close_ratio_pct')}% | {eco.get('dev_activity_assessment') or ''}")
+                if tvl.get("available"):
+                    parts.append(f"  TVL[{tvl.get('scope')}]: ${tvl.get('tvl_usd')} (30d {tvl.get('tvl_change_30d_pct')}%) | {eco.get('tvl_trend') or ''}")
+                elif tvl.get("reason") == "not_a_defi_protocol":
+                    parts.append("  TVL: 此資產非 DeFi 協議，無 TVL 指標")
+                parts.append(f"  🗺️ 路線圖(非即時): {r.get('roadmap_disclaimer', '')} | links={r.get('links') or {}}")
             elif fname == "sync_symbol_data":
                 if r.get("status") == "success":
                     parts.append(f"✅ 數據下載完成: {r.get('symbol', '?')} {r.get('timeframe', '?')}")
@@ -3106,6 +3142,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                         "regime_analysis": ["generate_scenarios"],
                         "momentum_analysis": ["analyze_momentum"],
                         "fundamental_analysis": ["analyze_fundamentals"],
+                        "crypto_fundamental": ["analyze_crypto_fundamentals"],
                     }
                     _already_executed = _llm_called_funcs | {
                         r.get("function") for r in exec_result.get("results", []) if isinstance(r, dict)

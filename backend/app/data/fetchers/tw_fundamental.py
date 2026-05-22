@@ -21,6 +21,17 @@ from loguru import logger
 from app.core.config.settings import settings
 
 
+def _cache_fresh(filepath: Path, max_age_days: int = 7) -> bool:
+    """快取檔是否在 max_age_days 內（修舊 bug：原只檢查 exists 不檢查時間 → 永遠回傳舊資料）。"""
+    try:
+        if not filepath.exists():
+            return False
+        age_sec = datetime.now().timestamp() - filepath.stat().st_mtime
+        return age_sec < max_age_days * 86400
+    except Exception:
+        return False
+
+
 class TwFundamentalEngine:
     """台股基本面數據引擎"""
 
@@ -36,8 +47,8 @@ class TwFundamentalEngine:
         """抓取月營收數據（TWSE 公開資訊觀測站）。"""
         filepath = self.data_dir / f"{code}_revenue.csv"
 
-        # 嘗試讀取本地快取（< 7 天就用快取）
-        if filepath.exists():
+        # 讀取本地快取（< 7 天才用，過期自動重抓）
+        if _cache_fresh(filepath):
             try:
                 df = pd.read_csv(filepath)
                 if not df.empty:
@@ -152,7 +163,7 @@ class TwFundamentalEngine:
         """抓取三大法人買賣超（TWSE）。"""
         filepath = self.data_dir / f"{code}_institutional.csv"
 
-        if filepath.exists():
+        if _cache_fresh(filepath):
             try:
                 df = pd.read_csv(filepath)
                 if not df.empty and len(df) >= 10:
@@ -228,7 +239,8 @@ class TwFundamentalEngine:
         except Exception as e:
             logger.debug(f"外資持股抓取失敗: {e}")
 
-        if filepath.exists():
+        # 抓取失敗才退快取，但只接受 7 天內的（避免送年久資料）
+        if _cache_fresh(filepath):
             return pd.read_csv(filepath)
         return pd.DataFrame()
 

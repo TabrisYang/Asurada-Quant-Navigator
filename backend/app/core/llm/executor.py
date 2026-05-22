@@ -110,6 +110,14 @@ ALLOWED_FUNCTIONS = {
     "detect_smc_structure",
     "compute_laddered_entries",
     "compute_factor_ic",
+    "analyze_crypto_fundamentals",
+    # 以下 6 個原漏列 → validate_function_call 擋掉、_run_one 永不執行（潛在 bug 修復）
+    "analyze_fundamentals",
+    "analyze_momentum",
+    "analyze_sector",
+    "list_sectors",
+    "sync_symbol_data",
+    "sync_sector_data",
 }
 
 
@@ -185,7 +193,10 @@ async def execute_function_calls(
         "run_quant_research", "optimize_indicator_params",
         "scan_conditional_probability", "generate_scenarios",
         "detect_smc_structure", "compute_laddered_entries",
-        "compute_factor_ic",
+        "compute_factor_ic", "analyze_crypto_fundamentals",
+        # 以下 6 個原漏列（與 ALLOWED_FUNCTIONS 同步修復）
+        "analyze_fundamentals", "analyze_momentum", "analyze_sector",
+        "list_sectors", "sync_symbol_data", "sync_sector_data",
     }
 
     # 分離：輕量同步/依序 vs 重量級可並行（保留原始 index）
@@ -326,6 +337,9 @@ async def execute_function_calls(
                     return {"function": name, "result": result}
                 elif name == "analyze_fundamentals":
                     result = await _exec_analyze_fundamentals(args, default_symbol)
+                    return {"function": name, "result": result}
+                elif name == "analyze_crypto_fundamentals":
+                    result = await _exec_analyze_crypto_fundamentals(args, default_symbol)
                     return {"function": name, "result": result}
                 elif name == "list_sectors":
                     result = await _exec_list_sectors()
@@ -2693,3 +2707,16 @@ async def _exec_analyze_fundamentals(args: dict, default_symbol: str) -> dict:
         return {"status": "error", "message": f"{symbol} 不是台股標的，基本面分析僅支援台股"}
 
     return await analyze_fundamentals(symbol)
+
+
+async def _exec_analyze_crypto_fundamentals(args: dict, default_symbol: str) -> dict:
+    """加密貨幣基本面分析（非台股）"""
+    from app.core.crypto_fundamental_analyzer import analyze_crypto_fundamentals
+    from app.utils.symbol import normalize_symbol, is_tw_stock
+
+    symbol = normalize_symbol(args.get("symbol", default_symbol))
+    if is_tw_stock(symbol):
+        return {"status": "error",
+                "message": f"{symbol} 是台股，請改用 analyze_fundamentals"}
+
+    return await analyze_crypto_fundamentals(symbol)
