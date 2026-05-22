@@ -3190,6 +3190,19 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                         if _ann_count1 > 0:
                             yield _sse_event("status", {"message": f"已添加 {_ann_count1} 筆圖表標記"})
 
+                    # Q2：若本次跑了 SMC 且產出進場價，把 setup 類型記到 post-process 用的
+                    # chart_state，讓 prediction _capture_signals 標進 buckets_json.smc_setup，
+                    # 之後可累積各 SMC setup（fvg/fib 進場）的歷史命中率。
+                    try:
+                        for _r in exec_result.get("results", []):
+                            if isinstance(_r, dict) and _r.get("function") == "detect_smc_structure":
+                                _smc_setup = (_r.get("result") or {}).get("entry_setup")
+                                if _smc_setup and _chart_state_for_post_process is not None:
+                                    _chart_state_for_post_process["smc_setup"] = _smc_setup
+                                break
+                    except Exception:
+                        pass
+
                     # ★ 核心改進：將結果回傳 LLM 做第二輪分析
                     fc_summary = _format_function_results(response.function_calls, exec_result)
                     logger.info(f"Function call 結果摘要：{fc_summary[:200]}...")

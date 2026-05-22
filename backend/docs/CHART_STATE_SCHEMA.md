@@ -265,3 +265,4 @@ chart_state["data_status"] = {
 | 2026-05-09 | 建立此文件 | v118-v120 累積疊加 chart_state 欄位導致 stream 中斷後的治理舉措 |
 | 2026-05-12 | 新增 `data_status` 欄位（v123） | 報告因標的而異的根因：12+ 注入點靜默 skip 導致 LLM 看不到「曾嘗試但失敗」，改為 fallback 注入 status payload |
 | 2026-05-22 | recent_accuracy 新增 decided 4 子欄位（win_rate_decided_30d / n_decided_30d / expired_30d / ci_30d） | win_rate_30d 加權值把 expired 放進分母稀釋，expired 佔比高時誤觸 v100「命中率嚴重偏低」警示（ADA/USDT 案例：weighted 28-37% 但 decided 80%）。複用 get_winrate_with_ci，round2 折單行 summary |
+| 2026-05-22 | 新增 `smc_setup`（post-process 專用，**不進 LLM、不進 round2**） | SMC 進場價的歷史命中率追蹤（Q2 Phase A）：detect_smc 產出 entry 時記 setup 類型（fvg_bullish/fvg_bearish/fib_discount/fib_premium），由 chat.py 注入 _chart_state_for_post_process，prediction_tracker._capture_signals 標進 buckets_json.smc_setup 供 get_single_signal_stats 累積 |

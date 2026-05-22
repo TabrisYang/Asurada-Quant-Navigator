@@ -798,6 +798,11 @@ class PredictionTracker:
         try:
             from app.core.signal_buckets import classify_all_signals
             buckets = classify_all_signals(derivatives, sentiment)
+            # Q2：SMC setup 類型（若該次分析有跑 SMC 並產出進場價）併入 buckets，
+            # 供 get_single_signal_stats(signal_name="smc_setup", ...) 累積各 setup 歷史命中率
+            _smc_setup = chart_state.get("smc_setup")
+            if _smc_setup:
+                buckets["smc_setup"] = _smc_setup
             # 完整 raw 訊號值存 JSON（彈性容器）
             signals_json = json.dumps(
                 {"derivatives": derivatives, "sentiment": sentiment},

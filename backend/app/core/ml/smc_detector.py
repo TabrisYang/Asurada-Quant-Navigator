@@ -131,6 +131,7 @@ class SMCResult:
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
     rr_ratio: Optional[float] = None
+    entry_setup: Optional[str] = None  # 進場價來源 setup（fvg_bullish/fvg_bearish/fib_discount/fib_premium）供歷史命中率追蹤
 
     # 信心評分
     confidence: int = 50
@@ -166,6 +167,7 @@ class SMCResult:
             "stop_loss": round_price(self.stop_loss) if self.stop_loss else None,
             "take_profit": round_price(self.take_profit) if self.take_profit else None,
             "rr_ratio": round(self.rr_ratio, 2) if self.rr_ratio else None,
+            "entry_setup": self.entry_setup,
             "confidence": self.confidence,
             "confidence_breakdown": self.confidence_breakdown,
             "parameters_used": self.parameters_used,
@@ -990,6 +992,7 @@ class SMCDetector:
         stop_loss = None
         take_profit = None
         rr_ratio = None
+        entry_setup = None
 
         if bias in ("BUY", "SELL"):
             # Entry: 使用最近未填補的 FVG 或 fib_50
@@ -999,8 +1002,10 @@ class SMCDetector:
                 buy_fvgs = [f for f in unfilled_fvg if f.get("type") == "bullish"]
                 if buy_fvgs:
                     entry = buy_fvgs[-1]["high"]  # FVG 上界
+                    entry_setup = "fvg_bullish"
                 else:
                     entry = round_price(fib_50)
+                    entry_setup = "fib_discount"
 
                 # 止損：POI 下方 0.5 ATR
                 recent_lows = [s for s in swings if s.swing_type == "low"]
@@ -1024,8 +1029,10 @@ class SMCDetector:
                 sell_fvgs = [f for f in unfilled_fvg if f.get("type") == "bearish"]
                 if sell_fvgs:
                     entry = sell_fvgs[-1]["low"]
+                    entry_setup = "fvg_bearish"
                 else:
                     entry = round_price(fib_50)
+                    entry_setup = "fib_premium"
 
                 recent_highs = [s for s in swings if s.swing_type == "high"]
                 poi = recent_highs[-1].price if recent_highs else entry
@@ -1111,6 +1118,7 @@ class SMCDetector:
             stop_loss=stop_loss,
             take_profit=take_profit,
             rr_ratio=rr_ratio,
+            entry_setup=entry_setup,
             confidence=confidence,
             confidence_breakdown=conf_breakdown,
             parameters_used=parameters_used,
