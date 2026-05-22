@@ -137,8 +137,16 @@ def estimate_token_savings(
 ) -> dict:
     """概算壓縮節省的 token（給 logging / observability 用）。"""
     import json
-    orig_chars = len(json.dumps(original, ensure_ascii=False))
-    comp_chars = len(json.dumps(compressed, ensure_ascii=False))
+
+    def _measure(d: dict) -> int:
+        # 排除內部快取欄位（如 _cached_df 內含 DataFrame，不會送進 LLM payload，
+        # 且非 JSON-serializable 會讓整個壓縮 try-block 失敗 → 壓縮被靜默跳過）。
+        # default=str 作為保險，避免任何殘留的非序列化物件再次中斷估算。
+        clean = {k: v for k, v in d.items() if not k.startswith("_")} if isinstance(d, dict) else d
+        return len(json.dumps(clean, ensure_ascii=False, default=str))
+
+    orig_chars = _measure(original)
+    comp_chars = _measure(compressed)
     return {
         "original_chars": orig_chars,
         "compressed_chars": comp_chars,
