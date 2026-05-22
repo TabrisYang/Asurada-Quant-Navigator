@@ -104,7 +104,7 @@ def _slice_function_results(function_calls, exec_result, wanted: set[str]) -> st
     注意 exec_result["results"] 在 chat.py 的「自動補齊」後可能比 function_calls 長，
     且補齊項只有 result.function、無對應 function_call → 以 result.function 為主判定。
     """
-    from app.api.routes.chat import _format_function_results  # 延遲匯入避免循環
+    from app.core.llm.function_result_formatter import format_function_results as _format_function_results
 
     results = (exec_result or {}).get("results", []) or []
     function_calls = function_calls or []
