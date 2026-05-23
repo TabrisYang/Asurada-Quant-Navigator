@@ -49,7 +49,8 @@ def _query_predictions_metrics() -> dict:
     week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
     month_ago = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%d")
 
-    with sqlite3.connect(_PRED_DB) as conn:
+    from app.core.db_utils import open_sqlite
+    with open_sqlite(_PRED_DB) as conn:
         cur = conn.cursor()
 
         # 今日 / 本週 / 本月新增

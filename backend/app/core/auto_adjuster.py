@@ -44,8 +44,8 @@ class AutoAdjuster:
         if self._conn:
             return
         db_file = settings.db_path / "predictions.db"
-        self._conn = sqlite3.connect(str(db_file), check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        from app.core.db_utils import open_sqlite
+        self._conn = open_sqlite(db_file, check_same_thread=False, row_factory=True)
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS prediction_adjustments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

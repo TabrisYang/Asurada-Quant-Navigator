@@ -997,8 +997,8 @@ class AutoScanner:
     def _get_conn(self) -> sqlite3.Connection:
         if self._conn is None:
             db_path = settings.db_path / "predictions.db"
-            self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
-            self._conn.row_factory = sqlite3.Row
+            from app.core.db_utils import open_sqlite
+            self._conn = open_sqlite(db_path, check_same_thread=False, row_factory=True)
         return self._conn
 
     def _init_db(self):

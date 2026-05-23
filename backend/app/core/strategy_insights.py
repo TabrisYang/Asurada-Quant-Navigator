@@ -94,8 +94,8 @@ def _load_joined_rows() -> list[dict]:
     """JOIN predictions + prediction_features，只取已驗證樣本。"""
     if not _DB_PATH.exists():
         return []
-    with sqlite3.connect(_DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
+    from app.core.db_utils import open_sqlite
+    with open_sqlite(_DB_PATH, row_factory=True) as conn:
         cur = conn.execute("""
             SELECT p.id, p.symbol, p.timeframe, p.direction, p.status, p.confidence,
                    p.regime, p.created_at, p.actual_outcome_pct,

@@ -2291,7 +2291,12 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
             except Exception as _comp_err:
                 logger.debug(f"context_compress 失敗（不影響主流程）: {_comp_err}")
 
-            messages = _build_messages(request, rag_fragments=_rag_context_fragments, intents=_intents)
+            # 移到 worker thread：_build_messages 內含同步的 prediction_tracker（threading.Lock）
+            # 與 DB 查詢，直接跑在事件迴圈上會在鎖競爭時凍住所有端點（根因修復）。
+            messages = await asyncio.to_thread(
+                _build_messages, request,
+                rag_fragments=_rag_context_fragments, intents=_intents,
+            )
         except Exception as e:
             logger.exception(f"對話前置處理失敗: {e}")
             yield _sse_event("error", {"error": f"系統初始化錯誤: {str(e)}"})
