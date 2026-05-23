@@ -356,6 +356,15 @@ def format_function_results(function_calls: list[dict], exec_result: dict) -> st
                     for grp_name, grp_score in bucket_qr.get("scores", {}).items():
                         ind = "▲" if grp_score > 0 else ("▼" if grp_score < 0 else "▬")
                         parts.append(f"  {grp_name}: {ind} {grp_score:+d}")
+                # 系統候選策略（未提供策略時自動生成，in-sample，須由 WF/CPCV 裁判）
+                ads = r.get("auto_derived_strategy")
+                if ads:
+                    parts.append(
+                        f"\n🧪 系統候選策略（{ads.get('source')}，主因子 {ads.get('top_factor')}）："
+                        f"進場區間 {ads.get('entry_range')}（歷史命中 {ads.get('hist_prob_pct')}% vs 基線 {ads.get('baseline_pct')}%，"
+                        f"lift +{ads.get('lift_pp')}pp、n={ads.get('samples')}）方向={ads.get('direction')} 預設SL/TP={ads.get('default_sl_tp')}"
+                    )
+                    parts.append("  ⚠️ 此為系統自動建議、in-sample 回測 — 是否真有 alpha 以下方 Walk Forward / CPCV 樣本外結果為準（一致性低=過擬合、不可實盤）")
                 # 回測
                 bt = r.get("backtest", {})
                 if bt and not bt.get("error"):

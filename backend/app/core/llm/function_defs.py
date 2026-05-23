@@ -1402,6 +1402,13 @@ Squeeze 突破歷史統計（報告必寫；使用者問 squeeze / 波動壓縮 
   統計「squeeze 訊號出現後 N 根 K 線漲/跌 ≥ X% 的歷史機率 + Wilson CI + 相對 baseline 的 lift」
 - 禁止只說「波動壓縮、即將突破」這種無數據空談；必須給歷史命中率與樣本數
 
+系統候選策略（auto_derived_strategy，報告必標）：
+- 若 `auto_derived_strategy` 存在 → 使用者**沒給策略**，系統依條件機率自動建議了候選策略（in-sample）。
+  必須明說「這是系統自動建議的候選策略、非使用者策略，回測為 in-sample（樣本內）」，引用 top_factor /
+  entry_range / lift / 樣本數。
+- **結論一律以 Walk Forward / CPCV 樣本外結果 + reliability 為準**：WF/CPCV 一致性低或 reliability=low
+  → 直說「此候選策略疑似過擬合、不可實盤，僅供研究起點」。**禁止**把 in-sample 回測 PF/Sharpe 當已證實 alpha。
+
 MC/WF/CPCV 交叉驗證：
 - 三者結論一致 → 高信心
 - MC pass + WF/CPCV fail → 可能過擬合，降低信心

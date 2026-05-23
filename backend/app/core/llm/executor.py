@@ -1225,6 +1225,90 @@ async def _exec_analyze_event_patterns(args: dict, default_symbol: str, default_
     }
 
 
+async def _derive_candidate_strategy(
+    df, symbol: str, timeframe: str, direction: str,
+) -> Optional[dict]:
+    """無使用者策略時，從條件機率掃描自動生「候選策略」（資料驅動），讓回測/MC/WF/CPCV 不再 skipped。
+
+    取 lift 最高、樣本足夠的「指標+序列+區間」當進場（基礎指標、回測直接可用）。
+    這是 in-sample 候選策略，須由既有 Walk Forward / CPCV 樣本外結果裁判是否真有 alpha。
+    回 {entry_conditions, exit_conditions, stop_loss_pct, take_profit_pct, meta} 或 None。
+    """
+    try:
+        cp = await _exec_conditional_prob_scan(
+            {"symbol": symbol, "timeframe": timeframe,
+             "indicators": ["rsi", "adx", "cci", "mfi", "roc", "stochrsi", "bias"],
+             "direction": "up" if direction == "long" else "down", "target_pct": 3.0},
+            symbol, timeframe,
+        )
+    except Exception as e:
+        logger.debug(f"候選策略：條件機率掃描失敗 {e}")
+        return None
+
+    best = None
+    for v in (cp.get("indicators") or {}).values():
+        if not isinstance(v, dict):
+            continue
+        lift = v.get("lift_vs_baseline")
+        rng = v.get("best_range")
+        n = v.get("total_valid_samples") or 0
+        if lift is None or lift < 3.0 or n < 200 or not rng or "~" not in str(rng):
+            continue
+        if best is None or lift > best["lift"]:
+            try:
+                a, b = str(rng).split("~")[:2]
+                lo, hi = float(a), float(b)
+            except Exception:
+                continue
+            best = {"indicator": v.get("indicator"), "series": v.get("series"),
+                    "lo": lo, "hi": hi, "lift": lift, "prob": v.get("best_prob_pct"),
+                    "baseline": v.get("baseline_prob_pct"), "n": n}
+    if not best or not best.get("indicator"):
+        return None
+
+    try:
+        atr_pct = float(np.median(((df["high"] - df["low"]) / df["close"]).dropna().values)) * 100
+        atr_pct = max(0.5, min(atr_pct, 15.0))
+    except Exception:
+        atr_pct = 3.0
+    sl = round(atr_pct * 1.5, 2)
+    tp = round(atr_pct * 3.0, 2)
+
+    entry_cond = {"indicator": best["indicator"], "operator": "between",
+                  "value": round(best["lo"], 4), "value2": round(best["hi"], 4)}
+    if best.get("series"):
+        entry_cond["series"] = best["series"]
+    if direction == "long":
+        exit_cond = {"indicator": best["indicator"], "operator": ">", "value": round(best["hi"], 4)}
+    else:
+        exit_cond = {"indicator": best["indicator"], "operator": "<", "value": round(best["lo"], 4)}
+    if best.get("series"):
+        exit_cond["series"] = best["series"]
+
+    factor_label = f"{best['indicator']}_{best.get('series') or ''}".rstrip("_")
+    return {
+        "entry_conditions": [entry_cond],
+        "exit_conditions": [exit_cond],
+        "stop_loss_pct": sl,
+        "take_profit_pct": tp,
+        "meta": {
+            "source": "conditional_prob",
+            "top_factor": factor_label,
+            "entry_range": [round(best["lo"], 4), round(best["hi"], 4)],
+            "hist_prob_pct": best["prob"],
+            "baseline_pct": best["baseline"],
+            "lift_pp": best["lift"],
+            "samples": best["n"],
+            "direction": direction,
+            "default_sl_tp": [sl, tp],
+            "in_sample": True,
+            "note": ("系統依條件機率掃描自動建議的候選策略（取歷史 lift 最高的指標區間），"
+                     "回測為 in-sample；須以 Walk Forward / CPCV 樣本外結果判斷是否真有 alpha"
+                     "（一致性低 = 過擬合、不可實盤）"),
+        },
+    }
+
+
 async def _exec_quant_research(args: dict, default_symbol: str, default_tf: str, progress: Optional[ProgressTracker] = None) -> dict:
     """完整量化研究流程：因子分析 + 回測 + Monte Carlo + Walk Forward + 倉位建議"""
     from app.core.backtest.engine import run_backtest
@@ -1329,6 +1413,23 @@ async def _exec_quant_research(args: dict, default_symbol: str, default_tf: str,
                 }
         except Exception as e2:
             report["factor_ic"] = {"error": str(e2)}
+
+    # ── 2b. 無使用者策略 → 自動生「候選策略」（資料驅動），讓回測/MC/WF/CPCV 不再 skipped ──
+    if not (entry_conditions and exit_conditions):
+        try:
+            _cand = await _derive_candidate_strategy(df, symbol, timeframe, direction)
+            if _cand:
+                entry_conditions = _cand["entry_conditions"]
+                exit_conditions = _cand["exit_conditions"]
+                if stop_loss is None:
+                    stop_loss = _cand["stop_loss_pct"]
+                if take_profit is None:
+                    take_profit = _cand["take_profit_pct"]
+                report["auto_derived_strategy"] = _cand["meta"]
+                _sub(f"未提供策略 → 系統自動建議候選策略（{_cand['meta']['source']}，"
+                     f"主因子 {_cand['meta']['top_factor']}）")
+        except Exception as _cand_err:
+            logger.debug(f"候選策略生成失敗（退回 skipped）: {_cand_err}")
 
     # ── 3. 策略回測（如有條件）──
     if entry_conditions and exit_conditions:
