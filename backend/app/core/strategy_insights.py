@@ -30,9 +30,39 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+import threading
+import time as _time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+from loguru import logger
+
+# 背景自動重建守衛：偵測到 insight 過期時自動重建（每小時最多一次、同時只跑一個）
+_auto_rebuild_lock = threading.Lock()
+_last_auto_rebuild_ts = 0.0
+
+
+def _trigger_background_rebuild() -> None:
+    """偵測到 insight 過期時觸發背景重建（fire-and-forget，不阻塞分析流程）。"""
+    global _last_auto_rebuild_ts
+    now = _time.time()
+    if now - _last_auto_rebuild_ts < 3600:  # 每小時最多自動重建一次
+        return
+    if not _auto_rebuild_lock.acquire(blocking=False):
+        return  # 已有重建在跑
+    _last_auto_rebuild_ts = now
+
+    def _run():
+        try:
+            build_insights()
+            logger.info("[strategy_insights] insight 過期 → 已背景自動重建")
+        except Exception as e:
+            logger.warning(f"[strategy_insights] 背景自動重建失敗: {e}")
+        finally:
+            _auto_rebuild_lock.release()
+
+    threading.Thread(target=_run, daemon=True).start()
 
 _DB_PATH = Path(__file__).resolve().parents[2] / "data" / "db" / "predictions.db"
 _INSIGHTS_PATH = Path(__file__).resolve().parents[2] / "data" / "db" / "strategy_insights.json"
@@ -301,6 +331,10 @@ def get_insights_for(symbol: str, timeframe: str, regime: str) -> Optional[dict]
         is_stale = age_days > _INSIGHT_CACHE_TTL_DAYS
     except Exception:
         is_stale = True
+
+    # 過期 → 觸發背景自動重建（self-heal，下次分析即為新鮮；本次仍標警示）
+    if is_stale:
+        _trigger_background_rebuild()
 
     out = {
         **seg,

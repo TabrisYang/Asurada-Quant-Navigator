@@ -2621,6 +2621,10 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                             "scan_conditional_probability", "run_quant_research",
                             "compute_laddered_entries",  # ★ v99：分批進場價位
                         ],
+                        # quant_research 須排在 analysis 前：quant_research mode 的 intents 同時含
+                        # {quant_research, analysis}，迴圈取首個命中 → 不放前面會誤補 analysis 函式
+                        # 而非 run_quant_research（造成回測/MC/WF/CPCV/regime「未提供」）。
+                        "quant_research": ["run_quant_research"],
                         "analysis": ["generate_scenarios", "detect_smc_structure"],
                         "deep_phase1": ["generate_scenarios", "detect_smc_structure"],
                         "deep_analysis": ["generate_scenarios", "detect_smc_structure"],

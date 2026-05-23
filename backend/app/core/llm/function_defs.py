@@ -1391,6 +1391,17 @@ _PROMPT_MODULES["quant_research"] = """
 - bayesian_posterior → 後驗勝率 + 95% 信賴區間
 - shap_drivers → 預測的 top 5 驅動特徵（解釋為什麼看多/空）
 
+動態倉位 / Kelly（報告必寫）：
+- 必須解釋 Kelly 公式 f=(b·p−q)/b（p=勝率、b=賠率 avg_win/avg_loss、q=1−p），並說明
+  全凱利 vs 半凱利 vs 四分之一凱利的取捨（實戰多用 1/4~1/2 凱利以降波動與破產風險）
+- 必須引用 position_sizing 的「本標的建議下注比例」（recommendation / summary）+
+  mc_adjustment（Monte Carlo 回撤對 Kelly 的縮減倍率與原因）；**禁止自行計算，照抄函式回傳值**
+
+Squeeze 突破歷史統計（報告必寫；使用者問 squeeze / 波動壓縮 / 突破時尤其必寫）：
+- **必須呼叫 scan_conditional_probability**，indicator 設為 vol_squeeze（布林帶寬分位壓縮訊號），
+  統計「squeeze 訊號出現後 N 根 K 線漲/跌 ≥ X% 的歷史機率 + Wilson CI + 相對 baseline 的 lift」
+- 禁止只說「波動壓縮、即將突破」這種無數據空談；必須給歷史命中率與樣本數
+
 MC/WF/CPCV 交叉驗證：
 - 三者結論一致 → 高信心
 - MC pass + WF/CPCV fail → 可能過擬合，降低信心
