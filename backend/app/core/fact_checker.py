@@ -61,6 +61,34 @@ _DONCHIAN_POS_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# ─── v149：回測 / Monte Carlo 數字（對照 exec_result，非 chart_state）──
+# 這些數字目前完全沒驗證，LLM 改寫/湊整會無聲流到用戶（Q5）。
+# 不收 win_rate（與既有 recent_accuracy 勝率比對衝突，避免假陽性）。
+_PF_PATTERN = re.compile(
+    r"(?:profit[\s_]*factor|盈虧比|獲利因子|\bPF\b)\s*[:=：約達為是]*\s*(\d+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+_SHARPE_PATTERN = re.compile(
+    r"sharpe(?:\s*ratio|\s*比率|\s*值)?\s*[:=：約達為是]*\s*(-?\d+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+_SORTINO_PATTERN = re.compile(
+    r"sortino(?:\s*ratio)?\s*[:=：約達為是]*\s*(-?\d+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+_MDD_PATTERN = re.compile(
+    r"(?:max[\s_]*drawdown|最大回撤|\bMDD\b)\s*[:=：約達為是]*\s*(-?\d+(?:\.\d+)?)\s*%?",
+    re.IGNORECASE,
+)
+_MC_RUIN_PATTERN = re.compile(
+    r"(?:破產(?:機率|概率|風險)|ruin(?:\s*probability)?)\s*[:=：約達為是]*\s*(\d+(?:\.\d+)?)\s*%?",
+    re.IGNORECASE,
+)
+_MC_PROFIT_PATTERN = re.compile(
+    r"(?:獲利機率|獲利概率|profit[\s_]*probability)\s*[:=：約達為是]*\s*(\d+(?:\.\d+)?)\s*%?",
+    re.IGNORECASE,
+)
+
 # ─── 容忍度 ──────────────────────────────────
 # v108 Phase 2：指標分組容忍度（從原 ±10% 統一收緊）
 # 振盪類 (0-100 範圍) 用絕對差更精確；其餘用相對差
@@ -107,9 +135,51 @@ def _within(actual: float, claimed: float, tol: float, mode: str = "abs") -> boo
     return False
 
 
+def _extract_backtest_facts(exec_result: Optional[dict]) -> dict:
+    """從 exec_result（run_quant_research / run_backtest）抽出回測關鍵數字實際值。
+
+    只抽無歧義、且目前完全沒驗證的指標：PF / Sharpe / Sortino / MDD / MC 破產率 / MC 獲利率。
+    抽不到就略過（不產生假陽性）。
+    """
+    facts: dict[str, float] = {}
+    if not isinstance(exec_result, dict):
+        return facts
+
+    def _num(x):
+        try:
+            return float(x) if x is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    for r in (exec_result.get("results") or []):
+        if not isinstance(r, dict):
+            continue
+        res = r.get("result")
+        if not isinstance(res, dict):
+            continue
+        bt = res.get("backtest") if isinstance(res.get("backtest"), dict) else None
+        # run_backtest 可能把績效放頂層
+        if bt is None and ("profit_factor" in res or "sharpe_ratio" in res):
+            bt = res
+        if bt and not bt.get("error"):
+            for fk, key in (("pf", "profit_factor"), ("sharpe", "sharpe_ratio"),
+                            ("sortino", "sortino_ratio"), ("mdd", "max_drawdown_pct")):
+                v = _num(bt.get(key))
+                if v is not None:
+                    facts.setdefault(fk, v)
+        mc = res.get("monte_carlo")
+        if isinstance(mc, dict) and mc.get("status") == "success":
+            for fk, key in (("mc_ruin", "ruin_probability"), ("mc_profit", "profit_probability")):
+                v = _num(mc.get(key))
+                if v is not None:
+                    facts.setdefault(fk, v)
+    return facts
+
+
 def check_text_against_chart_state(
     text: str,
     chart_state: dict,
+    exec_result: Optional[dict] = None,
 ) -> dict:
     """掃文本並回報 mismatch list。
 
@@ -123,8 +193,10 @@ def check_text_against_chart_state(
     }
     """
     result: dict[str, Any] = {"checked_count": 0, "mismatches": [], "summary": ""}
-    if not text or not chart_state:
+    if not text:
         return result
+    # chart_state 可能空，但 exec_result 仍可能有回測數字要驗；各段已各自 .get 防護
+    chart_state = chart_state or {}
 
     # ─── 指標值 ───────────────────────────────
     indicator_values = chart_state.get("indicatorValues") or {}
@@ -262,6 +334,39 @@ def check_text_against_chart_state(
                     "tolerance": f"±{_TOLERANCE['donchian_position']}",
                     "snippet": _snippet(text, m.start(), m.end()),
                 })
+
+    # ─── v149：回測 / MC 數字（對照 exec_result）──
+    bt_facts = _extract_backtest_facts(exec_result)
+    if bt_facts:
+        # (label, pattern, fact_key, 容忍度abs, 是否取絕對值比較)
+        _bt_checks = [
+            ("PF", _PF_PATTERN, "pf", 0.3, False),
+            ("Sharpe", _SHARPE_PATTERN, "sharpe", 0.3, False),
+            ("Sortino", _SORTINO_PATTERN, "sortino", 0.3, False),
+            ("MDD", _MDD_PATTERN, "mdd", 3.0, True),
+            ("破產機率", _MC_RUIN_PATTERN, "mc_ruin", 5.0, False),
+            ("獲利機率", _MC_PROFIT_PATTERN, "mc_profit", 5.0, False),
+        ]
+        for label, pat, fkey, tol, use_abs_mag in _bt_checks:
+            actual = bt_facts.get(fkey)
+            if actual is None:
+                continue
+            for m in pat.finditer(text):
+                try:
+                    claimed = float(m.group(1))
+                except ValueError:
+                    continue
+                a, c = (abs(actual), abs(claimed)) if use_abs_mag else (actual, claimed)
+                result["checked_count"] += 1
+                if not _within(a, c, tol, "abs"):
+                    result["mismatches"].append({
+                        "type": "backtest",
+                        "name": label,
+                        "claimed": claimed,
+                        "actual": round(actual, 3),
+                        "tolerance": f"±{tol}",
+                        "snippet": _snippet(text, m.start(), m.end()),
+                    })
 
     # ─── 摘要 ───────────────────────────────
     n_mis = len(result["mismatches"])

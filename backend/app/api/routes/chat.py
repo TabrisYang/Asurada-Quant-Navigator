@@ -3505,7 +3505,12 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
         try:
             if final_text and request.chart_state:
                 from app.core.fact_checker import check_text_against_chart_state
-                fc = check_text_against_chart_state(final_text, request.chart_state)
+                # v149：把 exec_result 一起傳入，讓回測數字（PF/Sharpe/MDD/MC）也納入驗證。
+                # exec_result 僅在有 function call 時定義，用 locals().get 防 NameError（純文字回應時為 None）。
+                fc = check_text_against_chart_state(
+                    final_text, request.chart_state,
+                    exec_result=locals().get("exec_result"),
+                )
                 if fc.get("checked_count", 0) > 0:
                     yield _sse_event("fact_check", {
                         "checked_count": fc["checked_count"],

@@ -303,6 +303,7 @@ def run_monte_carlo(
             ruin_count / n_simulations,
             conf,
         ),
+        "reliability": ("low" if conf == "low" else "ok"),
     }
 
 
@@ -317,7 +318,10 @@ def _interpret_results(
     parts = []
 
     if confidence == "low":
-        parts.append("⚠️ 交易筆數不足 30 筆，模擬結論信心度偏低")
+        parts.append(
+            "⚠️ 交易筆數不足 30 筆，統計信賴度低 — 以下破產率/穩健性結論僅供研究參考、"
+            "不可作實盤依據（小樣本下單筆極端值即翻轉結論）"
+        )
 
     if p5_return > 0:
         parts.append("✅ 策略穩健：即使在最差 5% 情境下仍能獲利")

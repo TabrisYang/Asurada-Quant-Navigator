@@ -366,14 +366,25 @@ def _assess_walk_forward(
     else:
         verdict = "策略未通過 Walk Forward 驗證，不建議實盤使用"
 
-    # 提高 has_alpha 門檻
+    # 提高 has_alpha 門檻（門檻不變）
     has_alpha = avg_sharpe > 0.8 and consistency >= 0.7
     if has_alpha and decay > 0:
         has_alpha = decay > 0.4
+
+    # 小樣本信賴度標記：視窗太少時 has_alpha/verdict 易二元極端，標 low 讓上層不當定論
+    n_windows = len(test_sharpes)
+    reliability = "low" if n_windows < 4 else "ok"
+    if reliability == "low":
+        verdict = (
+            f"⚠️ 視窗數僅 {n_windows}（< 4），統計信賴度低、結論僅供研究參考、"
+            f"不可作實盤依據；" + verdict
+        )
 
     return {
         "score": score,
         "verdict": verdict,
         "issues": issues,
         "has_alpha": has_alpha,
+        "reliability": reliability,
+        "n_windows": n_windows,
     }

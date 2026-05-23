@@ -260,9 +260,20 @@ def _assess_cpcv(returns, sharpes, win_rates, consistency):
     else:
         verdict = "CPCV 驗證未通過：策略過擬合風險高，不建議實盤"
 
+    # 小樣本信賴度標記：有效組合太少時結論易二元極端，標 low（門檻不變）
+    n_combos = len(sharpes)
+    reliability = "low" if n_combos < 5 else "ok"
+    if reliability == "low":
+        verdict = (
+            f"⚠️ 有效組合僅 {n_combos}（< 5），統計信賴度低、結論僅供研究參考、"
+            f"不可作實盤依據；" + verdict
+        )
+
     return {
         "score": score,
         "verdict": verdict,
         "issues": issues,
         "has_edge": avg_sharpe > 0.8 and consistency >= 0.7,
+        "reliability": reliability,
+        "n_combos": n_combos,
     }

@@ -370,7 +370,10 @@ def format_function_results(function_calls: list[dict], exec_result: dict) -> st
                     parts.append("\nMonte Carlo 模擬:")
                     parts.append(f"  獲利機率: {mc.get('profit_probability', '?')}% | 破產風險: {mc.get('ruin_probability', '?')}%")
                     parts.append(f"  報酬分布 p25={mc.get('p25_return', '?')}% / p50={mc.get('p50_return', '?')}% / p75={mc.get('p75_return', '?')}%")
-                    parts.append(f"  策略穩健: {'✅' if mc.get('strategy_robust') else '❌'}")
+                    if mc.get("reliability") == "low":
+                        parts.append("  策略穩健: ⚠️ 樣本不足（<30 筆），破產率/穩健性僅供研究參考、不可作實盤定論")
+                    else:
+                        parts.append(f"  策略穩健: {'✅' if mc.get('strategy_robust') else '❌'}")
                 # Walk Forward
                 wf = r.get("walk_forward", {})
                 if wf:
@@ -378,7 +381,10 @@ def format_function_results(function_calls: list[dict], exec_result: dict) -> st
                     summary = wf.get("summary", {})
                     if assessment:
                         parts.append("\nWalk Forward 驗證:")
-                        parts.append(f"  Alpha: {'✅' if assessment.get('has_alpha') else '❌'} | 評分: {assessment.get('score', '?')}/100")
+                        if assessment.get("reliability") == "low":
+                            parts.append(f"  Alpha: ⚠️ 視窗數不足（{assessment.get('n_windows', '?')}<4），結論僅供研究參考 | 評分: {assessment.get('score', '?')}/100")
+                        else:
+                            parts.append(f"  Alpha: {'✅' if assessment.get('has_alpha') else '❌'} | 評分: {assessment.get('score', '?')}/100")
                         if summary:
                             parts.append(f"  視窗數: {summary.get('n_windows', '?')} | OOS 平均報酬: {summary.get('avg_oos_return', '?')}%")
                 # GMM Regime
@@ -415,7 +421,10 @@ def format_function_results(function_calls: list[dict], exec_result: dict) -> st
                         parts.append(f"  一致性: {cpcv_met.get('consistency_pct', '?')}%")
                         cpcv_ret = cpcv_met.get("return_pct", {})
                         parts.append(f"  報酬: 均值={cpcv_ret.get('mean', '?')}%, P25={cpcv_ret.get('p25', '?')}%, 中位數={cpcv_ret.get('median', '?')}%")
-                        parts.append(f"  評分: {cpcv_assess.get('score', '?')}/100 | 有邊際: {'✅' if cpcv_assess.get('has_edge') else '❌'}")
+                        if cpcv_assess.get("reliability") == "low":
+                            parts.append(f"  評分: {cpcv_assess.get('score', '?')}/100 | 有邊際: ⚠️ 組合數不足（{cpcv_assess.get('n_combos', '?')}<5），僅供研究參考")
+                        else:
+                            parts.append(f"  評分: {cpcv_assess.get('score', '?')}/100 | 有邊際: {'✅' if cpcv_assess.get('has_edge') else '❌'}")
                         parts.append(f"  結論: {cpcv_assess.get('verdict', '?')}")
                 # OOS Monte Carlo
                 mc_oos = r.get("monte_carlo_oos", {})
