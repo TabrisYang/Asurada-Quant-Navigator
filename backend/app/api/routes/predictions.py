@@ -8,6 +8,7 @@
   POST  /api/predictions/review       — AI 生成覆盤報告
 """
 
+import asyncio
 import re
 from datetime import datetime, timedelta
 from typing import Optional
@@ -92,6 +93,31 @@ async def retrain_imitation_endpoint(force: bool = Query(False)):
     """手動觸發重訓。force=True 跳過 Champion-Challenger 切換閾值。"""
     from app.core.imitation_trainer import train_imitation_model
     return train_imitation_model(min_samples=50, force=force)
+
+
+@router.get("/insights-status")
+async def get_insights_status():
+    """歷史洞察庫（strategy_insights）的新鮮度狀態 — 給前端顯示「上次重建/是否過期」。"""
+    from app.core.strategy_insights import get_cache_status
+    return get_cache_status()
+
+
+@router.post("/rebuild-insights")
+async def rebuild_insights_endpoint():
+    """手動重建歷史洞察庫（掃 predictions DB 重算 patterns）。解決 stale_warning。"""
+    from app.core.strategy_insights import build_insights
+    try:
+        result = await asyncio.to_thread(build_insights)
+        return {
+            "status": "ok",
+            "as_of": result.get("as_of"),
+            "total_validated": result.get("total_validated"),
+            "n_segments_with_insight": result.get("n_segments_with_insight"),
+            "overall_winrate": result.get("overall_winrate"),
+        }
+    except Exception as e:
+        logger.warning(f"重建歷史洞察失敗: {e}")
+        return {"status": "error", "message": str(e)}
 
 
 @router.post("/imitation/disable")

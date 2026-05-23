@@ -6,7 +6,7 @@ import {
   fetchPredictionStats, fetchActivePredictions, fetchPredictionHistory,
   updatePredictionNote, generateReview, clearPredictions,
   fetchScenarios, fetchAdjustments, recalculateAdjustments,
-  fetchReviewHistory,
+  fetchReviewHistory, getInsightsStatus, rebuildStrategyInsights,
 } from '../../services/api';
 import { loadPersistedSession } from '../../services/session';
 
@@ -50,6 +50,10 @@ export default function PredictionDashboard() {
   const [historyPreds, setHistoryPreds] = useState<PredictionItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [viewTab, setViewTab] = useState<'scenarios' | 'active' | 'history' | 'indicators' | 'adjustments' | 'reviews' | 'calibration' | 'imitation' | 'strategy'>('scenarios');
+  // 歷史洞察庫（strategy_insights）重建狀態（Q3：解 stale_warning）
+  const [insightStatus, setInsightStatus] = useState<any>(null);
+  const [insightRebuilding, setInsightRebuilding] = useState(false);
+  const [insightMsg, setInsightMsg] = useState('');
   // ★ v100：Calibration 數據
   const [calibrationData, setCalibrationData] = useState<any>(null);
   const [calibrationLoading, setCalibrationLoading] = useState(false);
@@ -221,6 +225,7 @@ export default function PredictionDashboard() {
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
+  useEffect(() => { getInsightsStatus().then(setInsightStatus).catch(() => {}); }, []);
   useEffect(() => { if (viewTab === 'scenarios') loadScenarios(); }, [viewTab, loadScenarios]);
   useEffect(() => { if (viewTab === 'adjustments') loadAdjustments(); }, [viewTab, loadAdjustments]);
   useEffect(() => { if (viewTab === 'reviews') loadReviews(); }, [viewTab, loadReviews]);
@@ -296,6 +301,47 @@ export default function PredictionDashboard() {
       {/* ★ v100：免責聲明 */}
       <div className="p-2 rounded text-xs" style={{ background: 'rgba(251,191,36,0.1)', border: '1px solid rgba(251,191,36,0.3)', color: 'var(--text-secondary)' }}>
         ⚠️ 系統判讀僅供參考，不構成投資建議。歷史命中率不保證未來表現，請依自身判斷下單。
+      </div>
+
+      {/* 歷史洞察庫重建（Q3：解 stale_warning，手動刷新 strategy_insights）*/}
+      <div className="p-3 rounded-lg" style={{ background: 'var(--bg-tertiary)' }}>
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-xs" style={{ color: 'var(--text-secondary)' }}>
+            <span className="font-semibold" style={{ color: 'var(--text-primary)' }}>📚 歷史洞察庫</span>
+            {insightStatus ? (
+              insightStatus.exists ? (
+                <span className="ml-2">
+                  上次重建 {insightStatus.as_of}（{insightStatus.age_days} 天前，樣本 {insightStatus.total_validated}、{insightStatus.n_segments_with_insight} 區段）
+                  {insightStatus.is_stale && (
+                    <span style={{ color: '#f87171' }} className="ml-1">⚠️ 已過期（&gt;{insightStatus.ttl_days} 天），建議重建</span>
+                  )}
+                </span>
+              ) : <span className="ml-2">尚未建立，請按重建</span>
+            ) : <span className="ml-2">載入中…</span>}
+          </div>
+          <button
+            onClick={async () => {
+              setInsightRebuilding(true); setInsightMsg('');
+              try {
+                const r = await rebuildStrategyInsights();
+                if (r.status === 'ok') {
+                  setInsightMsg(`✅ 已重建（樣本 ${r.total_validated}、${r.n_segments_with_insight} 區段、整體勝率 ${(r.overall_winrate * 100).toFixed(1)}%）`);
+                  const s = await getInsightsStatus(); setInsightStatus(s);
+                } else {
+                  setInsightMsg(`❌ ${r.message || '重建失敗'}`);
+                }
+              } catch (e: any) {
+                setInsightMsg(`❌ ${e?.message || '重建失敗'}`);
+              } finally { setInsightRebuilding(false); }
+            }}
+            disabled={insightRebuilding}
+            className="px-3 py-1 rounded text-xs cursor-pointer whitespace-nowrap"
+            style={{ background: 'var(--accent-blue)', color: '#fff', opacity: insightRebuilding ? 0.6 : 1 }}
+          >
+            {insightRebuilding ? '重建中…' : '重建'}
+          </button>
+        </div>
+        {insightMsg && <div className="text-xs mt-1" style={{ color: 'var(--text-secondary)' }}>{insightMsg}</div>}
       </div>
 
       {/* ===== 統計概覽 ===== */}

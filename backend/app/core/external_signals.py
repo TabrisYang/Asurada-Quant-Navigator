@@ -404,16 +404,52 @@ def _fetch_fred_value(client: httpx.Client, series_id: str) -> Optional[dict]:
         return None
 
 
-def _fetch_macro_snapshot(client: httpx.Client) -> Optional[dict]:
-    """抓 DXY + 10Y yield + M2 最新值。"""
-    if not _FRED_KEY:
+def _fetch_macro_yfinance() -> Optional[dict]:
+    """免費無 key 補總體經濟（DXY + 美十年債殖利率）。M2 yfinance 無 → 略過。
+
+    yfinance 為專案既有依賴（見 tw_fundamental.py）；macro 在 30 分快取後才重抓，
+    2 個 ticker 成本可接受。FRED key 缺席時的免費 fallback。
+    """
+    try:
+        import yfinance as yf
+    except Exception:
         return None
     out: dict = {}
-    for name, sid in _FRED_SERIES.items():
-        v = _fetch_fred_value(client, sid)
-        if v:
-            out[name] = v
+    for name, ticker in (("dxy", "DX-Y.NYB"), ("us10y", "^TNX")):
+        try:
+            hist = yf.Ticker(ticker).history(period="7d")
+            if hist is None or hist.empty:
+                continue
+            closes = hist["Close"].dropna()
+            if len(closes) < 2:
+                continue
+            latest = float(closes.iloc[-1])
+            prev = float(closes.iloc[-2])
+            change_pct = ((latest - prev) / prev * 100) if prev != 0 else 0
+            out[name] = {
+                "value": round(latest, 4),
+                "change_pct": round(change_pct, 3),
+                "as_of": str(closes.index[-1].date()),
+                "source": "yfinance",
+            }
+        except Exception as e:
+            logger.debug(f"[external] yfinance macro {ticker} 失敗: {e}")
     return out if out else None
+
+
+def _fetch_macro_snapshot(client: httpx.Client) -> Optional[dict]:
+    """抓 DXY + 10Y yield + M2。有 FRED key 走 FRED（含 M2）；否則 yfinance 免費補 DXY/10Y。"""
+    if _FRED_KEY:
+        out: dict = {}
+        for name, sid in _FRED_SERIES.items():
+            v = _fetch_fred_value(client, sid)
+            if v:
+                v["source"] = "fred"
+                out[name] = v
+        if out:
+            return out
+        # FRED key 有設但全失敗 → 退 yfinance 免費源
+    return _fetch_macro_yfinance()
 
 
 # ─── 公開 API ─────────────────────────
@@ -478,8 +514,8 @@ def get_signals_snapshot(symbol: str, include_macro: bool = True) -> dict:
         if fg:
             out["sentiment"].update(fg)
 
-        # 總體（FRED key 有設才抓）
-        if include_macro and _FRED_KEY:
+        # 總體（有 FRED key 走 FRED 含 M2；否則 yfinance 免費補 DXY/10Y）
+        if include_macro:
             m = _fetch_with_retry(_fetch_macro_snapshot, client)
             if m:
                 out["macro"].update(m)

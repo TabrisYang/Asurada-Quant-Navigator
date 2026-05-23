@@ -1133,6 +1133,16 @@ export async function triggerDataSync(params: SyncRequestParams) {
   return res.data;
 }
 
+export async function getInsightsStatus() {
+  const res = await api.get('/predictions/insights-status');
+  return res.data;
+}
+
+export async function rebuildStrategyInsights() {
+  const res = await api.post('/predictions/rebuild-insights');
+  return res.data;
+}
+
 export async function fetchSyncStatus() {
   const res = await api.get('/data/sync-status');
   return res.data;

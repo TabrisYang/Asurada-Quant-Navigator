@@ -251,6 +251,35 @@ def _load_cached_insights() -> Optional[dict]:
         return None
 
 
+def get_cache_status() -> dict:
+    """回傳洞察快取的新鮮度狀態（給前端「重建」UI 顯示用）。"""
+    cached = _load_cached_insights()
+    if not cached:
+        return {
+            "exists": False, "is_stale": True, "as_of": None, "age_days": None,
+            "ttl_days": _INSIGHT_CACHE_TTL_DAYS,
+            "total_validated": 0, "n_segments_with_insight": 0,
+        }
+    as_of = cached.get("as_of")
+    age_days = None
+    is_stale = True
+    try:
+        dt = datetime.strptime(as_of, "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
+        age_days = (datetime.now(timezone.utc) - dt).days
+        is_stale = age_days > _INSIGHT_CACHE_TTL_DAYS
+    except Exception:
+        pass
+    return {
+        "exists": True,
+        "as_of": as_of,
+        "age_days": age_days,
+        "is_stale": is_stale,
+        "ttl_days": _INSIGHT_CACHE_TTL_DAYS,
+        "total_validated": cached.get("total_validated", 0),
+        "n_segments_with_insight": cached.get("n_segments_with_insight", 0),
+    }
+
+
 def get_insights_for(symbol: str, timeframe: str, regime: str) -> Optional[dict]:
     """注入 chart_state 用：給定當前 (symbol, tf, regime)，回傳對應 insight 或 None。
 
