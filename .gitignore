@@ -39,6 +39,13 @@ backend/data/fundamental/
 backend/data/*.csv
 backend/data/sync_metadata.json
 
+# ===== 誤建的重複 DB 樹（app 從錯誤 CWD 啟動時產生）=====
+/data/
+/frontend/data/
+
+# ===== 經濟日曆（runtime 抓取覆寫）=====
+backend/data/calendar/
+
 # ===== 研究專案實驗結果（每次跑都產生新 timestamp 目錄）=====
 backend/research/lstm_sca_arima_garch/results/
 
@@ -69,7 +76,6 @@ backend/app/data/*.db
 # DB 備份目錄（用 backup_databases.py 手動備份產生）
 backend/data/db_pre_v101_*/
 
-# ===== 訓練流程自動產生的模型權重 =====
-# imitation_v* 系列由 retrain_imitation.py 每週自動覆寫，不適合 git diff
-backend/models/imitation_v*.pkl
-backend/models/imitation_v*_plain.pkl
+# ===== backend/models 下全部為 runtime 再生的模型權重，不進版控 =====
+# imitation_v* 由 retrain_imitation.py 每週覆寫；calibrator_*/factor_pca 由 scanner_calibrator/profiler runtime 重訓
+backend/models/*.pkl
