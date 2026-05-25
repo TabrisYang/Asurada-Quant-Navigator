@@ -422,6 +422,36 @@ def _round_price(p: Optional[float]) -> Optional[float]:
     return round_price(p)
 
 
+def _annotate_volume_node(
+    entries: list[dict],
+    poc: Optional[float],
+    vah: Optional[float],
+    val: Optional[float],
+    atr: float,
+) -> None:
+    """替每檔 entry 的 source 加上 Volume Profile 量能脈絡（就地修改）。
+
+    純註解：不改 price / size_pct，只標明該價位落在高量節點 / 值區內 / 低量真空帶，
+    讓 LLM/使用者知道哪些檔位有量能支撐（POC/VA = 成交密集，支撐/壓力更可靠；
+    真空帶 = 價格易快速穿越，不適合掛單等待）。
+    """
+    if poc is None or vah is None or val is None:
+        return
+    lo, hi = (val, vah) if val <= vah else (vah, val)
+    near_thresh = atr * 0.5 if atr > 0 else 0.0
+    for e in entries:
+        p = e.get("price")
+        if p is None:
+            continue
+        if near_thresh > 0 and abs(p - poc) <= near_thresh:
+            tag = "★ 貼近 POC 高量節點（最強支撐/壓力）"
+        elif lo <= p <= hi:
+            tag = "位於高量值區(VA)內，成交密集"
+        else:
+            tag = "低量真空帶，價格易快速穿越"
+        e["source"] = e.get("source", "") + f"｜量能：{tag}"
+
+
 def compute_laddered_entries(
     df: pd.DataFrame,
     direction: Literal["long", "short", "both"] = "both",
@@ -508,6 +538,20 @@ def compute_laddered_entries(
     long_sl, long_tp, long_rr = _compute_sl_tp(long_entries, atr, "long", sl_mult, tp_mult) if long_entries else (None, None, None)
     short_sl, short_tp, short_rr = _compute_sl_tp(short_entries, atr, "short", sl_mult, tp_mult) if short_entries else (None, None, None)
 
+    # 量能脈絡（Volume Profile）— 純註解，不改價位來源
+    poc = vah = val = None
+    try:
+        poc_res = registry.calculate("poc", df)
+    except Exception as e:
+        logger.debug(f"compute_laddered_entries: poc 計算失敗：{e}")
+        poc_res = None
+    if poc_res:
+        poc = _last_valid(poc_res.get("POC", []))
+        vah = _last_valid(poc_res.get("VAH", []))
+        val = _last_valid(poc_res.get("VAL", []))
+    _annotate_volume_node(long_entries, poc, vah, val, atr)
+    _annotate_volume_node(short_entries, poc, vah, val, atr)
+
     # 對外輸出（價格全部四捨五入到合適小數位）
     out_long = [
         {"price": _round_price(e["price"]), "size_pct": e["size_pct"], "source": e["source"]}
@@ -541,6 +585,15 @@ def compute_laddered_entries(
         "stop_loss_short": _round_price(short_sl),
         "take_profit_short": _round_price(short_tp),
         "rr_short": round(short_rr, 2) if short_rr else None,
+        "volume_profile": (
+            {
+                "poc": _round_price(poc),
+                "vah": _round_price(vah),
+                "val": _round_price(val),
+                "note": "POC=最大成交量價位（最強支撐/壓力）；VAH/VAL=高量值區上下緣（覆蓋約 70% 成交量）。各檔 source 已標註量能脈絡（高量節點/值區內/低量真空帶）。",
+            }
+            if poc is not None else None
+        ),
         "missing_indicators": sorted(missing_set),  # 給上層自動補指標用
         "warning": None,
         "rule": "★ 後端強制：所有 price 直接來自 indicator value（BB / EMA / Donchian / ATR），LLM 必須引用，禁止自行推算",

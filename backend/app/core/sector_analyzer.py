@@ -95,12 +95,15 @@ async def analyze_sector(
     # 6. 個股相對強弱
     rs_ranking = _compute_relative_strength(stock_data, sector_index_df)
 
+    # 6.5 量能 breadth（放量家數 / 族群資金流向 / 龍頭量能確認）
+    volume_breadth = _compute_volume_breadth(stock_data, sector_index_df, rs_ranking)
+
     # 7. 族群指數變動
     index_stats = _compute_index_stats(sector_index_df)
 
     # 8. 綜合解讀
     interpretation = _generate_interpretation(
-        resolved_name, technical, breadth, rs_ranking, index_stats,
+        resolved_name, technical, breadth, rs_ranking, index_stats, volume_breadth,
     )
 
     return {
@@ -111,6 +114,7 @@ async def analyze_sector(
         "sector_index": index_stats,
         "technical": technical,
         "breadth": breadth,
+        "volume_breadth": volume_breadth,
         "relative_strength": rs_ranking[:10],  # 前 10 名
         "interpretation": interpretation,
     }
@@ -310,6 +314,74 @@ def _compute_breadth(stock_data: dict[str, pd.DataFrame]) -> dict:
     }
 
 
+def _compute_volume_breadth(
+    stock_data: dict[str, pd.DataFrame],
+    sector_index_df: pd.DataFrame,
+    rs_ranking: list[dict],
+) -> dict:
+    """族群量能 breadth：放量家數、族群資金流向、龍頭量能確認。
+
+    純資訊性：補上族群分析原缺的量能維度。資金輪動本質是量能驅動 ——
+    放量家數多 + 族群總量放大 = 資金流入；龍頭放量 = 領漲可信、量縮領漲存疑。
+    """
+    n = len(stock_data)
+    if n == 0:
+        return {}
+
+    out: dict = {}
+
+    # ── 1. 放量家數比例（個股今日量 > 自身 20 日均量 ×1.5）──
+    expanding = 0
+    counted = 0
+    for code, df in stock_data.items():
+        if "volume" not in df.columns or len(df) < 20:
+            continue
+        vol = df["volume"].astype(float)
+        ma20 = vol.rolling(20).mean().iloc[-1]
+        if pd.isna(ma20) or ma20 <= 0:
+            continue
+        counted += 1
+        if vol.iloc[-1] > ma20 * 1.5:
+            expanding += 1
+    if counted > 0:
+        out["pct_volume_expanding"] = round(expanding / counted * 100, 1)
+        out["volume_expanding_count"] = expanding
+        out["volume_counted"] = counted
+
+    # ── 2. 族群量能趨勢（總量 5 日均 vs 20 日均）──
+    if "volume" in sector_index_df.columns and len(sector_index_df) >= 20:
+        svol = sector_index_df["volume"].astype(float)
+        ma5 = svol.rolling(5).mean().iloc[-1]
+        ma20 = svol.rolling(20).mean().iloc[-1]
+        if pd.notna(ma5) and pd.notna(ma20) and ma20 > 0:
+            ratio = float(ma5 / ma20)
+            out["sector_volume_ratio_5_20"] = round(ratio, 2)
+            if ratio > 1.2:
+                out["sector_volume_trend"] = "放量（資金流入族群）"
+            elif ratio < 0.8:
+                out["sector_volume_trend"] = "縮量（資金流出/觀望）"
+            else:
+                out["sector_volume_trend"] = "量能持平"
+
+    # ── 3. 龍頭量能（RS 第 1 名是否放量確認領漲）──
+    if rs_ranking:
+        leader_code = rs_ranking[0].get("symbol")
+        ldf = stock_data.get(leader_code)
+        if ldf is not None and "volume" in ldf.columns and len(ldf) >= 20:
+            lvol = ldf["volume"].astype(float)
+            lma20 = lvol.rolling(20).mean().iloc[-1]
+            if pd.notna(lma20) and lma20 > 0:
+                lrv = float(lvol.iloc[-1] / lma20)
+                out["leader_relative_volume"] = round(lrv, 2)
+                out["leader_volume_confirm"] = (
+                    "放量領漲（資金認同，領漲可信）" if lrv >= 1.5
+                    else "量縮領漲（領漲存疑，留意持續性）" if lrv <= 0.7
+                    else "量能正常"
+                )
+
+    return out
+
+
 def _compute_relative_strength(
     stock_data: dict[str, pd.DataFrame],
     sector_df: pd.DataFrame,
@@ -369,6 +441,7 @@ def _generate_interpretation(
     breadth: dict,
     rs_ranking: list[dict],
     index_stats: dict,
+    volume_breadth: Optional[dict] = None,
 ) -> str:
     """生成族群趨勢綜合解讀。"""
     parts = []
@@ -381,6 +454,15 @@ def _generate_interpretation(
     # Breadth
     pct_ma20 = breadth.get("pct_above_ma20", 0)
     parts.append(f"{pct_ma20}% 個股站上 MA20")
+
+    # 量能 breadth（資金流向）
+    if volume_breadth:
+        vol_trend = volume_breadth.get("sector_volume_trend")
+        if vol_trend:
+            parts.append(vol_trend)
+        pct_exp = volume_breadth.get("pct_volume_expanding")
+        if pct_exp is not None:
+            parts.append(f"{pct_exp}% 個股放量")
 
     # 近期漲跌
     chg_20d = index_stats.get("change_pct_20d")

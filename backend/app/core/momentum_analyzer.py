@@ -64,6 +64,9 @@ async def analyze_momentum(
     # ── 6. 綜合動量評分 ──
     score = _compute_momentum_score(momentum_factors, momentum_shift, reversal)
 
+    # ── 7. 量價配合（成交量確認）──
+    volume_confirmation = _analyze_volume_confirmation(close, df)
+
     return {
         "status": "success",
         "symbol": symbol,
@@ -75,6 +78,7 @@ async def analyze_momentum(
         "reversal_detection": reversal,
         "strategy_backtest": strategies,
         "momentum_score": score,
+        "volume_confirmation": volume_confirmation,
     }
 
 
@@ -234,6 +238,103 @@ def _compute_relative_momentum(target_close: np.ndarray, benchmark_close: np.nda
             else "標的相對大盤走弱"
         ),
     }
+
+
+# ═══════════════════════════════════════════════════
+#  3.5 量價配合（成交量確認）
+# ═══════════════════════════════════════════════════
+
+def _analyze_volume_confirmation(close: np.ndarray, df: pd.DataFrame) -> dict:
+    """量價配合分析：OBV 趨勢、量價背離、放量/縮量。
+
+    純資訊性區塊（不折進 momentum_score）：補上動能分析原本缺的量能維度，
+    讓 LLM 判斷動能是否有量能支撐 —— 放量上漲＝可持續；縮量上漲＝背離將竭。
+    只呼叫既有 obv / rel_vol 指標，不改 indicators。
+    """
+    out: dict = {"available": False}
+
+    obv_calc = registry.calculate("obv", df)
+    if not obv_calc or "OBV" not in obv_calc:
+        return out
+    obv_vals = np.array(
+        [v if v is not None else np.nan for v in obv_calc["OBV"]], dtype=float
+    )
+    if len(obv_vals) < 25 or np.isnan(obv_vals).all():
+        return out
+
+    out["available"] = True
+
+    # ── 1. OBV 斜率（近 10 根線性回歸，用近 60 根量級正規化）──
+    win = min(10, len(obv_vals))
+    recent = obv_vals[-win:]
+    slope = float(np.polyfit(np.arange(win), recent, 1)[0])
+    scale = float(np.nanmean(np.abs(obv_vals[-60:]))) or 1.0
+    obv_slope_norm = slope / scale if scale else 0.0
+    if obv_slope_norm > 0.005:
+        obv_trend = "上升（資金流入）"
+    elif obv_slope_norm < -0.005:
+        obv_trend = "下降（資金流出）"
+    else:
+        obv_trend = "持平"
+    out["obv_trend"] = obv_trend
+    out["obv_slope_norm"] = round(obv_slope_norm, 4)
+
+    # ── 2. 量價背離（價格 ROC20 vs OBV ROC20）──
+    lb = 20
+    price_roc = (close[-1] / close[-1 - lb] - 1) if len(close) > lb and close[-1 - lb] != 0 else 0.0
+    obv_base = obv_vals[-1 - lb] if len(obv_vals) > lb else np.nan
+    obv_roc = (
+        (obv_vals[-1] - obv_base) / abs(obv_base)
+        if not np.isnan(obv_base) and obv_base != 0 else 0.0
+    )
+    divergence = None
+    if price_roc > 0.01 and obv_roc < -0.01:
+        divergence = {
+            "type": "頂背離", "direction": "bearish",
+            "detail": "價漲但 OBV 未跟進（量能不支持，漲勢可能竭）",
+        }
+    elif price_roc < -0.01 and obv_roc > 0.01:
+        divergence = {
+            "type": "底背離", "direction": "bullish",
+            "detail": "價跌但 OBV 走升（賣壓衰竭，可能反轉）",
+        }
+    out["price_roc_20"] = round(price_roc * 100, 2)
+    out["obv_roc_20"] = round(obv_roc * 100, 2)
+    out["divergence"] = divergence
+
+    # ── 3. 放量/縮量（rel_vol 最後有效值）──
+    rel_vol_last = None
+    rv_calc = registry.calculate("rel_vol", df)
+    if rv_calc and "RelVol" in rv_calc:
+        for v in reversed(rv_calc["RelVol"]):
+            if v is not None and not (isinstance(v, float) and np.isnan(v)):
+                rel_vol_last = float(v)
+                break
+    if rel_vol_last is not None and rel_vol_last >= 1.5:
+        vol_state = "放量"
+    elif rel_vol_last is not None and rel_vol_last <= 0.7:
+        vol_state = "縮量"
+    else:
+        vol_state = "量能正常"
+    if rel_vol_last is not None:
+        out["relative_volume"] = round(rel_vol_last, 2)
+    out["volume_state"] = vol_state
+
+    # ── 4. 量價配合判語 ──
+    rising = (close[-1] / close[-6] - 1) > 0 if len(close) > 6 and close[-6] != 0 else False
+    if rising and vol_state == "放量":
+        verdict = "價漲量增 — 量能確認，趨勢健康可續"
+    elif rising and vol_state == "縮量":
+        verdict = "價漲量縮 — 量價背離警示，漲勢恐難持續"
+    elif (not rising) and vol_state == "放量":
+        verdict = "價跌量增 — 恐慌/出貨，下跌動能強"
+    elif (not rising) and vol_state == "縮量":
+        verdict = "價跌量縮 — 賣壓衰竭，可能止跌"
+    else:
+        verdict = "量價中性 — 無明顯量能配合或背離"
+    out["price_volume_verdict"] = verdict
+
+    return out
 
 
 # ═══════════════════════════════════════════════════
