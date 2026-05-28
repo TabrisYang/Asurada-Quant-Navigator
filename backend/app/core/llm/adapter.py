@@ -26,6 +26,20 @@ _LLM_STREAM_TIMEOUT = settings.llm_stream_timeout
 _CACHE_CONTROL_1H = {"type": "ephemeral", "ttl": "1h"}
 _ANTHROPIC_CACHE_BETA_HEADER = {"anthropic-beta": "extended-cache-ttl-2025-04-11"}
 
+# v149：限流/過載特徵字串（從 CLI stderr 偵測，用於退避重試判斷）
+_RATE_LIMIT_MARKERS = (
+    "rate limit", "rate_limit", "ratelimit", "overloaded", "429", "529",
+    "usage limit", "too many requests", "quota", "limit reached",
+)
+
+
+def _looks_rate_limited(text: str) -> bool:
+    """stderr 是否含限流/過載特徵。"""
+    if not text:
+        return False
+    t = text.lower()
+    return any(k in t for k in _RATE_LIMIT_MARKERS)
+
 
 def _minimal_r2_chart_state(chart_state: Optional[dict]) -> Optional[dict]:
     """R1：round2 用的精簡 chart_state。
@@ -1359,13 +1373,17 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
         chart_screenshot: Optional[str] = None,
         r2_mode: bool = False,
     ) -> LLMResponse:
-        """使用 stream-json 模式逐行讀取，避免整體 timeout"""
+        """使用 stream-json 模式逐行讀取。
+
+        v149：首個輸出快速失敗（120s）+ 限流偵測退避重試。
+        舊版對「首個輸出」也套用 1200s timeout → LLM 限流/卡住時要硬等 20 分鐘。
+        改成：首 token 120s 無回應即視為卡住/限流，並行 drain stderr 拿原因，
+        指數退避重試最多 2 次，最終回傳清楚錯誤訊息給用戶（而非靜默 20 分）。
+        """
         import os
         import tempfile
 
-        proc = None
         sys_prompt_file = None
-
         try:
             sys_prompt = self._build_system_message(
                 chart_state, system_prompt, include_tools=not force_text, r2_mode=r2_mode,
@@ -1376,6 +1394,77 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
                 f.write(sys_prompt)
                 sys_prompt_file = f.name
 
+            _BACKOFFS = [5, 15]          # 限流退避秒數（最多重試 len 次）
+            _MAX_ATTEMPTS = len(_BACKOFFS) + 1
+            for attempt in range(_MAX_ATTEMPTS):
+                full_text, usage, result_data, stderr_text, no_output = (
+                    await self._run_cli_attempt(user_prompt, sys_prompt_file)
+                )
+
+                if full_text:
+                    if not usage:
+                        usage = TokenUsage(
+                            prompt_tokens=0, completion_tokens=0, total_tokens=0,
+                            model=self.model, provider="claude_subscription",
+                        )
+                    clean_text, function_calls = self._parse_tool_calls(full_text)
+                    return LLMResponse(
+                        message=clean_text,
+                        function_calls=function_calls,
+                        raw_response=result_data,
+                        usage=usage,
+                    )
+
+                # 空回應：判斷是否限流/卡住 → 退避重試
+                rate_limited = no_output or _looks_rate_limited(stderr_text)
+                if rate_limited and attempt < _MAX_ATTEMPTS - 1:
+                    wait_s = _BACKOFFS[attempt]
+                    logger.warning(
+                        f"Claude CLI 無回應/疑似限流（第 {attempt + 1} 次），{wait_s}s 後退避重試。"
+                        f"stderr={stderr_text.strip()[:300]!r}"
+                    )
+                    await asyncio.sleep(wait_s)
+                    continue
+
+                reason = (
+                    stderr_text.strip()[:200]
+                    or ("首個輸出逾時無回應（疑似限流/忙碌）" if no_output else "回應為空")
+                )
+                logger.error(f"Claude CLI 最終失敗（attempt {attempt + 1}）：{reason}")
+                return LLMResponse(
+                    message=f"⚠️ LLM 服務無回應或限流，請稍後重試（原因：{reason}）"
+                )
+
+            return LLMResponse(message="⚠️ LLM 服務無回應，請稍後重試")
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"Claude CLI 請求失敗: {e}")
+            return LLMResponse(message=f"Claude 訂閱制請求失敗: {str(e)}")
+        finally:
+            if sys_prompt_file:
+                try:
+                    os.unlink(sys_prompt_file)
+                except OSError:
+                    pass
+
+    async def _run_cli_attempt(
+        self, user_prompt: str, sys_prompt_file: str,
+    ) -> tuple[str, Optional["TokenUsage"], Optional[dict], str, bool]:
+        """跑一次 Claude CLI。回傳 (full_text, usage, result_data, stderr_text, no_output)。
+
+        no_output=True 表示「首個輸出 120s 內零回應」（疑似限流/卡住）。
+        並行 drain stderr：(a) 避免 stderr pipe-buffer 填滿導致 CLI 阻塞，
+        (b) 拿到真正的失敗原因（限流訊息常寫在 stderr）。
+        """
+        _FIRST_LINE_TIMEOUT = 120   # 尚未收到任何輸出時：快速失敗
+        _IDLE_TIMEOUT = 300         # 已開始輸出後：行與行間最大間隔
+
+        proc = None
+        stderr_task = None
+        stderr_chunks: list[bytes] = []
+        try:
             proc = await asyncio.create_subprocess_exec(
                 "claude", "-p",
                 "--output-format", "stream-json",
@@ -1393,24 +1482,41 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
             await proc.stdin.drain()
             proc.stdin.close()
 
+            async def _drain_stderr() -> None:
+                try:
+                    while True:
+                        chunk = await proc.stderr.read(4096)
+                        if not chunk:
+                            break
+                        stderr_chunks.append(chunk)
+                except Exception:
+                    pass
+
+            stderr_task = asyncio.create_task(_drain_stderr())
+
             full_text = ""
             usage = None
             result_data = None
-            # v138：原 600s 對 v132 編排管線（5 維度並行，14 分鐘是常態）太緊
-            # 拉到 1200s（20 分鐘）與前端 STREAM_TIMEOUT_MS=1200000 (ms) 對齊
-            _line_timeout = 1200
+            got_first = False
+            no_output = False
 
             while True:
+                timeout = _IDLE_TIMEOUT if got_first else _FIRST_LINE_TIMEOUT
                 try:
-                    line = await asyncio.wait_for(
-                        proc.stdout.readline(), timeout=_line_timeout,
-                    )
+                    line = await asyncio.wait_for(proc.stdout.readline(), timeout=timeout)
                 except asyncio.TimeoutError:
-                    logger.warning(f"Claude CLI stream 逐行讀取超時（{_line_timeout}s 無新輸出）")
+                    if not got_first:
+                        no_output = True
+                        logger.warning(
+                            f"Claude CLI 首個輸出 {_FIRST_LINE_TIMEOUT}s 無回應（疑似限流/忙碌）"
+                        )
+                    else:
+                        logger.warning(f"Claude CLI 行間 {_IDLE_TIMEOUT}s 無新輸出，結束讀取")
                     break
 
                 if not line:
                     break
+                got_first = True
 
                 try:
                     data = json.loads(line)
@@ -1418,42 +1524,29 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
                     continue
 
                 evt_type = data.get("type")
-
                 if evt_type == "stream_event":
                     event = data.get("event", {})
                     if event.get("type") == "content_block_delta":
                         delta = event.get("delta", {})
                         if delta.get("type") == "text_delta":
                             full_text += delta.get("text", "")
-
                 elif evt_type == "result":
                     full_text = data.get("result", full_text)
-                    usage_data = data.get("usage", {})
-                    usage = self._build_usage(usage_data, self.model)
+                    usage = self._build_usage(data.get("usage", {}), self.model)
                     result_data = data
 
-            await proc.wait()
+            # 讓 stderr 收尾（拿完整錯誤原因，尤其限流訊息），最多等 2s
+            try:
+                await asyncio.wait_for(stderr_task, timeout=2)
+            except (asyncio.TimeoutError, Exception):
+                pass
 
-            if not full_text:
-                return LLMResponse(message="Claude CLI 回應為空")
+            stderr_text = b"".join(stderr_chunks).decode("utf-8", "replace")
+            return full_text, usage, result_data, stderr_text, no_output
 
-            if not usage:
-                usage = TokenUsage(
-                    prompt_tokens=0, completion_tokens=0, total_tokens=0,
-                    model=self.model, provider="claude_subscription",
-                )
-
-            clean_text, function_calls = self._parse_tool_calls(full_text)
-
-            return LLMResponse(
-                message=clean_text,
-                function_calls=function_calls,
-                raw_response=result_data,
-                usage=usage,
-            )
-
-        except (asyncio.CancelledError, Exception) as e:
-            # 被取消或出錯時，確保殺掉 CLI 子進程
+        finally:
+            if stderr_task and not stderr_task.done():
+                stderr_task.cancel()
             if proc and proc.returncode is None:
                 try:
                     proc.terminate()
@@ -1462,18 +1555,7 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
                     except asyncio.TimeoutError:
                         proc.kill()
                         await proc.wait()
-                    logger.info("Claude CLI 子進程已終止")
                 except Exception:
-                    pass
-            if isinstance(e, asyncio.CancelledError):
-                raise
-            logger.error(f"Claude CLI 請求失敗: {e}")
-            return LLMResponse(message=f"Claude 訂閱制請求失敗: {str(e)}")
-        finally:
-            if sys_prompt_file:
-                try:
-                    os.unlink(sys_prompt_file)
-                except OSError:
                     pass
 
     async def chat_stream(
@@ -1512,19 +1594,27 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
             await proc.stdin.drain()
             proc.stdin.close()
 
-            # v138：原 600s 對 v132 編排管線（5 維度並行，14 分鐘是常態）太緊
-            # 拉到 1200s（20 分鐘）與前端 STREAM_TIMEOUT_MS=1200000 (ms) 對齊
-            _line_timeout = 1200
+            # v149：首個輸出快速失敗（120s）；已開始輸出後行間放寬到 300s
+            # （舊版首 token 也套 1200s → 限流/卡住時硬等 20 分鐘）
+            _FIRST_LINE_TIMEOUT = 120
+            _IDLE_TIMEOUT = 300
+            got_first = False
 
             while True:
+                timeout = _IDLE_TIMEOUT if got_first else _FIRST_LINE_TIMEOUT
                 try:
                     line = await asyncio.wait_for(
-                        proc.stdout.readline(), timeout=_line_timeout,
+                        proc.stdout.readline(), timeout=timeout,
                     )
                 except asyncio.TimeoutError:
+                    if not got_first:
+                        logger.warning(
+                            f"Claude CLI streaming 首個輸出 {_FIRST_LINE_TIMEOUT}s 無回應（疑似限流/忙碌）"
+                        )
                     break
                 if not line:
                     break
+                got_first = True
 
                 try:
                     data = json.loads(line)
@@ -1624,20 +1714,29 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
             await proc.stdin.drain()
             proc.stdin.close()
 
-            # v138：原 600s 對 v132 編排管線（5 維度並行，14 分鐘是常態）太緊
-            # 拉到 1200s（20 分鐘）與前端 STREAM_TIMEOUT_MS=1200000 (ms) 對齊
-            _line_timeout = 1200
+            # v149：首個輸出快速失敗（120s）；已開始輸出後行間放寬到 300s
+            # （舊版首 token 也套 1200s → 限流/卡住時硬等 20 分鐘）
+            _FIRST_LINE_TIMEOUT = 120
+            _IDLE_TIMEOUT = 300
+            got_first = False
 
             while True:
+                timeout = _IDLE_TIMEOUT if got_first else _FIRST_LINE_TIMEOUT
                 try:
                     line = await asyncio.wait_for(
-                        proc.stdout.readline(), timeout=_line_timeout,
+                        proc.stdout.readline(), timeout=timeout,
                     )
                 except asyncio.TimeoutError:
-                    logger.warning(f"Claude CLI stream 逐行讀取超時（{_line_timeout}s 無新輸出）")
+                    if not got_first:
+                        logger.warning(
+                            f"Claude CLI stream 首個輸出 {_FIRST_LINE_TIMEOUT}s 無回應（疑似限流/忙碌）"
+                        )
+                    else:
+                        logger.warning(f"Claude CLI stream 行間 {_IDLE_TIMEOUT}s 無新輸出，結束讀取")
                     break
                 if not line:
                     break
+                got_first = True
 
                 try:
                     data = json.loads(line)

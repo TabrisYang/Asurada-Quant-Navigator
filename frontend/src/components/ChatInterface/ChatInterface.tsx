@@ -43,9 +43,34 @@ const ANALYSIS_ACTIONS: AnalysisAction[] = [
   { label: '族群分析', prompt: '分析 {symbol} 所屬族群的技術面、Breadth 與族群內個股相對強弱排名', mode: 'sector_analysis' },
   { label: '校準的最佳指標參數', prompt: '校準 {symbol} 的最佳指標參數', mode: 'calibrate' },
   { label: '規劃的分批進場價位', prompt: '規劃 {symbol} 的分批進場價位（依當前 regime 自動選配比策略）', mode: 'compute_laddered' },
-  // 一鍵連跑：6 條 sequence 涵蓋技術 + 基本面 + 族群 + 事件 + 校準 + 分批
-  { label: '一鍵連跑：技術 + 基本面 + 族群 + 事件 + 校準 + 分批', prompt: '對 {symbol} 進行全部分析', sequence: ['對 {symbol} 進行全部分析（v132 5 維度技術面編排）', '對 {symbol} 進行基本面分析', '分析 {symbol} 所屬族群的技術面與相對強弱', '分析 {symbol} 歷史大漲大跌前的共通特徵', '校準 {symbol} 的最佳指標參數', '規劃 {symbol} 的分批進場價位'] },
+  // 一鍵連跑：sequence 依標的型別動態組（見 buildRunAllSequence）。
+  // 此處 sequence 僅作「這是 sequence 按鈕」的判定旗標（內容會被動態版本取代）。
+  { label: '一鍵連跑：技術 + 基本面 + 事件 + 校準', prompt: '對 {symbol} 進行全部分析', sequence: ['對 {symbol} 進行全部分析（v132 5 維度技術面編排）'] },
 ];
+
+// v149：一鍵連跑改成 symbol-aware + 去冗餘。
+// - 去冗餘：移除「分批進場」步驟（步驟1 comprehensive 已強制 compute_laddered_entries
+//   並在 seg1 輸出分批表），避免重複多跑一通重 LLM 呼叫。
+// - Crypto：以「協議基本面概覽」取代台股月營收基本面；跳過台股族群（crypto 無此概念）。
+// - 回傳含 {symbol} 模板，由呼叫端做 replace。
+function buildRunAllSequence(sym: string): string[] {
+  const isTW = sym.toUpperCase().endsWith('/TWD');
+  if (isTW) {
+    return [
+      '對 {symbol} 進行全部分析（v132 5 維度技術面編排）',
+      '對 {symbol} 進行基本面分析',
+      '分析 {symbol} 所屬族群的技術面與相對強弱',
+      '分析 {symbol} 歷史大漲大跌前的共通特徵',
+      '校準 {symbol} 的最佳指標參數',
+    ];
+  }
+  return [
+    '對 {symbol} 進行全部分析（v132 5 維度技術面編排）',
+    '輸出 {symbol} 的協議基本面概覽（代幣經濟學 + 生態活躍度 + 技術路線圖含非即時免責）',
+    '分析 {symbol} 歷史大漲大跌前的共通特徵',
+    '校準 {symbol} 的最佳指標參數',
+  ];
+}
 
 function loadQuickQuestions(): string[] {
   try {
@@ -1086,7 +1111,7 @@ export default function ChatInterface() {
                   onClick={() => {
                     const sym = useChartStore.getState().symbol || 'BTC/USDT';
                     if (isSequence) {
-                      const seq = item.sequence!;
+                      const seq = buildRunAllSequence(sym);
                       setInput(seq[0].replace('{symbol}', sym));
                       setTimeout(() => handleSend(), 50);
                       for (let k = 1; k < seq.length; k++) {

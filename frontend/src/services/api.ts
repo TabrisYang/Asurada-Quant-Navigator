@@ -302,7 +302,7 @@ export function streamChatMessage(
               if (timeoutFired) {
                 // 超時：強制斷開 HTTP 連線，通知後端停止處理
                 controller.abort();
-                wrappedCallbacks.onError?.('分析連線無回應超過 600 秒，已自動斷開（如分析仍在進行請查看後端 log）');
+                wrappedCallbacks.onError?.(`LLM 長時間無回應（可能限流或忙碌），已等待 ${Math.round(STREAM_TIMEOUT_MS / 1000)} 秒後自動斷開。請稍後重試（如分析仍在進行請查看後端 log）`);
                 if (!doneEmitted) {
                   doneEmitted = true;
                   callbacks.onDone?.(undefined, { aborted: true, reason: 'timeout' });
