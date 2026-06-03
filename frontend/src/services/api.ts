@@ -837,6 +837,33 @@ export async function downloadTwScanRangeCSV(params: {
   URL.revokeObjectURL(url);
 }
 
+// ===== 台股 EPS 批次查詢（跨日追蹤表格的「上年度 / 最新季 EPS」欄位）=====
+
+export interface TwEpsEntry {
+  annual_prev?: number | null;
+  annual_prev_label?: string | null;
+  quarter_latest?: number | null;
+  quarter_latest_label?: string | null;
+  eps_trailing?: number | null;
+  pe_ttm?: number | null;
+  data_source?: 'twse' | 'yfinance' | 'none';
+  as_of?: string;
+  quality?: 'ok' | 'missing' | string;
+}
+
+export interface TwEpsBatchResponse {
+  data: Record<string, TwEpsEntry>;
+}
+
+/** 批次取 EPS（上年度年報 + 最新季報），後端 24h cache。 */
+export async function fetchTwEpsBatch(codes: string[]): Promise<TwEpsBatchResponse> {
+  if (codes.length === 0) return { data: {} };
+  const res = await api.get('/scanner/tw-stock/eps_batch', {
+    params: { codes: codes.join(',') },
+  });
+  return res.data as TwEpsBatchResponse;
+}
+
 // ===== 設定 API =====
 
 export async function configureLLM(
@@ -1772,7 +1799,7 @@ export async function fetchDownloadedSymbols(): Promise<{ symbol: string; record
 
 // ===== v132 編排管線 2 週評估狀態 =====
 
-export type V132EvalStatus = 'pending' | 'scheduled' | 'passed' | 'degraded' | 'error';
+export type V132EvalStatus = 'pending' | 'scheduled' | 'passed' | 'degraded' | 'rolled_back' | 'error';
 
 export interface V132EvalStatusResponse {
   status: V132EvalStatus;
@@ -1780,6 +1807,7 @@ export interface V132EvalStatusResponse {
   message?: string;
   evaluated_at?: string;
   has_degradation?: boolean;
+  rollback_acked_at?: string;
   baseline?: string;
   new_report?: string;
   log_tail?: string;
@@ -1802,6 +1830,7 @@ export interface V132RollbackResponse {
   ok: boolean;
   changed: boolean;
   needs_restart: boolean;
+  marker_acked?: boolean;
   message: string;
 }
 
@@ -1809,6 +1838,43 @@ export interface V132RollbackResponse {
 export async function triggerV132Rollback(): Promise<V132RollbackResponse> {
   const res = await api.post('/system/v132_rollback');
   return res.data as V132RollbackResponse;
+}
+
+// ===== 策略過期 / Regime 切換 偵測 =====
+
+export type StalenessStatus = 'ok' | 'no_prediction' | 'expired' | 'regime_changed' | 'error';
+
+export interface StalenessCheckResponse {
+  status: StalenessStatus;
+  prediction_id?: number;
+  prediction_created_at?: string;
+  expires_at?: string;
+  expired_hours_ago?: number;
+  from?: string;
+  to?: string;
+  confidence?: number;
+  current_regime?: string;
+  current_confidence?: number;
+  evaluated_at?: string;
+  message?: string;
+}
+
+/** 檢查最近一筆 active 預測是否過期或 regime 切換（StaleAnalysisBanner 用）。 */
+export async function fetchStalenessCheck(
+  symbol: string,
+  timeframe: string,
+): Promise<StalenessCheckResponse> {
+  try {
+    const res = await api.get('/predictions/staleness_check', {
+      params: { symbol, timeframe },
+    });
+    return res.data as StalenessCheckResponse;
+  } catch (err) {
+    return {
+      status: 'error',
+      message: extractErrorMessage(err, '策略時效檢查失敗'),
+    };
+  }
 }
 
 export default api;

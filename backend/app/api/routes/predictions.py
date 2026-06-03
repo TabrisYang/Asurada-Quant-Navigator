@@ -783,3 +783,101 @@ def _save_lessons_from_review(report: str, symbol: Optional[str] = None):
             source_question="prediction_review",
         )
         logger.info(f"覆盤教訓已存入知識庫: {lesson_text[:50]}...")
+
+
+# ─── 策略過期 / Regime 切換 偵測（前端 StaleAnalysisBanner 用）────
+
+
+@router.get("/staleness_check")
+async def get_staleness_check(
+    symbol: str = Query(..., description="當前 chart symbol，例如 BTC/USDT"),
+    timeframe: str = Query(..., description="當前 chart timeframe，例如 1d"),
+):
+    """檢查最近一筆 active 預測是否過期或 regime 切換。
+
+    回傳 status：
+      - no_prediction = symbol+timeframe 沒 active 預測
+      - expired       = now > expires_at（建議重跑）
+      - regime_changed= 當前 regime ≠ 預測時的 regime_std 且當前 confidence ≥ 0.5
+      - ok            = 仍有效
+      - error         = 內部錯誤（df 取不到 / 解析失敗）
+    """
+    try:
+        actives = prediction_tracker.get_active(symbol=symbol)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[staleness_check] 讀 predictions 失敗：{e}")
+        return {"status": "error", "message": f"讀預測失敗：{e}"}
+
+    latest = next((p for p in actives if p.get("timeframe") == timeframe), None)
+    if latest is None:
+        return {"status": "no_prediction"}
+
+    prediction_id = latest.get("id")
+    created_at = latest.get("created_at", "")
+    expires_at_str = latest.get("expires_at", "")
+    old_regime_std = latest.get("regime_std") or "unknown"
+    evaluated_at = datetime.now().isoformat()
+
+    # 1) 過期判斷
+    try:
+        expires_at = datetime.fromisoformat(expires_at_str)
+    except ValueError:
+        logger.warning(f"[staleness_check] expires_at 解析失敗：{expires_at_str}")
+        return {
+            "status": "error",
+            "message": f"expires_at 格式錯誤：{expires_at_str}",
+            "prediction_id": prediction_id,
+        }
+
+    now = datetime.now()
+    if now > expires_at:
+        delta_hours = round((now - expires_at).total_seconds() / 3600, 1)
+        return {
+            "status": "expired",
+            "prediction_id": prediction_id,
+            "prediction_created_at": created_at,
+            "expires_at": expires_at_str,
+            "expired_hours_ago": delta_hours,
+            "evaluated_at": evaluated_at,
+        }
+
+    # 2) Regime 切換判斷
+    try:
+        from app.data.fetchers.crypto_engine import crypto_engine
+        from app.core.regime_filter import summarize_current_regime
+        from app.core.regime_mapping import standardize_regime
+
+        df = crypto_engine.load_local_data(symbol, timeframe)
+        regime_info = summarize_current_regime(df)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[staleness_check] 算當前 regime 失敗：{e}")
+        return {
+            "status": "error",
+            "message": f"當前 regime 計算失敗：{e}",
+            "prediction_id": prediction_id,
+        }
+
+    cur_regime_raw = regime_info.get("regime", "unknown")
+    cur_confidence = float(regime_info.get("confidence", 0.0) or 0.0)
+    cur_regime_std = standardize_regime(cur_regime_raw)
+
+    if cur_regime_std != old_regime_std and cur_confidence >= 0.5:
+        return {
+            "status": "regime_changed",
+            "prediction_id": prediction_id,
+            "prediction_created_at": created_at,
+            "from": old_regime_std,
+            "to": cur_regime_std,
+            "confidence": cur_confidence,
+            "evaluated_at": evaluated_at,
+        }
+
+    return {
+        "status": "ok",
+        "prediction_id": prediction_id,
+        "prediction_created_at": created_at,
+        "expires_at": expires_at_str,
+        "current_regime": cur_regime_std,
+        "current_confidence": cur_confidence,
+        "evaluated_at": evaluated_at,
+    }

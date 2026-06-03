@@ -32,6 +32,7 @@ _V132_TARGET_DATE = date(2026, 5, 29)  # plist 內的 --target-date
 _BACKEND_DIR = Path(__file__).resolve().parents[3]  # routes/system_health.py → backend/
 _ENV_FILE = _BACKEND_DIR / ".env"
 _FLAG_KEY = "COMPREHENSIVE_PIPELINE_ENABLED"
+_ACK_KEY = "rollback_acked_at"
 
 
 @router.get("/health")
@@ -83,12 +84,13 @@ async def get_v132_eval_status():
     """v132 編排管線上線 2 週後的自動評估結果。
 
     回傳:
-      - status: "pending" | "scheduled" | "passed" | "degraded" | "error"
-      - pending   = 今日 < target 且無 marker（還沒到評估日）
-      - scheduled = 今日 >= target 但 marker 未生成（等下次 09:00 launchd 觸發）
-      - passed    = marker 存在 + has_degradation=False
-      - degraded  = marker 存在 + has_degradation=True（應該回滾）
-      - error     = marker 解析失敗或意外錯誤
+      - status: "pending" | "scheduled" | "passed" | "degraded" | "rolled_back" | "error"
+      - pending     = 今日 < target 且無 marker（還沒到評估日）
+      - scheduled   = 今日 >= target 但 marker 未生成（等下次 09:00 launchd 觸發）
+      - passed      = marker 存在 + has_degradation=False
+      - degraded    = marker 存在 + has_degradation=True（應該回滾）
+      - rolled_back = marker 存在 + has_degradation=True + 使用者已 ack 回滾（待重啟）
+      - error       = marker 解析失敗或意外錯誤
     """
     today = datetime.now().date()
     target_iso = _V132_TARGET_DATE.isoformat()
@@ -117,12 +119,21 @@ async def get_v132_eval_status():
 
     has_deg_raw = marker.get("has_degradation", "").lower()
     has_degradation = has_deg_raw in ("true", "1", "yes")
+    acked_at = marker.get(_ACK_KEY, "")
+
+    if has_degradation and acked_at:
+        status = "rolled_back"
+    elif has_degradation:
+        status = "degraded"
+    else:
+        status = "passed"
 
     return {
-        "status": "degraded" if has_degradation else "passed",
+        "status": status,
         "target_date": target_iso,
         "evaluated_at": marker.get("completed_at", ""),
         "has_degradation": has_degradation,
+        "rollback_acked_at": acked_at,
         "baseline": marker.get("baseline", ""),
         "new_report": marker.get("new", ""),
         "log_tail": _tail_log(_V132_LOG_FILE),
@@ -186,22 +197,69 @@ def _atomic_rewrite_env(set_flag_false: bool) -> tuple[bool, str]:
     return True, f"已將 {_FLAG_KEY} 改為 false"
 
 
+def _append_marker_ack() -> tuple[bool, str]:
+    """把使用者已 ack 回滾的時戳寫進 marker 檔。
+
+    Idempotent：marker 已含 rollback_acked_at → 不重複寫；marker 不存在 → 不寫。
+    回傳 (acked, message)：
+      acked=True  → 本次新加了 ack
+      acked=False → marker 不存在 / 已含 ack（皆視為正常）
+    """
+    if not _V132_MARKER_FILE.exists():
+        return False, "marker 不存在，無需 ack"
+
+    try:
+        original = _V132_MARKER_FILE.read_text(encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[v132_rollback] 讀 marker 失敗：{e}")
+        return False, f"讀 marker 失敗：{e}"
+
+    if _ACK_KEY + "=" in original:
+        return False, "marker 已 ack，無需重複"
+
+    suffix = "" if original.endswith("\n") else "\n"
+    new_text = f"{original}{suffix}{_ACK_KEY}={datetime.now().isoformat()}\n"
+
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8",
+            dir=_V132_MARKER_FILE.parent,
+            prefix=".shadow_pipeline_eval_done.", suffix=".tmp",
+            delete=False,
+        ) as tmp:
+            tmp.write(new_text)
+            tmp_path = Path(tmp.name)
+        os.replace(tmp_path, _V132_MARKER_FILE)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[v132_rollback] 寫 marker ack 失敗：{e}")
+        return False, f"寫 marker ack 失敗：{e}"
+
+    return True, "marker 已標記為 acked"
+
+
 @router.post("/v132_rollback")
 async def v132_rollback():
-    """把 .env 的 COMPREHENSIVE_PIPELINE_ENABLED 改 false。
+    """把 .env 的 COMPREHENSIVE_PIPELINE_ENABLED 改 false，並在 marker 加 ack 標記。
 
     不自動重啟後端 —— 自殺式 kill 有風險，且使用者可能正在用其他功能。
-    回傳指示使用者雙擊 .command 重啟。idempotent：已是 false 直接回 ok。
+    Idempotent：兩個動作各自獨立判斷是否已完成，重複呼叫安全。
+    Marker ack 後，前端輪詢會收到 status="rolled_back"，紅色橫幅轉淡灰提醒。
     """
-    changed, msg = _atomic_rewrite_env(set_flag_false=True)
-    logger.info(f"[v132_rollback] changed={changed}, msg={msg}")
+    changed, env_msg = _atomic_rewrite_env(set_flag_false=True)
+    acked, ack_msg = _append_marker_ack()
+    logger.info(
+        f"[v132_rollback] env_changed={changed} ({env_msg}); marker_acked={acked} ({ack_msg})"
+    )
+
+    if changed:
+        message = f"{env_msg}。請雙擊 阿斯拉量化系統.command 重啟後端，新版即關閉。"
+    else:
+        message = f"{env_msg}。新版本來就沒開，無需重啟。"
+
     return {
         "ok": True,
         "changed": changed,
         "needs_restart": changed,
-        "message": (
-            f"{msg}。請雙擊 阿斯拉量化系統.command 重啟後端，新版即關閉。"
-            if changed
-            else f"{msg}。新版本來就沒開，無需重啟。"
-        ),
+        "marker_acked": acked,
+        "message": message,
     }

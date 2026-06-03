@@ -22,6 +22,7 @@ from fastapi.responses import Response
 from app.core.tw_bb_scanner import tw_bb_scanner
 from app.core.tw_scan_history import tw_scan_history
 from app.core.tw_track_range import export_to_csv, tw_track_range
+from app.data.fetchers.tw_fundamental import tw_fundamental
 from app.data.fetchers.tw_stock_engine import TwStockEngine
 
 
@@ -263,3 +264,57 @@ async def export_tw_bb_range(
             "Content-Disposition": f'attachment; filename="{filename}"',
         },
     )
+
+
+# ─── EPS 批次查詢（跨日追蹤表格的「上年度 / 最新季 EPS」欄位）────
+
+# In-memory cache：code → (timestamp, eps_dict)。TTL 1 天。
+_EPS_CACHE: dict[str, tuple[float, dict]] = {}
+_EPS_TTL_SECONDS = 24 * 3600
+_EPS_BATCH_CONCURRENCY = 8  # 並行抓 yfinance 上限，避免被 rate limit
+
+
+async def _get_eps_with_cache(code: str) -> dict:
+    """單檔 EPS 抓取 + cache。"""
+    import time
+    now = time.time()
+    cached = _EPS_CACHE.get(code)
+    if cached and now - cached[0] < _EPS_TTL_SECONDS:
+        return cached[1]
+    eps = await tw_fundamental.fetch_eps_breakdown(code)
+    _EPS_CACHE[code] = (now, eps)
+    return eps
+
+
+@router.get("/tw-stock/eps_batch")
+async def get_eps_batch(codes: str):
+    """批次取台股 EPS（上年度 + 最新季）。
+
+    Query:
+      codes — 逗號分隔的股票代號，例：codes=2330,2337,4967
+    回傳：
+      {"data": {"2330": {annual_prev, annual_prev_label, quarter_latest, quarter_latest_label, eps_trailing}, ...}}
+    Cache：in-memory 24h，失敗也快取（避免反覆打）。
+    """
+    code_list = [c.strip() for c in codes.split(",") if c.strip()]
+    if not code_list:
+        return {"data": {}}
+    if len(code_list) > 200:
+        raise HTTPException(status_code=400, detail="一次最多 200 檔")
+
+    sem = asyncio.Semaphore(_EPS_BATCH_CONCURRENCY)
+
+    async def _one(code: str) -> tuple[str, dict]:
+        async with sem:
+            return code, await _get_eps_with_cache(code)
+
+    results = await asyncio.gather(*(_one(c) for c in code_list), return_exceptions=True)
+
+    data: dict[str, dict] = {}
+    for r in results:
+        if isinstance(r, Exception):
+            logger.warning(f"[eps_batch] 抓取失敗：{r}")
+            continue
+        code, eps = r
+        data[code] = eps
+    return {"data": data}

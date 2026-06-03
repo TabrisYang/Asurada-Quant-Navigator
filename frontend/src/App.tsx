@@ -6,6 +6,7 @@ import TopBar from './components/TopBar';
 import OnboardingGuide, { useOnboarding } from './components/OnboardingGuide';
 import { ToastContainer } from './components/Toast';
 import V132EvalBanner from './components/V132EvalBanner';
+import StaleAnalysisBanner from './components/StaleAnalysisBanner';
 import { useChartStore } from './stores/chartStore';
 import { calculateIndicator } from './services/api';
 
@@ -168,6 +169,11 @@ function App() {
       {/* v132 編排管線 2 週評估 banner（pending 狀態下不渲染） */}
       <ErrorBoundary name="v132 評估狀態">
         <V132EvalBanner />
+      </ErrorBoundary>
+
+      {/* 策略過期 / Regime 切換 提醒 banner（ok / no_prediction 下不渲染） */}
+      <ErrorBoundary name="策略時效檢查">
+        <StaleAnalysisBanner />
       </ErrorBoundary>
 
       {/* 頂部工具列 */}

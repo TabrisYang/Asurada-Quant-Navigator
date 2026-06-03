@@ -1,11 +1,12 @@
 /** 阿斯拉量化系統 — v132 編排管線 2 週評估結果 banner。
  *
  * 掛在 App.tsx 頂部。讀後端 /api/system/v132_eval_status：
- *   pending   (今日<5/29 + 無 marker)  → 不渲染
- *   scheduled (今日≥5/29 + marker 未生成) → 細灰 banner
- *   passed    (marker + 無劣化)        → 綠 banner + ×關閉（localStorage 24h 不再顯示）
- *   degraded  (marker + 偵測到劣化)     → 紅 banner +「立即回滾」按鈕
- *   error     → 紅底錯誤訊息
+ *   pending     (今日<5/29 + 無 marker)       → 不渲染
+ *   scheduled   (今日≥5/29 + marker 未生成)   → 細灰 banner
+ *   passed      (marker + 無劣化)             → 綠 banner + ×關閉（localStorage 24h 不再顯示）
+ *   degraded    (marker + 偵測到劣化)         → 紅 banner +「立即回滾」按鈕
+ *   rolled_back (marker + 劣化 + 已 ack)      → 淡灰 banner「待重啟」+ ×關閉（24h）
+ *   error       → 紅底錯誤訊息
  */
 
 import { useState, useEffect, useCallback } from 'react';
@@ -16,14 +17,16 @@ import {
 import { toast } from './Toast';
 
 const POLL_INTERVAL_MS = 5 * 60 * 1000;  // 5 分鐘
-const DISMISSED_KEY = 'asura_v132_eval_passed_dismissed_at';
-const DISMISS_TTL_MS = 24 * 60 * 60 * 1000;  // passed 狀態 24h 內不再顯示
+const PASSED_DISMISSED_KEY = 'asura_v132_eval_passed_dismissed_at';
+const ROLLED_BACK_DISMISSED_KEY = 'asura_v132_eval_rolled_back_dismissed_at';
+const DISMISS_TTL_MS = 24 * 60 * 60 * 1000;  // passed / rolled_back 狀態 24h 內不再顯示
 
 const STYLE = {
-  scheduled: { bg: 'rgba(139,148,158,0.12)', border: '#8b949e', text: '#c9d1d9', icon: '⏳' },
-  passed:    { bg: 'rgba(63,185,80,0.12)',   border: '#3fb950', text: '#aff5b4', icon: '✅' },
-  degraded:  { bg: 'rgba(248,81,73,0.12)',   border: '#f85149', text: '#ffdcd7', icon: '⚠️' },
-  error:     { bg: 'rgba(210,153,34,0.12)',  border: '#d29922', text: '#ffe39e', icon: 'ℹ️' },
+  scheduled:   { bg: 'rgba(139,148,158,0.12)', border: '#8b949e', text: '#c9d1d9', icon: '⏳' },
+  passed:      { bg: 'rgba(63,185,80,0.12)',   border: '#3fb950', text: '#aff5b4', icon: '✅' },
+  degraded:    { bg: 'rgba(248,81,73,0.12)',   border: '#f85149', text: '#ffdcd7', icon: '⚠️' },
+  rolled_back: { bg: 'rgba(139,148,158,0.10)', border: '#6e7681', text: '#b1bac4', icon: '✅' },
+  error:       { bg: 'rgba(210,153,34,0.12)',  border: '#d29922', text: '#ffe39e', icon: 'ℹ️' },
 };
 
 export default function V132EvalBanner() {
@@ -44,18 +47,21 @@ export default function V132EvalBanner() {
     return () => clearInterval(t);
   }, [refresh]);
 
-  // passed 狀態：localStorage 記錄 24h 不再顯示
+  // passed / rolled_back 狀態：localStorage 記錄 24h 不再顯示（兩者 key 分開）
   useEffect(() => {
-    if (data?.status !== 'passed') {
+    if (data?.status !== 'passed' && data?.status !== 'rolled_back') {
       setDismissed(false);
       return;
     }
-    const dismissedAt = Number(localStorage.getItem(DISMISSED_KEY) || 0);
+    const key = data.status === 'passed' ? PASSED_DISMISSED_KEY : ROLLED_BACK_DISMISSED_KEY;
+    const dismissedAt = Number(localStorage.getItem(key) || 0);
     setDismissed(Date.now() - dismissedAt < DISMISS_TTL_MS);
   }, [data?.status]);
 
   const handleDismiss = () => {
-    localStorage.setItem(DISMISSED_KEY, String(Date.now()));
+    if (data?.status !== 'passed' && data?.status !== 'rolled_back') return;
+    const key = data.status === 'passed' ? PASSED_DISMISSED_KEY : ROLLED_BACK_DISMISSED_KEY;
+    localStorage.setItem(key, String(Date.now()));
     setDismissed(true);
   };
 
@@ -80,6 +86,7 @@ export default function V132EvalBanner() {
   if (!data) return null;
   if (data.status === 'pending') return null;
   if (data.status === 'passed' && dismissed) return null;
+  if (data.status === 'rolled_back' && dismissed) return null;
 
   const style = STYLE[data.status as keyof typeof STYLE] ?? STYLE.error;
 
@@ -117,6 +124,13 @@ export default function V132EvalBanner() {
               {' '}— 建議立即回滾到舊版。
             </>
           )}
+          {data.status === 'rolled_back' && (
+            <>
+              <strong>v132 已回滾</strong>
+              {data.rollback_acked_at && <>（acked at {data.rollback_acked_at}）</>}
+              {' '}— 請雙擊 阿斯拉量化系統.command 重啟後端讓設定生效。
+            </>
+          )}
           {data.status === 'error' && <>v132 評估狀態讀取失敗：{data.message || '未知錯誤'}</>}
         </span>
 
@@ -148,7 +162,7 @@ export default function V132EvalBanner() {
           </button>
         )}
 
-        {data.status === 'passed' && (
+        {(data.status === 'passed' || data.status === 'rolled_back') && (
           <button
             onClick={handleDismiss}
             aria-label="關閉提示"

@@ -18,6 +18,7 @@ import {
   getTwScanResult,
   revisitTwScan,
   deleteTwScan,
+  fetchTwEpsBatch,
   type TwScanResult,
   type TwScanProgress,
   type TwScanDone,
@@ -28,6 +29,7 @@ import {
   type TwTrackProgress,
   type TwTrackSymbol,
   type TwDailyFeatures,
+  type TwEpsEntry,
 } from '../../services/api';
 import { toast } from '../Toast';
 
@@ -43,12 +45,129 @@ const PCTILE_OPTIONS = [
   { value: 25, label: '極寬鬆 (<25%)' },
 ];
 
+// 視窗尺寸與位置限制 — localStorage 同時儲存 size + pos
+const PANEL_SIZE_STORAGE_KEY = 'asura_twscan_panel_size';
+const PANEL_MIN_WIDTH = 600;
+const PANEL_MIN_HEIGHT = 400;
+const PANEL_DEFAULT_WIDTH = 1000;
+
+type ResizeDirection = 'n' | 's' | 'e' | 'w' | 'se';
+interface PanelState { width: number; height: number; left: number; top: number; }
+
+function _defaultPanelState(): PanelState {
+  const w = Math.min(PANEL_DEFAULT_WIDTH, window.innerWidth);
+  const h = Math.floor(window.innerHeight * 0.9);
+  return {
+    width: w,
+    height: h,
+    left: Math.max(0, Math.floor((window.innerWidth - w) / 2)),
+    top: Math.max(0, Math.floor(window.innerHeight * 0.05)),
+  };
+}
+
+function _clampPanelState(s: PanelState): PanelState {
+  const w = Math.max(PANEL_MIN_WIDTH, Math.min(window.innerWidth, s.width));
+  const h = Math.max(PANEL_MIN_HEIGHT, Math.min(window.innerHeight, s.height));
+  const left = Math.max(0, Math.min(window.innerWidth - w, s.left));
+  const top = Math.max(0, Math.min(window.innerHeight - h, s.top));
+  return { width: w, height: h, left, top };
+}
+
+function _loadPanelState(): PanelState {
+  try {
+    const raw = localStorage.getItem(PANEL_SIZE_STORAGE_KEY);
+    if (raw) {
+      const p = JSON.parse(raw);
+      if (typeof p?.width === 'number' && typeof p?.height === 'number') {
+        const def = _defaultPanelState();
+        return _clampPanelState({
+          width: p.width,
+          height: p.height,
+          left: typeof p.left === 'number' ? p.left : def.left,
+          top: typeof p.top === 'number' ? p.top : def.top,
+        });
+      }
+    }
+  } catch {
+    /* ignore parse errors */
+  }
+  return _defaultPanelState();
+}
+
 export default function TwBBScanPanel() {
   const show = useChartStore((s) => s.showTwScanPanel);
   const setShow = useChartStore((s) => s.setShowTwScanPanel);
   const setSymbol = useChartStore((s) => s.setSymbol);
   const setTimeframe = useChartStore((s) => s.setTimeframe);
   const setPendingChatMessage = useChartStore((s) => s.setPendingChatMessage);
+
+  // 視窗大小與位置（可拖四邊 + 右下角、localStorage 持久化）
+  const [panelState, setPanelState] = useState<PanelState>(() => _loadPanelState());
+  const resizeRef = useRef({
+    active: false,
+    direction: 'se' as ResizeDirection,
+    startX: 0, startY: 0,
+    startW: 0, startH: 0, startLeft: 0, startTop: 0,
+  });
+
+  const handleResizeMove = useCallback((e: MouseEvent) => {
+    const ref = resizeRef.current;
+    if (!ref.active) return;
+    const dx = e.clientX - ref.startX;
+    const dy = e.clientY - ref.startY;
+
+    let { startW: w, startH: h, startLeft: left, startTop: top } = ref;
+    const d = ref.direction;
+    if (d === 'e' || d === 'se') w = ref.startW + dx;
+    if (d === 's' || d === 'se') h = ref.startH + dy;
+    if (d === 'w') { left = ref.startLeft + dx; w = ref.startW - dx; }
+    if (d === 'n') { top = ref.startTop + dy; h = ref.startH - dy; }
+
+    // 左/上拉到 min 時：固定 left/top 不再變動，避免 modal 反向偏移
+    if (d === 'w' && w < PANEL_MIN_WIDTH) {
+      left = ref.startLeft + (ref.startW - PANEL_MIN_WIDTH);
+      w = PANEL_MIN_WIDTH;
+    }
+    if (d === 'n' && h < PANEL_MIN_HEIGHT) {
+      top = ref.startTop + (ref.startH - PANEL_MIN_HEIGHT);
+      h = PANEL_MIN_HEIGHT;
+    }
+
+    setPanelState(_clampPanelState({ width: w, height: h, left, top }));
+  }, []);
+
+  const handleResizeEnd = useCallback(() => {
+    resizeRef.current.active = false;
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    document.removeEventListener('mousemove', handleResizeMove);
+    document.removeEventListener('mouseup', handleResizeEnd);
+    setPanelState((s) => {
+      try { localStorage.setItem(PANEL_SIZE_STORAGE_KEY, JSON.stringify(s)); } catch { /* ignore */ }
+      return s;
+    });
+  }, [handleResizeMove]);
+
+  const startResize = useCallback((direction: ResizeDirection, cursor: string) =>
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      resizeRef.current = {
+        active: true,
+        direction,
+        startX: e.clientX,
+        startY: e.clientY,
+        startW: panelState.width,
+        startH: panelState.height,
+        startLeft: panelState.left,
+        startTop: panelState.top,
+      };
+      document.body.style.cursor = cursor;
+      document.body.style.userSelect = 'none';
+      document.addEventListener('mousemove', handleResizeMove);
+      document.addEventListener('mouseup', handleResizeEnd);
+    },
+  [panelState, handleResizeMove, handleResizeEnd]);
 
   // 分頁
   const [tab, setTab] = useState<PanelTab>('scan');
@@ -267,7 +386,7 @@ export default function TwBBScanPanel() {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center"
+      className="fixed inset-0 z-50"
       style={{ background: 'rgba(0,0,0,0.6)' }}
       onClick={() => !scanning && handleClose()}
     >
@@ -276,12 +395,50 @@ export default function TwBBScanPanel() {
         style={{
           background: 'var(--bg-secondary)',
           border: '1px solid var(--border-color)',
-          width: '1000px',
-          maxWidth: '95vw',
-          maxHeight: '90vh',
+          position: 'absolute',
+          left: `${panelState.left}px`,
+          top: `${panelState.top}px`,
+          width: `${panelState.width}px`,
+          height: `${panelState.height}px`,
         }}
         onClick={(e) => e.stopPropagation()}
       >
+        {/* 四邊 + 右下角 resize handles（localStorage 持久化大小與位置） */}
+        <div
+          onMouseDown={startResize('n', 'ns-resize')}
+          title="往上/下拖拉以改變高度"
+          style={{ position: 'absolute', top: 0, left: 8, right: 8, height: 4, cursor: 'ns-resize', zIndex: 20 }}
+        />
+        <div
+          onMouseDown={startResize('s', 'ns-resize')}
+          title="往上/下拖拉以改變高度"
+          style={{ position: 'absolute', bottom: 0, left: 8, right: 8, height: 4, cursor: 'ns-resize', zIndex: 20 }}
+        />
+        <div
+          onMouseDown={startResize('w', 'ew-resize')}
+          title="往左/右拖拉以改變寬度"
+          style={{ position: 'absolute', left: 0, top: 8, bottom: 8, width: 4, cursor: 'ew-resize', zIndex: 20 }}
+        />
+        <div
+          onMouseDown={startResize('e', 'ew-resize')}
+          title="往左/右拖拉以改變寬度"
+          style={{ position: 'absolute', right: 0, top: 8, bottom: 8, width: 4, cursor: 'ew-resize', zIndex: 20 }}
+        />
+        <div
+          onMouseDown={startResize('se', 'nwse-resize')}
+          title="拖拉以同時調整寬高"
+          style={{
+            position: 'absolute',
+            right: 0,
+            bottom: 0,
+            width: 16,
+            height: 16,
+            cursor: 'nwse-resize',
+            zIndex: 21,
+            background:
+              'linear-gradient(135deg, transparent 0%, transparent 45%, var(--border-color) 45%, var(--border-color) 55%, transparent 55%, transparent 70%, var(--border-color) 70%, var(--border-color) 80%, transparent 80%)',
+          }}
+        />
         {/* ===== 標題列 + Tab 切換 ===== */}
         <div
           className="flex items-center justify-between px-6 py-3 border-b"
@@ -739,8 +896,11 @@ function Sparkline({ symbol, metric, scanDates }: {
   );
 }
 
+// 預設回推天數：含頭含尾總共會顯示 10 個日期欄位
+const DEFAULT_TRACK_LOOKBACK_DAYS = 9;
+
 function TrackView({ pctileThreshold }: { pctileThreshold: number }) {
-  const [startDate, setStartDate] = useState(() => _daysAgoISO(7));
+  const [startDate, setStartDate] = useState(() => _daysAgoISO(DEFAULT_TRACK_LOOKBACK_DAYS));
   const [endDate, setEndDate] = useState(() => _todayISO());
   const [scope, setScope] = useState<TrackScope>('recent_scan');
   const [metric, setMetric] = useState<TrackMetric>('bb_pctile');
@@ -752,8 +912,26 @@ function TrackView({ pctileThreshold }: { pctileThreshold: number }) {
   const [csvLoading, setCsvLoading] = useState(false);
   // v127: 用戶可點 ✕ 暫時隱藏不想追蹤的標的（重新執行追蹤會復原）
   const [removedCodes, setRemovedCodes] = useState<Set<string>>(new Set());
+  // EPS 補抓：result 來後非同步補（不阻塞主流程，後端有 24h cache）
+  const [epsMap, setEpsMap] = useState<Record<string, TwEpsEntry>>({});
+  const [epsLoading, setEpsLoading] = useState(false);
 
   const abortRef = useRef<(() => void) | null>(null);
+
+  // result 變動 → 重抓 EPS（後端 cache 命中時近乎即時）
+  useEffect(() => {
+    if (!result || result.symbols.length === 0) {
+      setEpsMap({});
+      return;
+    }
+    let cancelled = false;
+    setEpsLoading(true);
+    fetchTwEpsBatch(result.symbols.map((s) => s.code))
+      .then((r) => { if (!cancelled) setEpsMap(r.data || {}); })
+      .catch((e) => { if (!cancelled) console.warn('[TrackView] EPS 抓取失敗', e?.message); })
+      .finally(() => { if (!cancelled) setEpsLoading(false); });
+    return () => { cancelled = true; };
+  }, [result]);
 
   // v127: 過濾掉用戶已刪除的標的
   const visibleSymbols = result
@@ -1008,6 +1186,24 @@ function TrackView({ pctileThreshold }: { pctileThreshold: number }) {
                 <th className="text-left py-2 px-2">首次符合</th>
                 <th className="text-center py-2 px-2">符合天數</th>
                 <th className="text-center py-2 px-2">走勢</th>
+                <th
+                  className="text-right py-2 px-2 whitespace-nowrap"
+                  title="最近一份完整年報的 Basic EPS（4 季加總、單位 NTD）。主源 FinMind v4 即時季報，失敗才走 yfinance；hover 個格可看具體年份、來源與抓取時間"
+                >
+                  上年度 EPS{epsLoading && <span style={{ marginLeft: 4, color: 'var(--text-secondary)' }}>…</span>}
+                </th>
+                <th
+                  className="text-right py-2 px-2 whitespace-nowrap"
+                  title="最新一季 Basic EPS（單季實際值，非 TTM 累計）。主源 FinMind"
+                >
+                  最新季 EPS
+                </th>
+                <th
+                  className="text-right py-2 px-2 whitespace-nowrap"
+                  title="當前本益比（PER）。主源 FinMind 即時 PER，失敗 fallback yfinance trailingPE"
+                >
+                  本益比
+                </th>
                 {result.scan_dates.map((d) => (
                   <th key={d} className="text-right py-2 px-2 whitespace-nowrap">{d.slice(5)}</th>
                 ))}
@@ -1037,6 +1233,35 @@ function TrackView({ pctileThreshold }: { pctileThreshold: number }) {
                   <td className="py-1.5 px-2 text-center">
                     <Sparkline symbol={s} metric={metric} scanDates={result.scan_dates} />
                   </td>
+                  {(() => {
+                    const eps = epsMap[s.code];
+                    const ok = eps?.quality === 'ok';
+                    const annual = ok ? eps?.annual_prev : null;
+                    const quarter = ok ? eps?.quarter_latest : null;
+                    const pe = eps?.pe_ttm;
+                    const sourceTag = eps?.data_source && eps.data_source !== 'none'
+                      ? eps.data_source.toUpperCase() : '';
+                    const asOf = eps?.as_of ? ` · 抓取於 ${eps.as_of.slice(0, 10)}` : '';
+                    const annualTip = eps?.annual_prev_label
+                      ? `${eps.annual_prev_label} 年報${sourceTag ? ' · ' + sourceTag : ''}${asOf}`
+                      : '';
+                    const quarterTip = eps?.quarter_latest_label
+                      ? `${eps.quarter_latest_label} 季報${sourceTag ? ' · ' + sourceTag : ''}${asOf}`
+                      : '';
+                    return (
+                      <>
+                        <td className="py-1.5 px-2 text-right whitespace-nowrap text-xs" title={annualTip}>
+                          {typeof annual === 'number' ? annual.toFixed(2) : '—'}
+                        </td>
+                        <td className="py-1.5 px-2 text-right whitespace-nowrap text-xs" title={quarterTip}>
+                          {typeof quarter === 'number' ? quarter.toFixed(2) : '—'}
+                        </td>
+                        <td className="py-1.5 px-2 text-right whitespace-nowrap text-xs" title="TTM 本益比（yfinance）">
+                          {typeof pe === 'number' ? pe.toFixed(2) : '—'}
+                        </td>
+                      </>
+                    );
+                  })()}
                   {result.scan_dates.map((d) => {
                     const feats = s.daily_features[d];
                     const text = _formatMetric(metric, feats);
