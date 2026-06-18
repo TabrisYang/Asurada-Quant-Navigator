@@ -8,7 +8,7 @@
  * - 模型清單完全來自 API 動態偵測，不寫死
  */
 
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, type CSSProperties } from 'react';
 import { useChartStore } from '../../stores/chartStore';
 import {
   configureLLM, testLLMConnection, discoverModels, exportKnowledgePDF,
@@ -419,6 +419,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
               <code style={{ background: 'var(--bg-tertiary)', padding: '0 4px', borderRadius: 3 }}>claude setup-token</code>{' '}
               ，把產生的 token 貼到下方，分析就計入你自己的 Claude 訂閱。
             </p>
+            <SubscriptionTokenGuide />
             <div className="flex gap-2">
               <input
                 type="password"
@@ -1170,6 +1171,88 @@ function StepLabel({ step, text }: { step: number; text: string }) {
       </span>
       {text}
     </h3>
+  );
+}
+
+
+/** Claude 訂閱制 token 取得教學（可展開）— 給不熟 Claude Code 的使用者自助取得並貼上 token */
+function SubscriptionTokenGuide() {
+  const [open, setOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const copyCmd = async (cmd: string) => {
+    try {
+      await navigator.clipboard.writeText(cmd);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // 剪貼簿不可用（如非 https）時忽略，使用者仍可手動複製
+    }
+  };
+
+  const codeStyle: CSSProperties = {
+    background: 'var(--bg-primary, #0d1117)',
+    padding: '1px 6px',
+    borderRadius: 4,
+    fontFamily: 'monospace',
+    color: 'var(--text-primary)',
+  };
+
+  return (
+    <div className="mb-2">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="text-xs cursor-pointer flex items-center gap-1 hover:opacity-80"
+        style={{ color: 'var(--accent-blue)', background: 'none', border: 'none', padding: 0 }}
+      >
+        <span>{open ? '▾' : '▸'}</span>
+        <span>❓ 我沒有 token？看如何取得（約 1 分鐘）</span>
+      </button>
+
+      {open && (
+        <div
+          className="mt-2 p-3 rounded-lg text-xs leading-relaxed"
+          style={{ background: 'var(--bg-tertiary)', color: 'var(--text-secondary)' }}
+        >
+          <p className="mb-2" style={{ color: 'var(--text-primary)' }}>
+            前提：需有 Claude <strong>Pro / Max 訂閱</strong>，且自己電腦已安裝 <strong>Claude Code</strong>。
+          </p>
+          <p className="mb-1">
+            尚未安裝 Claude Code？在終端機執行：<br />
+            <code style={codeStyle}>npm i -g @anthropic-ai/claude-code</code>
+          </p>
+
+          <div className="mt-3 mb-1" style={{ color: 'var(--text-primary)' }}>步驟：</div>
+          <ol className="list-decimal ml-4 space-y-1.5">
+            <li>
+              在<strong>自己電腦</strong>的終端機執行：
+              <div className="flex items-center gap-2 mt-1">
+                <code style={codeStyle}>claude setup-token</code>
+                <button
+                  onClick={() => copyCmd('claude setup-token')}
+                  className="px-2 py-0.5 rounded cursor-pointer hover:opacity-80"
+                  style={{ background: 'var(--accent-blue)', color: '#fff', fontSize: 11 }}
+                >
+                  {copied ? '✓ 已複製' : '複製指令'}
+                </button>
+              </div>
+            </li>
+            <li>瀏覽器會跳出 → 登入自己的 Claude 帳號並授權。</li>
+            <li>
+              終端機會印出一長串 <code style={codeStyle}>sk-ant-oat01-…</code>，複製它。
+            </li>
+            <li>貼到上方的 token 輸入框 → 點「偵測模型」選一個模型 → 「測試連線」→「儲存」。</li>
+          </ol>
+
+          <div className="mt-3 mb-1" style={{ color: 'var(--text-primary)' }}>常見問題：</div>
+          <ul className="list-disc ml-4 space-y-1">
+            <li>沒有 Claude Code 或沒有 Pro/Max 訂閱 → 改用「Anthropic Claude (API Key)」供應商。</li>
+            <li>儲存後 24 小時 session 會過期，回設定再貼一次同一串 token 即可（token 本身長效）。</li>
+            <li>⚠️ 這串 token 等同你的 Claude 帳號存取權，請只貼給你信任的服務。</li>
+          </ul>
+        </div>
+      )}
+    </div>
   );
 }
 
