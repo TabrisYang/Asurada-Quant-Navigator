@@ -1236,10 +1236,46 @@ class ClaudeAdapter(BaseLLMAdapter):
 
 
 class ClaudeSubscriptionAdapter(BaseLLMAdapter):
-    """透過 claude CLI 使用訂閱額度的適配器"""
+    """透過 claude CLI 使用訂閱額度的適配器。
 
-    def __init__(self, model: str = "sonnet"):
+    oauth_token：
+      - None（站長本機）→ 不帶特殊環境變數，CLI 走本機登入憑證（行為與改動前完全相同）。
+      - 有值（雲端/其他使用者）→ 以 CLAUDE_CODE_OAUTH_TOKEN 逐請求注入，並用獨立
+        CLAUDE_CONFIG_DIR 隔離，使每位使用者各自計入自己的訂閱額度、互不污染。
+        token 只存在記憶體+加密 store、只經 env 傳給子進程，永不寫 log / 不落地明文。
+    """
+
+    def __init__(self, model: str = "sonnet", oauth_token: Optional[str] = None):
         self.model = model
+        self.oauth_token = oauth_token or None
+
+    def _build_subprocess_env(self) -> tuple[Optional[dict], Optional[str]]:
+        """為 claude CLI 子進程建環境變數。
+
+        有 oauth_token → (env, 臨時 config 目錄)：用 CLAUDE_CODE_OAUTH_TOKEN 注入該使用者
+        的訂閱憑證，並以獨立 CLAUDE_CONFIG_DIR 隔離，避免多使用者互相污染。
+        無 oauth_token → (None, None)：env=None 時子進程沿用父進程環境（本機登入），
+        行為與改動前完全一致。回傳的 cfg_dir 由呼叫端在 finally 清除。
+        """
+        if not self.oauth_token:
+            return None, None
+        import os
+        import tempfile
+        cfg_dir = tempfile.mkdtemp(prefix="claude_cfg_")
+        env = {
+            **os.environ,
+            "CLAUDE_CODE_OAUTH_TOKEN": self.oauth_token,
+            "CLAUDE_CONFIG_DIR": cfg_dir,
+        }
+        return env, cfg_dir
+
+    @staticmethod
+    def _cleanup_cfg_dir(cfg_dir: Optional[str]) -> None:
+        """清除 per-user 臨時 config 目錄（含其中可能的憑證快取）。"""
+        if not cfg_dir:
+            return
+        import shutil
+        shutil.rmtree(cfg_dir, ignore_errors=True)
 
     # ── 共用 ──
 
@@ -1464,6 +1500,7 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
         proc = None
         stderr_task = None
         stderr_chunks: list[bytes] = []
+        env, cfg_dir = self._build_subprocess_env()
         try:
             proc = await asyncio.create_subprocess_exec(
                 "claude", "-p",
@@ -1476,6 +1513,7 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 limit=1024 * 1024,
+                env=env,
             )
 
             proc.stdin.write(user_prompt.encode("utf-8"))
@@ -1557,6 +1595,7 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
                         await proc.wait()
                 except Exception:
                     pass
+            self._cleanup_cfg_dir(cfg_dir)
 
     async def chat_stream(
         self, messages: list[dict], chart_state: Optional[dict] = None, system_prompt: Optional[str] = None,
@@ -1568,6 +1607,7 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
 
         proc = None
         sys_prompt_file = None
+        env, cfg_dir = self._build_subprocess_env()
 
         try:
             sys_prompt = self._build_system_message(chart_state, system_prompt, r2_mode=r2_mode)
@@ -1588,6 +1628,7 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 limit=1024 * 1024,
+                env=env,
             )
 
             proc.stdin.write(user_prompt.encode("utf-8"))
@@ -1657,6 +1698,7 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
                     os.unlink(sys_prompt_file)
                 except OSError:
                     pass
+            self._cleanup_cfg_dir(cfg_dir)
 
     async def chat_stream_events(
         self,
@@ -1686,6 +1728,7 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
         text_buffer = ""
         yielded_until = 0  # text_buffer[:yielded_until] 已 yield 過或屬於 tool_call
         usage: Optional[TokenUsage] = None
+        env, cfg_dir = self._build_subprocess_env()
 
         try:
             sys_prompt = self._build_system_message(
@@ -1708,6 +1751,7 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 limit=1024 * 1024,
+                env=env,
             )
 
             proc.stdin.write(user_prompt.encode("utf-8"))
@@ -1863,6 +1907,7 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
                     os.unlink(sys_prompt_file)
                 except OSError:
                     pass
+            self._cleanup_cfg_dir(cfg_dir)
 
 
 class OllamaAdapter(BaseLLMAdapter):
@@ -1978,11 +2023,15 @@ def create_adapter(
         return ClaudeAdapter(api_key=api_key, model=model_name)
 
     elif provider == "claude_subscription":
+        # api_key 在訂閱模式下「選填」攜帶 per-user OAuth token（claude setup-token 產生）。
+        # 有 token → 每位使用者各自計入自己的訂閱、不需機器登入；
+        # 無 token → 沿用本機 Claude Code 登入憑證（站長本機，行為不變）。
         from app.core.auth.claude_oauth import check_claude_cli_available
-        status = check_claude_cli_available()
+        oauth_token = api_key or None
+        status = check_claude_cli_available(require_login=not oauth_token)
         if not status["available"]:
             raise ValueError(status["error"] or "Claude CLI 不可用")
-        return ClaudeSubscriptionAdapter(model=model_name)
+        return ClaudeSubscriptionAdapter(model=model_name, oauth_token=oauth_token)
 
     elif provider == "ollama":
         return OllamaAdapter(

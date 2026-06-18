@@ -55,6 +55,7 @@ _INJECTION_RE = re.compile("|".join(_INJECTION_PATTERNS), re.IGNORECASE | re.UNI
 # 敏感欄位（不應在 LLM 回覆中出現的關鍵字 — 防 prompt leak）
 _SENSITIVE_FIELDS = [
     "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "FRED_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
     "session_token", "encryption_key", "private_key",
 ]
 
@@ -115,9 +116,9 @@ def scrub_response(text: str) -> str:
     out = text
     for field in _SENSITIVE_FIELDS:
         out = out.replace(field, "[REDACTED]")
-    # 簡易 API key 形態（sk-xxx, sk-ant-xxx）
-    out = re.sub(r"sk-[a-zA-Z0-9_-]{20,}", "sk-[REDACTED]", out)
+    # 簡易 API key 形態（sk-xxx, sk-ant-xxx；含 Claude 訂閱 OAuth token sk-ant-oat...）
     out = re.sub(r"sk-ant-[a-zA-Z0-9_-]{20,}", "sk-ant-[REDACTED]", out)
+    out = re.sub(r"sk-[a-zA-Z0-9_-]{20,}", "sk-[REDACTED]", out)
     return out
 
 

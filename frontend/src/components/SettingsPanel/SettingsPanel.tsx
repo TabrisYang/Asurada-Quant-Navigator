@@ -22,10 +22,10 @@ import MLPanel from './MLPanel';
 import PredictionDashboard from '../PredictionDashboard/PredictionDashboard';
 
 const LLM_PROVIDERS: { id: LLMProvider; name: string; requiresKey: boolean; desc: string }[] = [
-  { id: 'openai', name: 'OpenAI (GPT-4/4o)', requiresKey: true, desc: '最成熟的 Function Calling 支援' },
-  { id: 'gemini', name: 'Google Gemini', requiresKey: true, desc: '免費額度較高' },
-  { id: 'claude', name: 'Anthropic Claude', requiresKey: true, desc: '推理能力強' },
-  { id: 'claude_subscription', name: 'Claude 訂閱制', requiresKey: false, desc: '使用 Claude Code 訂閱額度（需已登入）' },
+  { id: 'openai', name: 'OpenAI (GPT-4/4o)', requiresKey: true, desc: '最成熟的 Function Calling（僅 API Key，無訂閱串接）' },
+  { id: 'gemini', name: 'Google Gemini', requiresKey: true, desc: '免費額度較高（僅 API Key，無訂閱串接）' },
+  { id: 'claude', name: 'Anthropic Claude (API Key)', requiresKey: true, desc: '推理能力強，按 token 計費' },
+  { id: 'claude_subscription', name: 'Claude 訂閱制', requiresKey: false, desc: '用 Claude 訂閱額度（本機登入，或各自帶 setup-token）' },
   { id: 'ollama', name: '本地 Ollama', requiresKey: false, desc: '完全免費，無需 API Key' },
 ];
 
@@ -103,7 +103,10 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
       const result = await discoverModels(
         llmConfig.provider,
         llmConfig.sessionId,
-        selectedProvider?.requiresKey ? apiKey : undefined,
+        // claude_subscription：帶上選填的 OAuth token（部署到無本機登入的伺服器時用得到）
+        (selectedProvider?.requiresKey || llmConfig.provider === 'claude_subscription')
+          ? (apiKey || undefined)
+          : undefined,
         llmConfig.provider === 'ollama' ? baseUrl : undefined,
       );
 
@@ -151,7 +154,10 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
       const result = await testLLMConnection(
         llmConfig.provider,
         llmConfig.sessionId,
-        selectedProvider?.requiresKey ? apiKey : undefined,
+        // claude_subscription：用選填的 OAuth token 實際驗證該使用者的訂閱能否連線
+        (selectedProvider?.requiresKey || llmConfig.provider === 'claude_subscription')
+          ? (apiKey || undefined)
+          : undefined,
         llmConfig.provider === 'ollama' ? baseUrl : undefined,
         selectedModel,
       );
@@ -185,7 +191,10 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
     try {
       const result = await configureLLM(
         llmConfig.provider,
-        selectedProvider?.requiresKey ? apiKey : undefined,
+        // claude_subscription：apiKey 此處承載「選填」的個人 OAuth token；留空則用本機登入
+        (selectedProvider?.requiresKey || llmConfig.provider === 'claude_subscription')
+          ? (apiKey || undefined)
+          : undefined,
         selectedModel,
         llmConfig.provider === 'ollama' ? baseUrl : undefined,
       );
@@ -403,18 +412,42 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
         {/* ===== Claude 訂閱制：無需 Key，直接偵測 ===== */}
         {llmConfig.provider === 'claude_subscription' && (
           <div className="mb-6">
-            <StepLabel step={2} text="偵測可用模型" />
+            <StepLabel step={2} text="（選填）訂閱 Token 並偵測模型" />
             <p className="text-xs mb-2" style={{ color: 'var(--text-secondary)' }}>
-              系統將自動使用 Claude Code 的訂閱憑證，無需輸入 API Key
+              留空 → 使用本機 Claude Code 登入憑證（自用）。<br />
+              想用自己的訂閱額度 → 在自己電腦執行{' '}
+              <code style={{ background: 'var(--bg-tertiary)', padding: '0 4px', borderRadius: 3 }}>claude setup-token</code>{' '}
+              ，把產生的 token 貼到下方，分析就計入你自己的 Claude 訂閱。
             </p>
-            <button
-              onClick={handleDiscoverModels}
-              disabled={!canDiscover}
-              className="px-4 py-2 rounded-lg text-sm cursor-pointer transition-opacity hover:opacity-80 whitespace-nowrap disabled:opacity-40"
-              style={{ background: 'var(--accent-blue)', color: '#fff' }}
-            >
-              {loadingModels ? '偵測中...' : '偵測模型'}
-            </button>
+            <div className="flex gap-2">
+              <input
+                type="password"
+                value={apiKey}
+                onChange={(e) => {
+                  setApiKey(e.target.value);
+                  setAvailableModels([]);
+                  setSelectedModel('');
+                  setTestStatus('idle');
+                  setTestMessage('');
+                  setModelsMessage('');
+                }}
+                placeholder="（選填）貼上 claude setup-token 產生的 token"
+                className="flex-1 px-4 py-2 rounded-lg text-sm border-none outline-none"
+                style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)' }}
+              />
+              <button
+                onClick={handleDiscoverModels}
+                disabled={!canDiscover}
+                className="px-4 py-2 rounded-lg text-sm cursor-pointer transition-opacity hover:opacity-80 whitespace-nowrap disabled:opacity-40"
+                style={{ background: 'var(--accent-blue)', color: '#fff' }}
+              >
+                {loadingModels ? '偵測中...' : '偵測模型'}
+              </button>
+            </div>
+            <p className="text-xs mt-2" style={{ color: 'var(--accent-orange, #d29922)' }}>
+              ⚠️ token 等同你的 Claude 帳號存取權，僅加密暫存於後端記憶體、24 小時過期、不寫入磁碟。
+              請確認你信任此服務再貼上；個人訂閱供他人共用可能違反 Anthropic 使用條款，風險請自行評估。
+            </p>
           </div>
         )}
 

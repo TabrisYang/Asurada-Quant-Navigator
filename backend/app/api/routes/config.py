@@ -69,8 +69,12 @@ async def configure_llm(request: LLMConfigRequest):
         }
 
     if provider == "claude_subscription":
+        # api_key 在此「選填」：使用者各自貼上自己的 OAuth token（claude setup-token 產生），
+        # 則計入該使用者自己的訂閱；留空則用本機 Claude Code 登入憑證（站長本機模式）。
+        # token 沿用 key_manager 的 Fernet 加密 + 24h TTL，僅存記憶體、不落地、不寫 log。
+        has_token = bool(request.api_key)
         session_id = key_manager.store_key(
-            api_key="",
+            api_key=request.api_key or "",
             provider=provider,
             model_name=request.model_name,
         )
@@ -78,7 +82,11 @@ async def configure_llm(request: LLMConfigRequest):
             "status": "ok",
             "provider": provider,
             "session_id": session_id,
-            "message": "已設定為 Claude 訂閱制（使用 Claude Code 登入憑證）",
+            "message": (
+                "已設定為 Claude 訂閱制（使用你提供的個人訂閱 token）"
+                if has_token
+                else "已設定為 Claude 訂閱制（使用本機 Claude Code 登入憑證）"
+            ),
         }
 
     # 需要 API Key 的供應商
@@ -221,25 +229,28 @@ async def list_llm_providers():
                 "id": "openai",
                 "name": "OpenAI (GPT-4/4o)",
                 "requires_key": True,
-                "description": "最成熟的 Function Calling 支援",
+                "description": "最成熟的 Function Calling 支援（僅支援 API Key，無訂閱串接）",
             },
             {
                 "id": "gemini",
                 "name": "Google Gemini",
                 "requires_key": True,
-                "description": "免費額度較高",
+                "description": "免費額度較高（僅支援 API Key，無訂閱串接）",
             },
             {
                 "id": "claude",
-                "name": "Anthropic Claude",
+                "name": "Anthropic Claude (API Key)",
                 "requires_key": True,
-                "description": "推理能力強",
+                "description": "推理能力強，按 token 計費",
             },
             {
                 "id": "claude_subscription",
                 "name": "Claude 訂閱制",
                 "requires_key": False,
-                "description": "使用 Claude Code 訂閱額度（需已登入 Claude Code）",
+                "description": (
+                    "用 Claude 訂閱額度（Pro/Max）。本機留空 token 即用本機 Claude Code 登入；"
+                    "雲端/他人使用時，各自貼上自己 `claude setup-token` 產生的 token，計入自己的訂閱。"
+                ),
             },
             {
                 "id": "ollama",

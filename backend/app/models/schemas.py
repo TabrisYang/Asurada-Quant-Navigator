@@ -120,6 +120,8 @@ class BacktestRequest(BaseModel):
 class LLMConfigRequest(BaseModel):
     """LLM 設定請求"""
     provider: LLMProvider
+    # api_key：一般供應商填 API Key；claude_subscription 則「選填」此處貼上個人
+    # OAuth token（自己機器跑 `claude setup-token` 產生），留空 = 用本機 Claude Code 登入憑證。
     api_key: Optional[str] = None          # 初次設定時傳入
     session_id: Optional[str] = None       # 已有 session 時使用
     model_name: Optional[str] = None
