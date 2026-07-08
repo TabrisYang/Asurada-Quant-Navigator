@@ -77,6 +77,39 @@ def _load_local_data(symbol: str, timeframe: str, start: str = None, end: str = 
     return engine.load_local_data(symbol, timeframe, start, end)
 
 
+def _describe_range(df, timeframe: str) -> dict:
+    """回報 df 實際涵蓋的時間範圍與根數（供回測範圍確認 / 結果透明化）。"""
+    if df is None or df.empty or "timestamp" not in df.columns:
+        return {"start": None, "end": None, "bars": 0, "timeframe": timeframe}
+    ts = pd.to_datetime(df["timestamp"])
+    return {
+        "start": ts.min().strftime("%Y-%m-%d"),
+        "end": ts.max().strftime("%Y-%m-%d"),
+        "bars": int(len(df)),
+        "timeframe": timeframe,
+    }
+
+
+def _needs_range_confirmation(symbol: str, timeframe: str, tool_label: str) -> Optional[dict]:
+    """回測家族工具的兩段式確認：未確認前先回報本地可用範圍，不執行。
+
+    回傳 needs_confirmation dict（呼叫端應直接 return）；若找不到資料回傳 error dict；
+    資料存在且應繼續執行則回傳 None。
+    """
+    df_all = _load_local_data(symbol, timeframe)
+    if df_all is None or df_all.empty:
+        return {"status": "error", "message": f"找不到 {symbol} {timeframe} 的本地數據，請先同步。"}
+    rng = _describe_range(df_all, timeframe)
+    return {
+        "status": "needs_confirmation",
+        "available_range": rng,
+        "message": (
+            f"本地 {symbol} {timeframe} 資料範圍 {rng['start']} ~ {rng['end']}，共 {rng['bars']} 根。"
+            f"要用「全部歷史」{tool_label}，還是指定區間？請確認後我再執行。"
+        ),
+    }
+
+
 # ========== 安全過濾 ==========
 
 INJECTION_PATTERNS = [
@@ -923,6 +956,10 @@ async def _exec_compare_strategies(args: dict, default_symbol: str, default_tf: 
     # Phase 1C：滾動視窗 — 預設只看最近 N 個月（給 LLM 對照「全歷史」vs「近期」）
     lookback_months = args.get("lookback_months", 12)
 
+    # 軌道C：兩段式確認 — 未確認前先回報本地可用範圍，不執行比較
+    if not bool(args.get("confirmed", False)):
+        return _needs_range_confirmation(symbol, timeframe, "策略比較")
+
     _MIN_BARS = 60
     _PREFER_MIN_BARS = 500
     df = _load_local_data(symbol, timeframe, start, end)
@@ -1008,6 +1045,10 @@ async def _exec_backtest(args: dict, default_symbol: str, default_tf: str) -> di
     start = args.get("start_date")
     end = args.get("end_date")
 
+    # 軌道C：兩段式確認 — 未確認前先回報本地可用範圍，不執行回測
+    if not bool(args.get("confirmed", False)):
+        return _needs_range_confirmation(symbol, timeframe, "回測")
+
     _MIN_BARS_BACKTEST = 60
     _PREFER_MIN_BARS = 500
     df = _load_local_data(symbol, timeframe, start, end)
@@ -1045,7 +1086,9 @@ async def _exec_backtest(args: dict, default_symbol: str, default_tf: str) -> di
         initial_capital=capital,
         leverage=leverage,
     )
-    return result.to_dict()
+    d = result.to_dict()
+    d["data_range"] = _describe_range(df, timeframe)  # 軌道C：透明化實際測試範圍
+    return d
 
 
 async def _exec_analyze_event_patterns(args: dict, default_symbol: str, default_tf: str) -> dict:
@@ -1865,6 +1908,10 @@ async def _exec_conditional_prob_scan(args: dict, default_symbol: str, default_t
     start = args.get("start_date")
     end = args.get("end_date")
 
+    # 軌道C：兩段式確認 — 未確認前先回報本地可用範圍，不執行掃描
+    if not bool(args.get("confirmed", False)):
+        return _needs_range_confirmation(symbol, timeframe, "條件機率掃描")
+
     df = _load_local_data(symbol, timeframe, start, end)
 
     # 使用全量歷史數據以提升統計顯著性；另外保留近期 15% 子集做對比
@@ -1912,11 +1959,32 @@ async def _exec_conditional_prob_scan(args: dict, default_symbol: str, default_t
                 continue
 
             valid_vals = arr[:valid_range][valid_mask]
-            lo, hi = float(np.percentile(valid_vals, 2)), float(np.percentile(valid_vals, 98))
-            if hi - lo < 1e-8:
-                continue
+            arr_valid = arr[:valid_range]
 
-            bin_edges = np.linspace(lo, hi, n_bins + 1)
+            # 離散特徵偵測（如 seasonal 的 day_of_week/month/is_month_start）：
+            # 整數且唯一值 ≤ 40 → 逐值分組；否則走連續等距分箱（RSI/MACD 等浮點不會誤觸）。
+            uniq = np.unique(valid_vals)
+            is_discrete = uniq.size <= 40 and np.allclose(uniq, np.round(uniq), atol=1e-9)
+
+            groups: list[tuple[str, np.ndarray]] = []
+            if is_discrete:
+                for gv in uniq:
+                    label = f"={int(round(gv))}"
+                    in_group = valid_mask & np.isclose(arr_valid, gv, atol=1e-9)
+                    groups.append((label, in_group))
+            else:
+                lo, hi = float(np.percentile(valid_vals, 2)), float(np.percentile(valid_vals, 98))
+                if hi - lo < 1e-8:
+                    continue
+                bin_edges = np.linspace(lo, hi, n_bins + 1)
+                for b in range(n_bins):
+                    bl, bh = bin_edges[b], bin_edges[b + 1]
+                    if b == n_bins - 1:
+                        in_group = valid_mask & (arr_valid >= bl) & (arr_valid <= bh)
+                    else:
+                        in_group = valid_mask & (arr_valid >= bl) & (arr_valid < bh)
+                    groups.append((f"{bl:.2f}~{bh:.2f}", in_group))
+
             bins = []
 
             # v105.5：先算 baseline 給 Bayesian shrinkage 用
@@ -1928,17 +1996,11 @@ async def _exec_conditional_prob_scan(args: dict, default_symbol: str, default_t
             best_prob = 0.0
             best_bin_label = ""
 
-            for b in range(n_bins):
-                bl, bh = bin_edges[b], bin_edges[b + 1]
-                if b == n_bins - 1:
-                    in_bin = valid_mask & (arr[:valid_range] >= bl) & (arr[:valid_range] <= bh)
-                else:
-                    in_bin = valid_mask & (arr[:valid_range] >= bl) & (arr[:valid_range] < bh)
-
+            for label, in_bin in groups:
                 count = int(in_bin.sum())
                 if count < 3:
                     bins.append({
-                        "range": f"{bl:.2f}~{bh:.2f}", "count": count,
+                        "range": label, "count": count,
                         "hit": 0, "prob_pct": None, "note": "樣本不足",
                     })
                     continue
@@ -1951,7 +2013,6 @@ async def _exec_conditional_prob_scan(args: dict, default_symbol: str, default_t
                 # 顯著性快速旗標：CI 若包含 baseline → lift 不顯著
                 ci_includes_baseline = ci_lo <= baseline_prob <= ci_hi
 
-                label = f"{bl:.2f}~{bh:.2f}"
                 bins.append({
                     "range": label, "count": count,
                     "hit": hit_count,

@@ -520,6 +520,64 @@ def calc_session(df: pd.DataFrame, params: dict) -> dict[str, list]:
 
 
 # =============================================
+# 16.5 季節性 / 日曆特徵（純數值離散 series，供回測 & 條件機率掃描）
+# =============================================
+@registry.register(
+    id="seasonal",
+    name="季節性日曆",
+    category="時間週期",
+    description=(
+        "從 K 線 timestamp（台北時間）萃取日曆/時間特徵，全部為離散整數 series，"
+        "可直接用於回測進場條件與條件機率掃描。日界以台北時間計算（非 UTC/交易所結算）。"
+        "series：day_of_month(1-31)、day_of_week(0=週一..6=週日)、month(1-12)、"
+        "hour_of_day(0-23)、is_month_start(該月第一根實際 K 線=1)、"
+        "is_month_end(該月最後一根=1)、week_of_month(1-6)、is_week_start(該週第一根=1)。"
+    ),
+    parameters={},
+    display_mode="sub_chart",
+    warmup_func=lambda p: 0,
+    visual_weight="minor",
+    pro_tip="季節性樣本量通常偏低（每月首根在 3.5 年約 42 個），務必看 Wilson CI 下界再下結論",
+)
+def calc_seasonal(df: pd.DataFrame, params: dict) -> dict[str, list]:
+    ts = pd.to_datetime(df["timestamp"])
+
+    day_of_month = ts.dt.day.astype(int)
+    day_of_week = ts.dt.dayofweek.astype(int)  # 0=Mon..6=Sun
+    month = ts.dt.month.astype(int)
+    hour_of_day = ts.dt.hour.astype(int)
+    year = ts.dt.year.astype(int)
+
+    # 「該月第一根實際 K 線」= (year, month) 相對前一根改變。
+    # 首根 shift→NaN → 比較為 True → 1（它啟始了資料中的首個月）。
+    ym = year * 12 + month
+    is_month_start = (ym != ym.shift(1)).astype(int)
+    is_month_start.iloc[0] = 1
+    is_month_end = (ym != ym.shift(-1)).astype(int)
+    is_month_end.iloc[-1] = 1
+
+    # week_of_month：以日曆日 1-7→1、8-14→2 …
+    week_of_month = ((day_of_month - 1) // 7 + 1).astype(int)
+
+    # 「該週第一根實際 K 線」= ISO 週數相對前一根改變
+    iso_week = ts.dt.isocalendar().week.astype(int)
+    iso_yw = year * 53 + iso_week
+    is_week_start = (iso_yw != iso_yw.shift(1)).astype(int)
+    is_week_start.iloc[0] = 1
+
+    return {
+        "day_of_month": day_of_month.tolist(),
+        "day_of_week": day_of_week.tolist(),
+        "month": month.tolist(),
+        "hour_of_day": hour_of_day.tolist(),
+        "is_month_start": is_month_start.tolist(),
+        "is_month_end": is_month_end.tolist(),
+        "week_of_month": week_of_month.tolist(),
+        "is_week_start": is_week_start.tolist(),
+    }
+
+
+# =============================================
 # 17. 凱利公式
 # =============================================
 @registry.register(
@@ -1367,6 +1425,23 @@ def calc_high(df: pd.DataFrame, params: dict) -> dict[str, list]:
 )
 def calc_low(df: pd.DataFrame, params: dict) -> dict[str, list]:
     return {"Low": _safe_list(df["low"])}
+
+
+@registry.register(
+    id="volume",
+    name="原始成交量",
+    category="價格",
+    description=(
+        "原始成交量數值，供回測以絕對量門檻作為條件。"
+        "注意：絕對量門檻僅在單一標的內有意義，跨標的比較請用 rel_vol（相對均量）。"
+    ),
+    parameters={},
+    display_mode="sub_chart",
+    warmup_func=lambda p: 0,
+    visual_weight="minor",
+)
+def calc_volume(df: pd.DataFrame, params: dict) -> dict[str, list]:
+    return {"Volume": _safe_list(df["volume"])}
 
 
 # =============================================

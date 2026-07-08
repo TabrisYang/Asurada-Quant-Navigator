@@ -201,75 +201,107 @@ def _resolve_series(name: str, calc: dict) -> Optional[str]:
     return None
 
 
+def _calc_indicator_series(spec: dict, df: pd.DataFrame, cache: dict) -> Optional[np.ndarray]:
+    """從 {indicator, series?, parameters?} 規格計算單一數值序列（np.array float）。
+
+    找不到指標或 series 回 None（呼叫端應視為條件永不成立）。共用於條件的
+    左側指標與 compare_to 右側指標，並沿用快取避免重複計算。
+
+    v145：series 解析強化 — LLM 常寫錯名（histogram vs Histogram、
+    Supertrend_Direction 不存在）。先精確匹配 → 大小寫/底線不敏感 → 常見別名。
+    """
+    indicator_id = spec.get("indicator", "").lower()
+    params = spec.get("parameters")
+    cache_key = (indicator_id, str(sorted(params.items())) if params else "")
+    if cache_key in cache:
+        calc = cache[cache_key]
+    else:
+        calc = registry.calculate(indicator_id, df, params)
+        cache[cache_key] = calc
+    if not calc:
+        logger.warning(f"回測：無法計算指標 {indicator_id}")
+        return None
+
+    series_name = spec.get("series") or list(calc.keys())[0]
+    resolved = _resolve_series(series_name, calc)
+    if resolved is None:
+        logger.error(
+            f"回測：指標 {indicator_id} 找不到 series '{series_name}'（可用：{list(calc.keys())}）"
+            f" → 該條件視為永不成立"
+        )
+        return None
+    return np.array(calc[resolved], dtype=float)
+
+
 def _build_condition_mask(
     df: pd.DataFrame, conditions: list[dict], logic: str = "AND",
     indicator_cache: dict | None = None,
 ) -> np.ndarray:
-    """將多個指標條件轉為 bool 遮罩向量（支援快取避免重複計算）"""
+    """將多個指標條件轉為 bool 遮罩向量（支援快取避免重複計算）。
+
+    每個 condition 的右側預設是固定數值 value；若帶 compare_to（一個指標規格
+    {indicator, series?, parameters?, mult?, offset?}），則改為「指標 vs 指標」逐根
+    比較，右值 = 該指標序列 * mult + offset。支援黃金交叉（sma 快線 cross_above 慢線）、
+    close > 自己的均線 等任意兩指標相比。between 僅支援固定數值（忽略 compare_to）。
+    """
     masks: list[np.ndarray] = []
     cache = indicator_cache if indicator_cache is not None else {}
 
     for cond in conditions:
-        indicator_id = cond.get("indicator", "").lower()
-        params = cond.get("parameters")
-        # 用 indicator_id + params 組成快取鍵
-        cache_key = (indicator_id, str(sorted(params.items())) if params else "")
-        if cache_key in cache:
-            calc = cache[cache_key]
-        else:
-            calc = registry.calculate(indicator_id, df, params)
-            cache[cache_key] = calc
-        if not calc:
-            logger.warning(f"回測：無法計算指標 {indicator_id}")
-            continue
-
-        # 支援 condition 中指定 series（如 ADX 的 "+DI"/"-DI"）
-        # v145：series 解析強化 — LLM 常寫錯名（histogram vs Histogram、Supertrend_Direction
-        # 不存在）。先精確匹配 → 大小寫/底線不敏感 → 常見別名。仍找不到 → all-False mask
-        # （不再 silent continue，避免 AND 邏輯被偷偷放寬；同時 log error 讓問題可見）。
-        series_name = cond.get("series") or list(calc.keys())[0]
-        resolved = _resolve_series(series_name, calc)
-        if resolved is None:
-            logger.error(
-                f"回測：指標 {indicator_id} 找不到 series '{series_name}'（可用：{list(calc.keys())}）"
-                f" → 該條件視為永不成立"
-            )
+        values = _calc_indicator_series(cond, df, cache)
+        if values is None:
             masks.append(np.zeros(len(df), dtype=bool))
             continue
-        values = np.array(calc[resolved], dtype=float)
 
         op = cond.get("operator", ">")
-        try:
-            val = float(cond.get("value", 0))
-        except (ValueError, TypeError):
-            logger.warning(f"回測：condition value '{cond.get('value')}' 無法轉為數字")
-            continue
+        compare_to = cond.get("compare_to")
+
+        # 決定右側 rhs（一律轉成與 values 等長的陣列，讓運算子統一處理）
+        if compare_to and op != "between":
+            rhs_vals = _calc_indicator_series(compare_to, df, cache)
+            if rhs_vals is None:
+                masks.append(np.zeros(len(df), dtype=bool))
+                continue
+            try:
+                mult = float(compare_to.get("mult", 1.0))
+                offset = float(compare_to.get("offset", 0.0))
+            except (ValueError, TypeError):
+                mult, offset = 1.0, 0.0
+            rhs = rhs_vals * mult + offset
+        else:
+            try:
+                val = float(cond.get("value", 0))
+            except (ValueError, TypeError):
+                logger.warning(f"回測：condition value '{cond.get('value')}' 無法轉為數字")
+                continue
+            rhs = np.full(len(values), val, dtype=float)
 
         if op == ">":
-            mask = values > val
+            mask = values > rhs
         elif op == "<":
-            mask = values < val
+            mask = values < rhs
         elif op == ">=":
-            mask = values >= val
+            mask = values >= rhs
         elif op == "<=":
-            mask = values <= val
+            mask = values <= rhs
         elif op == "==":
-            mask = np.isclose(values, val, atol=1e-6)
+            mask = np.isclose(values, rhs, atol=1e-6)
         elif op == "cross_above":
-            prev = np.roll(values, 1)
-            prev[0] = np.nan
-            mask = (values > val) & (prev <= val)
+            prev_v = np.roll(values, 1); prev_v[0] = np.nan
+            prev_r = np.roll(rhs, 1); prev_r[0] = np.nan
+            mask = (values > rhs) & (prev_v <= prev_r)
         elif op == "cross_below":
-            prev = np.roll(values, 1)
-            prev[0] = np.nan
-            mask = (values < val) & (prev >= val)
+            prev_v = np.roll(values, 1); prev_v[0] = np.nan
+            prev_r = np.roll(rhs, 1); prev_r[0] = np.nan
+            mask = (values < rhs) & (prev_v >= prev_r)
         elif op == "between":
             val2 = float(cond.get("value2", val))
             mask = (values >= val) & (values <= val2)
         else:
             continue
 
-        mask = np.where(np.isnan(values), False, mask)
+        invalid = np.isnan(values) | np.isnan(rhs)
+        mask = np.where(invalid, False, mask)
         masks.append(mask)
 
     if not masks:

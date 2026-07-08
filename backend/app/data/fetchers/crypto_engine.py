@@ -386,8 +386,10 @@ class CryptoDataEngine:
         if not end_date:
             end_date = datetime.utcnow()
         if not start_date:
-            # 有本地數據 → 增量更新不需要 start_date；沒有 → 預設從 2020
-            start_date = end_date - timedelta(days=settings.default_fetch_days)
+            # 有本地數據 → 下方 need_fetch_before/after 走增量補抓，不需 start_date；
+            # 沒有本地數據 → 從 default_history_start 抓完整歷史（分頁補齊）。
+            # 修正：舊版誤用 default_fetch_days(90) 當起點，導致新標的只抓 90 天。
+            start_date = datetime.strptime(settings.default_history_start, "%Y-%m-%d")
 
         # 斷點續傳：檢查本地數據（同時檢查前段和後段）
         existing_df = None
