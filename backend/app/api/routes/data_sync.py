@@ -55,7 +55,8 @@ async def _run_sync(request: DataSyncRequest, task_id: str):
             start_date = end_date - timedelta(days=request.days)
     else:
         # 用戶未指定起始日期 → 讓 engine 自行決定
-        # 有本地數據 → 增量更新；沒有 → engine 預設從 2020 開始
+        # 有本地數據 → 增量更新；沒有 → 加密 engine 從 settings.default_history_start
+        # （預設 2018-01-01）抓完整歷史，台股 engine 從 2020-01-01。
         start_date = None
 
     try:

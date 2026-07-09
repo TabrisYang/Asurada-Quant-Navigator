@@ -11,8 +11,13 @@ import subprocess
 from loguru import logger
 
 
-def check_claude_cli_available() -> dict:
-    """Check if Claude Code CLI is installed and authenticated.
+def check_claude_cli_available(require_login: bool = True) -> dict:
+    """Check if Claude Code CLI is installed and (optionally) authenticated.
+
+    Args:
+        require_login: True 時要求本機 `claude` 已登入（站長本機模式）。
+            False 時只確認 binary 存在 —— 用於「使用者各自帶 OAuth token」的情境
+            （token 由 CLAUDE_CODE_OAUTH_TOKEN 逐請求注入，不依賴機器層級登入）。
 
     Returns:
         {"available": bool, "error": str|None}
@@ -25,6 +30,10 @@ def check_claude_cli_available() -> dict:
                 "請先安裝 Claude Code：https://docs.anthropic.com/en/docs/claude-code"
             ),
         }
+
+    # 有 per-user token：不檢查機器登入，token 會在跑 CLI 時用環境變數注入並由 CLI 自行驗證
+    if not require_login:
+        return {"available": True, "error": None}
 
     try:
         result = subprocess.run(

@@ -2599,7 +2599,7 @@ FUNCTION_DEFINITIONS = [
                     },
                     "indicator_id": {
                         "type": "string",
-                        "description": "指標 ID（共 27 個）：sma, ema, adx, vwap, ichimoku, psar, supertrend, market_structure, harmonic, rsi, bias, bb, stochrsi, atr, donchian, keltner, rel_vol, obv, vol_switch, macd, roc, trailing_stop, session, kelly, max_drawdown, fear_greed, funding",
+                        "description": "指標 ID（共 28 個）：sma, ema, adx, vwap, ichimoku, psar, supertrend, market_structure, harmonic, rsi, bias, bb, stochrsi, atr, donchian, keltner, rel_vol, obv, vol_switch, macd, roc, trailing_stop, session, kelly, max_drawdown, fear_greed, funding, seasonal",
                     },
                     "parameters": {
                         "type": "object",
@@ -2772,7 +2772,19 @@ FUNCTION_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "run_backtest",
-            "description": "用指定的技術指標進出場條件執行策略回測，返回完整績效統計（勝率、盈虧比、Sharpe、最大回撤等）。自動含滑點 0.05% + 手續費 0.1%，並自動分割樣本內/外數據檢測過擬合。【重要】start_date/end_date 僅在使用者明確指定日期時才帶入，否則留空以使用全部本地數據。",
+            "description": (
+                "用指定的技術指標進出場條件執行策略回測，返回完整績效統計（勝率、盈虧比、Sharpe、最大回撤等）。"
+                "自動含滑點 0.05% + 手續費 0.1%，並自動分割樣本內/外數據檢測過擬合。\n"
+                "★ 可回測維度 = 任何已註冊數值指標，涵蓋技術指標、價格(close/high/low)、成交量(volume/rel_vol)、"
+                "漲跌率(roc)、日期與盤中時間(seasonal)。\n"
+                "★ 指標 vs 指標：條件的右側除了填固定 value，也可用 compare_to 改成跟另一個指標逐根比較"
+                "（黃金交叉、close 高於自己的均線、快慢線交叉等）。\n"
+                "★ 季節性/日曆條件用 indicator='seasonal'，series 填 is_month_start/is_month_end/day_of_week/"
+                "month/day_of_month/hour_of_day，operator='=='（如每月首根 K 線用 is_month_start==1、"
+                "週一用 day_of_week==0、每月 15 日用 day_of_month==15）。\n"
+                "【範圍確認】首次呼叫設 confirmed=false（或省略）取得本地可用範圍並向使用者確認要用全部或指定區間，"
+                "確認後再以 confirmed=true 執行。start_date/end_date 僅在使用者明確指定日期時才帶入。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -2791,14 +2803,15 @@ FUNCTION_DEFINITIONS = [
                         "items": {
                             "type": "object",
                             "properties": {
-                                "indicator": {"type": "string", "description": "指標 ID（如 rsi, macd, bb）"},
+                                "indicator": {"type": "string", "description": "指標 ID（如 rsi, macd, bb；季節性用 seasonal；原始價量用 close/high/low/volume）"},
                                 "operator": {
                                     "type": "string",
                                     "enum": [">", "<", ">=", "<=", "==", "cross_above", "cross_below", "between"],
                                 },
-                                "value": {"type": "number", "description": "比較值"},
+                                "value": {"type": "number", "description": "比較值（固定數值）。若用 compare_to 改跟另一指標比，這裡填 0 即可"},
                                 "value2": {"type": "number", "description": "between 運算的上界"},
                                 "parameters": {"type": "object", "description": "指標參數覆蓋"},
+                                "compare_to": {"type": "object", "description": "【指標 vs 指標】改成跟另一個指標逐根比較（而非固定 value）：{indicator, series?, parameters?, mult?, offset?}，右值=該指標*mult+offset。例：黃金交叉 → indicator='sma'(period20) + operator='cross_above' + compare_to={'indicator':'sma','parameters':{'period':60}}；收盤高於均線5%乖離 → indicator='close' + operator='>' + compare_to={'indicator':'sma','parameters':{'period':20},'mult':1.05}。between 不支援 compare_to。"},
                             },
                             "required": ["indicator", "operator", "value"],
                         },
@@ -2814,6 +2827,7 @@ FUNCTION_DEFINITIONS = [
                                 "value": {"type": "number"},
                                 "value2": {"type": "number"},
                                 "parameters": {"type": "object"},
+                                "compare_to": {"type": "object", "description": "改跟另一指標比較（而非固定 value）：{indicator, series?, parameters?, mult?, offset?}。見 entry_conditions 的 compare_to 說明。"},
                             },
                             "required": ["indicator", "operator", "value"],
                         },
@@ -2822,6 +2836,7 @@ FUNCTION_DEFINITIONS = [
                     "take_profit_pct": {"type": "number", "description": "止盈百分比（小數），如 0.05 = 5%"},
                     "initial_capital": {"type": "number", "description": "初始資金 USDT，預設 10000"},
                     "leverage": {"type": "number", "description": "槓桿倍數（如 5 = 五倍合約），預設 1（無槓桿）。盈虧按槓桿放大，含爆倉模擬。"},
+                    "confirmed": {"type": "boolean", "description": "回測範圍確認旗標。首次呼叫設 false（或省略）→ 回傳本地可用資料範圍(needs_confirmation)供你向使用者確認；使用者確認後再以 confirmed=true 重新呼叫才會真正執行回測。"},
                 },
                 "required": ["entry_conditions", "exit_conditions"],
             },
@@ -2842,6 +2857,7 @@ FUNCTION_DEFINITIONS = [
                 "  - supertrend：**只有 'Supertrend' 價格線、無方向序列**。要判斷多空方向請用 "
                 "close 與 Supertrend 比較（如 entry 用 indicator='close' 或改用 ADX +DI/-DI），"
                 "**禁止使用不存在的 'Supertrend_Direction'**。\n"
+                "★ 指標 vs 指標：條件右側可用 compare_to 跟另一指標比較（黃金交叉、close 高於均線等）。\n"
                 "★ 進場條件勿過度嚴苛（多條件 AND 易 0 交易），優先用單一明確條件 + SL/TP。"
             ),
             "parameters": {
@@ -2869,6 +2885,7 @@ FUNCTION_DEFINITIONS = [
                                             "value": {"type": "number"},
                                             "value2": {"type": "number"},
                                             "parameters": {"type": "object"},
+                                            "compare_to": {"type": "object", "description": "改跟另一指標比較（而非固定 value）：{indicator, series?, parameters?, mult?, offset?}，右值=指標*mult+offset。例:黃金交叉 sma20 cross_above compare_to=sma60。between 不支援。"},
                                         },
                                         "required": ["indicator", "operator", "value"],
                                     },
@@ -2883,6 +2900,7 @@ FUNCTION_DEFINITIONS = [
                                             "value": {"type": "number"},
                                             "value2": {"type": "number"},
                                             "parameters": {"type": "object"},
+                                            "compare_to": {"type": "object", "description": "改跟另一指標比較（而非固定 value）：{indicator, series?, parameters?, mult?, offset?}，右值=指標*mult+offset。例:黃金交叉 sma20 cross_above compare_to=sma60。between 不支援。"},
                                         },
                                         "required": ["indicator", "operator", "value"],
                                     },
@@ -2893,6 +2911,7 @@ FUNCTION_DEFINITIONS = [
                             "required": ["name", "entry_conditions", "exit_conditions"],
                         },
                     },
+                    "confirmed": {"type": "boolean", "description": "回測範圍確認旗標。首次呼叫設 false（或省略）→ 回傳本地可用資料範圍(needs_confirmation)供你向使用者確認；確認後再以 confirmed=true 執行。"},
                 },
                 "required": ["strategies"],
             },
@@ -3045,7 +3064,10 @@ FUNCTION_DEFINITIONS = [
                 "條件機率掃描 + 命中特徵分析：掃描指定技術指標的所有數值區間，統計每個區間在後續 N 根 K 線內"
                 "最高漲幅/最大跌幅超過 X% 的條件機率，找出機率最高的區間，並分析命中 K 線前 N 根的共同特徵。"
                 "還會計算當前走勢與歷史成功模式的多維度相似度（技術指標、趨勢方向、量能、波動率、價格位置）。"
-                "適用場景：「RSI 在多少時後續上漲 3% 機率最高」「什麼條件下勝率最高」「往前看 10 根預測後 12 根漲 5%」。"
+                "適用場景：「RSI 在多少時後續上漲 3% 機率最高」「什麼條件下勝率最高」「往前看 10 根預測後 12 根漲 5%」。\n"
+                "★ 日曆/季節性問題（『每月 1 日漲跌機率』『星期幾表現』『月份季節性』『幾點漲跌』）"
+                "請把 indicators 設為 ['seasonal']，掃描會自動對離散日曆值逐值分組（非連續分箱），"
+                "各組附 Wilson CI 與 baseline lift。"
             ),
             "parameters": {
                 "type": "object",
@@ -3053,7 +3075,7 @@ FUNCTION_DEFINITIONS = [
                     "indicators": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "要掃描的指標 ID，如 ['rsi','macd','adx','bb','stochrsi']",
+                        "description": "要掃描的指標 ID，如 ['rsi','macd','adx','bb','stochrsi']；日曆/季節性用 ['seasonal']",
                     },
                     "lookback_bars": {
                         "type": "integer",
@@ -3085,6 +3107,7 @@ FUNCTION_DEFINITIONS = [
                     "timeframe": {"type": "string", "description": "時間級別，留空使用當前"},
                     "start_date": {"type": "string", "description": "開始日期 YYYY-MM-DD"},
                     "end_date": {"type": "string", "description": "結束日期 YYYY-MM-DD"},
+                    "confirmed": {"type": "boolean", "description": "範圍確認旗標。首次呼叫設 false（或省略）→ 回傳本地可用資料範圍(needs_confirmation)供你向使用者確認；確認後再以 confirmed=true 執行掃描。"},
                 },
                 "required": ["indicators"],
             },

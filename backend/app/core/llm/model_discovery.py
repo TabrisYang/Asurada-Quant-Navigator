@@ -28,7 +28,8 @@ async def discover_models(
     elif provider == "claude":
         return _discover_claude_static()
     elif provider == "claude_subscription":
-        return await _discover_claude_subscription()
+        # api_key 在訂閱模式承載「選填」的 per-user OAuth token；無則走本機登入
+        return await _discover_claude_subscription(oauth_token=api_key or None)
     elif provider == "ollama":
         return await _discover_ollama(base_url or "http://localhost:11434")
     else:
@@ -172,68 +173,130 @@ def _discover_claude_static() -> list[dict]:
     ]
 
 
-async def _discover_claude_subscription() -> list[dict]:
-    """動態偵測 Claude 訂閱制可用模型（透過 claude CLI）+ 靜態清單合併"""
+# 別名 → CLI 永遠解析成「該等級最新版本」
+_CLI_ALIASES = ["opus", "sonnet", "haiku", "fable"]
+# 偵測結果快取（避免每次開設定都付費跑 CLI）；只在 live 偵測成功時才寫入
+_SUB_CACHE: dict = {"data": None, "ts": 0.0}
+_SUB_CACHE_TTL = 6 * 3600
+
+
+async def _resolve_alias(alias: str, oauth_token: Optional[str] = None) -> Optional[str]:
+    """跑一次最小 CLI 查詢，從 modelUsage 取得別名實際解析到的最新模型 ID。
+
+    比「叫模型自己列出 ID」可靠：modelUsage 的 key 就是 CLI 真正路由到的具體模型，
+    未來 CLI/訂閱拿到 4.8、4.9 會自動跟上，不需改程式碼。
+
+    oauth_token 有值時用 CLAUDE_CODE_OAUTH_TOKEN 注入（部署到無本機登入的伺服器時，
+    用呼叫者自己的訂閱憑證解析）；無則沿用本機登入。
+    """
     import asyncio
+    import json
+    import os
+    import shutil
+    import tempfile
 
-    discovered: list[dict] = []
+    cfg_dir = None
+    env = None
+    if oauth_token:
+        cfg_dir = tempfile.mkdtemp(prefix="claude_cfg_")
+        env = {**os.environ, "CLAUDE_CODE_OAUTH_TOKEN": oauth_token, "CLAUDE_CONFIG_DIR": cfg_dir}
 
-    # 嘗試用 claude CLI 查詢可用模型
     try:
         proc = await asyncio.create_subprocess_exec(
-            "claude", "--print", "--model", "sonnet",
-            "-p", "List all available Claude model IDs in a simple list, one per line. Only output model IDs like claude-opus-4-6, claude-sonnet-4-6, etc.",
-            "--max-turns", "0",
+            "claude", "--print", "--output-format", "json",
+            "--model", alias, "--tools", "", "-p", "hi",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            cwd=tempfile.gettempdir(),  # 避開專案 CLAUDE.md，降低 token 成本
+            env=env,
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
-        text = stdout.decode().strip()
-
-        # 解析模型 ID
-        seen = set()
-        for line in text.split("\n"):
-            line = line.strip().strip("`").strip("- ")
-            if line.startswith("claude-") and line not in seen:
-                seen.add(line)
-                name, desc = _claude_model_display(line)
-                discovered.append({"id": line, "name": name, "description": desc})
-
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+        data = json.loads(stdout.decode())
+        ids = [k for k in (data.get("modelUsage") or {}) if k.startswith("claude-")]
+        return ids[0] if ids else None
     except Exception as e:
-        logger.debug(f"Claude CLI 模型偵測失敗: {e}")
+        logger.debug(f"別名 {alias} 解析失敗: {e}")
+        return None
+    finally:
+        if cfg_dir:
+            shutil.rmtree(cfg_dir, ignore_errors=True)
+
+
+async def _discover_claude_subscription(oauth_token: Optional[str] = None) -> list[dict]:
+    """動態偵測 Claude 訂閱制可用模型（透過 claude CLI 解析別名）+ 靜態清單合併"""
+    import asyncio
+    import time
+
+    now = time.monotonic()
+    if _SUB_CACHE["data"] and now - _SUB_CACHE["ts"] < _SUB_CACHE_TTL:
+        return _SUB_CACHE["data"]
+
+    # 併發解析三個別名，各取得實際路由到的最新具體模型 ID
+    resolved = await asyncio.gather(*[_resolve_alias(a, oauth_token) for a in _CLI_ALIASES])
+
+    discovered: list[dict] = []
+    seen: set[str] = set()
+    for model_id in resolved:
+        if model_id and model_id not in seen:
+            seen.add(model_id)
+            name, desc = _claude_model_display(model_id)
+            discovered.append({"id": model_id, "name": name, "description": desc})
 
     # 合併靜態清單：CLI 偵測到的優先，再補上靜態清單中未出現的
     static = _discover_claude_subscription_static()
-    discovered_ids = {m["id"] for m in discovered}
     for m in static:
-        if m["id"] not in discovered_ids:
+        if m["id"] not in seen:
             discovered.append(m)
 
-    return discovered if discovered else static
+    result = discovered if discovered else static
+    # 只在 live 偵測成功（至少解析到一個具體 ID）時才寫快取，避免污染
+    if seen:
+        _SUB_CACHE["data"] = result
+        _SUB_CACHE["ts"] = now
+    return result
+
+
+# 家族 → (顯示前綴, 描述)
+_FAM = {
+    "opus": ("Claude Opus", "推理模型（需 Max 訂閱）"),
+    "sonnet": ("Claude Sonnet", "推理能力強，旗艦模型"),
+    "haiku": ("Claude Haiku", "回應最快"),
+    "fable": ("Claude Fable", "最強旗艦模型（高階，方案需支援）"),
+    "mythos": ("Claude Mythos", "最強旗艦模型（Project Glasswing）"),
+}
 
 
 def _claude_model_display(model_id: str) -> tuple[str, str]:
-    """根據模型 ID 生成顯示名稱與描述"""
-    if "opus-4-7" in model_id:
-        return f"Claude Opus 4.7 ({model_id})", "最新推理模型（需 Max 訂閱）"
-    if "opus-4-6" in model_id:
-        return f"Claude Opus 4.6 ({model_id})", "推理模型（需 Max 訂閱）"
-    if "opus" in model_id:
-        return f"Claude Opus ({model_id})", "推理模型（需 Max 訂閱）"
-    if "sonnet" in model_id and "3-5" not in model_id and "3.5" not in model_id:
-        return f"Claude Sonnet ({model_id})", "推理能力強，旗艦模型"
-    if "3-5-sonnet" in model_id or "3.5-sonnet" in model_id:
-        return f"Claude 3.5 Sonnet ({model_id})", "性價比高"
-    if "haiku" in model_id:
-        return f"Claude Haiku ({model_id})", "回應最快"
-    return model_id, ""
+    """根據模型 ID 生成顯示名稱與描述（版號無關，未來新版自動正確渲染）"""
+    import re
+
+    mid = model_id.lower()
+    fam_m = re.search(r"(opus|sonnet|haiku|fable|mythos)", mid)
+    if not fam_m:
+        return model_id, ""
+    fam = fam_m.group(1)
+    base, desc = _FAM[fam]
+
+    # 舊式版號在家族前：claude-3-5-sonnet-... / claude-3-haiku-...
+    pre = re.search(rf"claude-(\d+)(?:-(\d+))?-{fam}", mid)
+    if pre:
+        ver = pre.group(1) + (f".{pre.group(2)}" if pre.group(2) else "")
+    else:  # 新式版號在家族後：opus-4-7 / haiku-4-5-<date>（minor 限 1-2 位數，排除日期）
+        new = re.search(rf"{fam}-(\d+)(?:-(\d{{1,2}})(?!\d))?", mid)
+        ver = (new.group(1) + (f".{new.group(2)}" if new.group(2) else "")) if new else ""
+
+    label = f"{base} {ver}".strip()
+    return f"{label} ({model_id})", desc
 
 
 def _discover_claude_subscription_static() -> list[dict]:
     """靜態模型清單：所有 Claude 模型都可選"""
     return [
+        # ── Fable 系列（高階旗艦，方案需支援）──
+        {"id": "claude-fable-5", "name": "Claude Fable 5", "description": "最強旗艦模型（高階，方案需支援）"},
         # ── Opus 系列（需 Max 訂閱）──
-        {"id": "claude-opus-4-7", "name": "Claude Opus 4.7", "description": "最新最強推理模型（需 Max 訂閱）"},
+        {"id": "claude-opus-4-8", "name": "Claude Opus 4.8", "description": "最新最強推理模型（需 Max 訂閱）"},
+        {"id": "claude-opus-4-7", "name": "Claude Opus 4.7", "description": "推理模型（需 Max 訂閱）"},
         {"id": "claude-opus-4-6", "name": "Claude Opus 4.6", "description": "推理模型（需 Max 訂閱）"},
         {"id": "claude-opus-4-20250514", "name": "Claude Opus 4 (API 版)", "description": "Opus 4 固定版本"},
         # ── Sonnet 系列 ──

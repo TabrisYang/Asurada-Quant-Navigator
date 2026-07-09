@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     ]
     default_timeframes: list[str] = ["15m", "1h", "4h", "1d", "1w"]
     default_fetch_days: int = 90
+    # 無本地檔且呼叫端未指定 start_date 時，加密貨幣回溯的起點。
+    # 之前誤用 default_fetch_days(90)當起點 → 新標的只抓 90 天（見 crypto_engine.fetch_ohlcv）。
+    # binance 現貨可回溯至 2017，取 2018 保守起點以確保跨牛熊完整歷史。
+    default_history_start: str = "2018-01-01"
     anomaly_threshold: float = 0.005  # 0.5%
 
     # 每交易所個別 Rate Limit（秒）

@@ -79,3 +79,6 @@ backend/data/db_pre_v101_*/
 # ===== backend/models 下全部為 runtime 再生的模型權重，不進版控 =====
 # imitation_v* 由 retrain_imitation.py 每週覆寫；calibrator_*/factor_pca 由 scanner_calibrator/profiler runtime 重訓
 backend/models/*.pkl
+
+# ===== 私人簡報/作品介紹稿，不公開（保留在本機，不進版控） =====
+docs/
