@@ -39,9 +39,9 @@
 ## 快速開始
 
 ### 環境需求
-- Python 3.10+
-- Node.js 18+
-- macOS / Linux
+- Python 3.11+（pandas 3 需求）
+- Node.js 20+（Vite 7 需求）
+- macOS / Linux / Windows
 
 ### 安裝步驟
 
@@ -49,32 +49,48 @@
 # 1. 下載
 git clone https://github.com/TabrisYang/Asurada-Quant-Navigator.git
 cd Asurada-Quant-Navigator
-
-# 2. 一鍵啟動（macOS）
-chmod +x 阿斯拉量化系統.command
-open 阿斯拉量化系統.command
 ```
 
-或手動啟動：
+**方式 A：一鍵上手（跨平台，推薦第一次安裝）**
+
+會自動建立 venv、安裝前後端依賴、並抓好幾個預設標的的行情資料：
+
+```bash
+# macOS / Linux
+bash scripts/bootstrap.sh
+# Windows（PowerShell）
+powershell -ExecutionPolicy Bypass -File scripts/bootstrap.ps1
+```
+
+跑完照畫面提示分別啟動後端與前端即可（見下方）。
+
+**方式 B：手動安裝**
 
 ```bash
 # 後端
 cd backend
 python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python run.py
+source .venv/bin/activate            # Windows: .venv\Scripts\activate
+pip install -r requirements.lock.txt  # 精確重現；或 pip install -r requirements.txt
+
+# ⚠️ 首次啟動前先抓行情資料（clone 後 backend/data/ohlcv/ 是空的，
+#    不抓的話圖表與回測會顯示「數據不足」）
+python scripts/backfill_history.py --symbols BTC/USDT ETH/USDT --timeframes 1d
+
+python run.py                        # 後端啟動於 :8000
 
 # 前端（另一個終端）
 cd frontend
-npm install
-npm run build
+npm ci
+npm run dev                          # 前端啟動於 :5173（vite 會把 /api 代理到後端）
 ```
 
-### 設定 LLM
-1. 開啟瀏覽器 `http://localhost:5173`（dev）或 `http://localhost:8000`（build）
+### 開啟與設定 LLM
+1. 開啟瀏覽器 **`http://localhost:5173`**（前端由 vite dev server 提供；後端 `:8000` 只服務 `/api`，直接開 :8000 不會有畫面）
 2. 點右上角「設定」
 3. 選擇 LLM 供應商 → 輸入 API Key → 偵測模型 → 儲存
+
+> LLM 存取方式擇一即可（金鑰只存在後端記憶體、不落地）：OpenAI / Gemini / Anthropic Claude 的 API Key、本機 `claude` CLI 登入、各自的 Claude 訂閱 OAuth token（`claude setup-token`），或本地免費的 Ollama。
 
 ---
 

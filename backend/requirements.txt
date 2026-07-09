@@ -7,23 +7,29 @@ python-multipart>=0.0.12
 websockets>=13.0,<16.0
 
 # 數據處理
-pandas>=2.2.0
-numpy>=1.26.0
+# 註：pandas 3 / numpy 2 為現行可用組合。pandas-ta 必須用 0.4.x（相容 numpy 2），
+# 舊的 0.3.14b1 依賴已被 numpy 2 移除的 numpy.NaN，會在 import 時直接失敗。
+# 精確重現請用 requirements.lock.txt。
+pandas>=3.0,<3.1
+numpy>=2.2,<3
 
-# 技術指標計算
-pandas-ta>=0.3.14b1
+# 技術指標計算（0.4.x fork，相容 numpy 2 / pandas 3）
+pandas-ta==0.4.71b0
 
 # 統計計算（因子分析）
-scipy>=1.11.0
+scipy>=1.13,<2
 
 # 時序分解（STL）
-statsmodels>=0.14.0
+statsmodels>=0.14,<0.15
 
 # 加密貨幣交易所 API
 ccxt>=4.4.0
 
 # 台股數據
 yfinance>=1.2.0
+
+# HTTP（tw_universe / run.py 直接使用，先前漏列）
+requests>=2.31.0
 
 # LLM 供應商 SDK
 openai>=1.50.0
