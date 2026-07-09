@@ -441,7 +441,7 @@ export default function TwBBScanPanel() {
         />
         {/* ===== 標題列 + Tab 切換 ===== */}
         <div
-          className="flex items-center justify-between px-6 py-3 border-b"
+          className="flex items-center justify-between px-6 py-3 border-b shrink-0"
           style={{ borderColor: 'var(--border-color)' }}
         >
           <div className="flex items-center gap-6">
@@ -1044,7 +1044,7 @@ function TrackView({ pctileThreshold }: { pctileThreshold: number }) {
 
   return (
     <>
-      <div className="px-6 py-4 space-y-3 border-b" style={{ borderColor: 'var(--border-color)' }}>
+      <div className="px-6 py-4 space-y-3 border-b shrink-0" style={{ borderColor: 'var(--border-color)' }}>
         <div className="flex flex-wrap items-center gap-4">
           <div className="flex items-center gap-2">
             <label className="text-sm" style={{ color: 'var(--text-secondary)' }}>標的池</label>
@@ -1164,7 +1164,7 @@ function TrackView({ pctileThreshold }: { pctileThreshold: number }) {
         )}
       </div>
 
-      <div className="flex-1 overflow-auto px-6 py-4">
+      <div className="min-h-0 min-w-0 overflow-auto px-6 py-4">
         {!result ? (
           <div className="text-center py-12" style={{ color: 'var(--text-secondary)' }}>
             {running ? '追蹤中… 結果會在完成後一次顯示' : '尚未追蹤。選好日期範圍 + 標的池後按「執行追蹤」'}
@@ -1183,6 +1183,7 @@ function TrackView({ pctileThreshold }: { pctileThreshold: number }) {
                 <th className="text-center py-2 px-1 sticky left-0 z-10" style={{ background: 'var(--bg-secondary)', width: '32px' }}></th>
                 <th className="text-left py-2 px-2 sticky z-10" style={{ background: 'var(--bg-secondary)', left: '32px' }}>代號</th>
                 <th className="text-left py-2 px-2 sticky z-10" style={{ background: 'var(--bg-secondary)', left: '92px' }}>名稱</th>
+                <th className="text-left py-2 px-2 whitespace-nowrap">產業</th>
                 <th className="text-left py-2 px-2">首次符合</th>
                 <th className="text-center py-2 px-2">符合天數</th>
                 <th className="text-center py-2 px-2">走勢</th>
@@ -1225,6 +1226,7 @@ function TrackView({ pctileThreshold }: { pctileThreshold: number }) {
                   </td>
                   <td className="py-1.5 px-2 font-mono sticky" style={{ color: 'var(--accent-blue)', background: 'var(--bg-secondary)', left: '32px' }}>{s.code}</td>
                   <td className="py-1.5 px-2 sticky whitespace-nowrap" style={{ background: 'var(--bg-secondary)', left: '92px' }}>{s.name}</td>
+                  <td className="py-1.5 px-2 whitespace-nowrap text-xs" style={{ color: 'var(--text-secondary)' }}>{s.industry || '—'}</td>
                   <td className="py-1.5 px-2 whitespace-nowrap text-xs">
                     {s.first_match_date}
                     {s.first_match_date === result.scan_dates[0] && <span title="範圍內首日就符合"> ✨</span>}
