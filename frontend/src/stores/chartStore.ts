@@ -44,6 +44,7 @@ interface ChartStore {
 
   // ===== 台股掃描面板 =====
   showTwScanPanel: boolean;
+  showLearnPanel: boolean;
 
   // ===== 圖表操作 =====
   setSymbol: (symbol: string) => void;
@@ -69,6 +70,7 @@ interface ChartStore {
   addAnnotation: (annotation: Annotation) => void;
   removeAnnotation: (id: string) => void;
   clearAnnotations: () => void;
+  startAnnotationTurn: (turnId: string) => void;
   toggleAnnotationGroup: (groupId: string) => void;
   removeAnnotationGroup: (groupId: string) => void;
   getAnnotationGroups: () => { groupId: string; groupName: string; visible: boolean; count: number; color: string }[];
@@ -87,6 +89,7 @@ interface ChartStore {
 
   // ===== 台股掃描面板 =====
   setShowTwScanPanel: (show: boolean) => void;
+  setShowLearnPanel: (show: boolean) => void;
 
   // ===== 外部注入聊天訊息（因子掃描→回測）=====
   pendingChatMessage: string | null;
@@ -196,6 +199,7 @@ export const useChartStore = create<ChartStore>((set, get) => ({
   llmConfig: _loadInitialLLMConfig(),
   showSyncPanel: false,
   showTwScanPanel: false,
+  showLearnPanel: false,
   pendingChatMessage: null,
   setPendingChatMessage: (msg) => set({ pendingChatMessage: msg }),
   lastFactorScan: null,
@@ -346,23 +350,57 @@ export const useChartStore = create<ChartStore>((set, get) => ({
   addAnnotation: (annotation) =>
     set((state) => {
       // 去重：比對 type + 核心數值，避免多輪 function call 產生重複標記
-      const isDuplicate = state.annotations.some((existing) => {
-        if (existing.type !== annotation.type) return false;
-        const ea = existing as any;
-        const na = annotation as any;
-        // 水平線：比對 price
-        if (annotation.type === 'horizontal_line' && ea.price === na.price) return true;
-        // 趨勢線：比對起終點
-        if (annotation.type === 'trend_line' && ea.startTime === na.startTime && ea.endTime === na.endTime) return true;
-        // 通用：比對 label + price
-        if (ea.label && na.label && ea.label === na.label && ea.price === na.price) return true;
-        return false;
-      });
-      if (isDuplicate) return state;
-      return {
-        annotations: [...state.annotations, { ...annotation, visible: annotation.visible !== false }],
-      };
+      // 水平線用容差比對（0.05% 價格內視為同一條），避免跨輪次差幾分錢就疊一條新線
+      const findDuplicateIndex = () =>
+        state.annotations.findIndex((existing) => {
+          if (existing.type !== annotation.type) return false;
+          const ea = existing;
+          const na = annotation;
+          if (
+            annotation.type === 'horizontal_line' &&
+            typeof ea.price === 'number' &&
+            typeof na.price === 'number'
+          ) {
+            return Math.abs(ea.price - na.price) <= Math.abs(na.price) * 0.0005;
+          }
+          if (annotation.type === 'trend_line' && ea.startTime === na.startTime && ea.endTime === na.endTime) return true;
+          // 文字標記：同文字 + 同時間點視為重複
+          if (ea.text && na.text && ea.text === na.text && ea.startTime === na.startTime && ea.price === na.price) return true;
+          return false;
+        });
+
+      const dupIndex = findDuplicateIndex();
+      if (dupIndex >= 0) {
+        const existing = state.annotations[dupIndex];
+        // 可見的重複 → 直接略過；被隱藏的重複（舊輪次）→ 用新標註取代，讓它重新顯示
+        if (existing.visible !== false) return state;
+        const next = [...state.annotations];
+        next[dupIndex] = { ...annotation, visible: annotation.visible !== false };
+        return { annotations: next };
+      }
+
+      let next = [...state.annotations, { ...annotation, visible: annotation.visible !== false }];
+      // 總量上限：超過後先進先出，且優先淘汰已隱藏的舊標註
+      const MAX_ANNOTATIONS = 120;
+      if (next.length > MAX_ANNOTATIONS) {
+        const overflow = next.length - MAX_ANNOTATIONS;
+        const hiddenIds = new Set(
+          next.filter((a) => a.visible === false).slice(0, overflow).map((a) => a.id)
+        );
+        next = next.filter((a) => !hiddenIds.has(a.id));
+        if (next.length > MAX_ANNOTATIONS) next = next.slice(next.length - MAX_ANNOTATIONS);
+      }
+      return { annotations: next };
     }),
+
+  // 新一輪 AI 分析開始畫圖時呼叫：自動隱藏先前輪次的 AI 標註（可從圖層面板恢復），
+  // 避免多輪分析標註無限疊加造成畫面混亂
+  startAnnotationTurn: (turnId) =>
+    set((state) => ({
+      annotations: state.annotations.map((a) =>
+        a.turnId && a.turnId !== turnId && a.visible !== false ? { ...a, visible: false } : a
+      ),
+    })),
 
   removeAnnotation: (id) =>
     set((state) => ({
@@ -431,6 +469,7 @@ export const useChartStore = create<ChartStore>((set, get) => ({
   setShowSyncPanel: (show) => set({ showSyncPanel: show }),
 
   setShowTwScanPanel: (show) => set({ showTwScanPanel: show }),
+  setShowLearnPanel: (show) => set({ showLearnPanel: show }),
 
   // ===== 圖表狀態摘要（含實際價格數據，給 LLM 分析用）=====
   getChartStateSummary: () => {

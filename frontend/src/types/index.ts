@@ -96,6 +96,7 @@ export interface Annotation {
   groupId?: string;
   groupName?: string;
   visible?: boolean;
+  turnId?: string; // 產生此標註的分析輪次（assistant message id）；新輪次會自動隱藏舊輪標註
 }
 
 // ========== Token 用量 ==========

@@ -676,6 +676,9 @@ export default function ChatInterface() {
               }> | undefined;
 
               if (annotations && annotations.length > 0) {
+                // 新一輪分析開始畫圖 → 自動隱藏先前輪次的標註（圖層面板可恢復）
+                // 同一輪內多批標註共用 turnId，重複呼叫無副作用
+                store.startAnnotationTurn(assistantMsgId);
                 for (const ann of annotations) {
                   const annotation: Annotation = {
                     id: `ann-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -690,6 +693,7 @@ export default function ChatInterface() {
                     lineStyle: ann.lineStyle,
                     groupId: ann.groupId,
                     groupName: ann.groupName,
+                    turnId: assistantMsgId,
                   };
                   store.addAnnotation(annotation);
                 }
