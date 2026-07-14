@@ -18,6 +18,7 @@ const IndicatorPanel = lazy(() => import('./components/IndicatorPanel/IndicatorP
 const SettingsPanel = lazy(() => import('./components/SettingsPanel/SettingsPanel'));
 const SyncPanel = lazy(() => import('./components/SyncPanel/SyncPanel'));
 const TwBBScanPanel = lazy(() => import('./components/TwBBScanPanel/TwBBScanPanel'));
+const LearnPanel = lazy(() => import('./components/LearnPanel/LearnPanel'));
 
 // 共用載入骨架
 function LoadingSkeleton({ name }: { name: string }) {
@@ -116,6 +117,7 @@ function App() {
   const endDate = useChartStore((s) => s.endDate);
   const showSyncPanel = useChartStore((s) => s.showSyncPanel);
   const showTwScanPanel = useChartStore((s) => s.showTwScanPanel);
+  const showLearnPanel = useChartStore((s) => s.showLearnPanel);
   const loadChartData = useChartStore((s) => s.loadChartData);
 
   const activeIndicators = useChartStore((s) => s.activeIndicators);
@@ -304,6 +306,15 @@ function App() {
         <ErrorBoundary name="台股掃描">
           <Suspense fallback={<LoadingSkeleton name="台股掃描" />}>
             <TwBBScanPanel />
+          </Suspense>
+        </ErrorBoundary>
+      )}
+
+      {/* 互動教學面板（Modal） */}
+      {showLearnPanel && (
+        <ErrorBoundary name="互動教學">
+          <Suspense fallback={<LoadingSkeleton name="互動教學" />}>
+            <LearnPanel />
           </Suspense>
         </ErrorBoundary>
       )}

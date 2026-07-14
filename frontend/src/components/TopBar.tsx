@@ -141,6 +141,7 @@ export default function TopBar({ onSettingsClick }: TopBarProps) {
   const setDateRange = useChartStore((s) => s.setDateRange);
   const setShowSyncPanel = useChartStore((s) => s.setShowSyncPanel);
   const setShowTwScanPanel = useChartStore((s) => s.setShowTwScanPanel);
+  const setShowLearnPanel = useChartStore((s) => s.setShowLearnPanel);
 
   // v110：streaming 中切換保護 — 避免無聲打斷 LLM 分析（root cause of 「請繼續」沒回應 bug）
   // 切換前若 chatLoading=true → confirm 用戶；確認則先廣播 abort 給 ChatInterface 再切
@@ -596,6 +597,19 @@ export default function TopBar({ onSettingsClick }: TopBarProps) {
       <div className="ml-auto flex items-center gap-3">
         {/* 因子掃描 */}
         <FactorScanPanel />
+
+        {/* 互動教學 */}
+        <button
+          onClick={() => setShowLearnPanel(true)}
+          className="px-3 py-1 rounded text-sm cursor-pointer transition-opacity hover:opacity-80 font-medium"
+          style={{
+            background: 'var(--accent-purple, #a371f7)',
+            color: '#fff',
+          }}
+          title="邊學技術分析理論，邊用真實歷史數據回測驗證"
+        >
+          📖 學習
+        </button>
 
         {/* 台股 BB 壓縮掃描 */}
         <button

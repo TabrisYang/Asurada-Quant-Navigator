@@ -1877,4 +1877,98 @@ export async function fetchStalenessCheck(
   }
 }
 
+// ===== 互動教學 API =====
+
+export interface LessonSummary {
+  id: string;
+  title: string;
+  subtitle: string;
+  indicator_id: string;
+  difficulty: string;
+  estimated_minutes: number;
+}
+
+export interface LessonTheorySection {
+  title: string;
+  body: string;
+  key_points?: string[];
+  chart_action?: 'apply_indicator' | 'run_backtest' | null;
+  chart_action_label?: string | null;
+}
+
+export interface LessonTunableParam {
+  name: string;
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+  default: number;
+  hint?: string;
+}
+
+export interface LessonExperiment {
+  id: string;
+  question: string;
+  override: Record<string, number>;
+  insight_hint?: string;
+}
+
+export interface LessonDetail extends LessonSummary {
+  theory_sections: LessonTheorySection[];
+  tunable_params: LessonTunableParam[];
+  experiments: LessonExperiment[];
+  ask_ai_prompts: string[];
+  indicator_info?: {
+    name?: string;
+    description?: string;
+    pro_tip?: string;
+    parameters?: Record<string, { default: number; min?: number; max?: number }>;
+    display_mode?: 'overlay' | 'sub_chart' | 'info_panel';
+  };
+}
+
+export interface LearnBacktestResult {
+  status: string;
+  total_trades: number;
+  metrics: Record<string, number | string>;
+  oos_metrics?: Record<string, number | string> | null;
+  equity_curve: { time: string; equity: number }[];
+  trade_annotations: {
+    type: string;
+    time?: string;
+    startTime?: string;
+    price?: number;
+    text?: string;
+    color?: string;
+  }[];
+  warnings: string[];
+  data_range: { start: string | null; end: string | null; bars: number; timeframe: string };
+  resolved_params: Record<string, number>;
+}
+
+export async function fetchLessons(): Promise<{ lessons: LessonSummary[] }> {
+  const res = await api.get('/learn/lessons');
+  return res.data;
+}
+
+export async function fetchLessonDetail(lessonId: string): Promise<LessonDetail> {
+  const res = await api.get(`/learn/lessons/${lessonId}`);
+  return res.data;
+}
+
+export async function runLessonBacktest(
+  lessonId: string,
+  symbol: string,
+  timeframe: string,
+  params: Record<string, number>
+): Promise<LearnBacktestResult> {
+  const res = await api.post('/learn/run', {
+    lesson_id: lessonId,
+    symbol,
+    timeframe,
+    params,
+  });
+  return res.data;
+}
+
 export default api;

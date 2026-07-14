@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
-from app.api.routes import alerts, chat, chart, indicators, config, data_sync, export, factor_scan, ml, predictions, scenario, smc, tw_scanner, system_health, positions, observability
+from app.api.routes import alerts, chat, chart, indicators, config, data_sync, export, factor_scan, learn, ml, predictions, scenario, smc, tw_scanner, system_health, positions, observability
 from app.core.config.settings import settings
 from app.core.usage_tracker import usage_tracker
 from app.core.chat_history import chat_history
@@ -324,6 +324,7 @@ app.include_router(config.router, prefix="/api/config", tags=["設定"])
 app.include_router(data_sync.router, prefix="/api/data", tags=["數據同步"])
 app.include_router(export.router, prefix="/api/export", tags=["匯出"])
 app.include_router(factor_scan.router, prefix="/api/factor-scan", tags=["因子掃描"])
+app.include_router(learn.router, prefix="/api/learn", tags=["互動教學"])
 app.include_router(ml.router, prefix="/api/ml", tags=["ML 增強"])
 app.include_router(predictions.router, prefix="/api/predictions", tags=["預測追蹤"])
 app.include_router(scenario.router, prefix="/api/scenario", tags=["情境預測"])
