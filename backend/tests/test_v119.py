@@ -125,10 +125,11 @@ def test_v119_2_chat_py_inject_condition_relaxed():
 
 def test_v119_2_function_defs_requires_external_citation():
     """function_defs 必須含 external_signals 強制引用規則。"""
-    fd = (
-        pathlib.Path(__file__).resolve().parent.parent / "app" / "core" / "llm" / "function_defs.py"
-    )
-    src = fd.read_text(encoding="utf-8")
+    _llm_dir = pathlib.Path(__file__).resolve().parent.parent / "app" / "core" / "llm"
+    # prompt 規則內容已抽至 prompt_modules.py，兩檔串接檢查
+    src = (_llm_dir / "function_defs.py").read_text(encoding="utf-8") + (
+        _llm_dir / "prompt_modules.py"
+    ).read_text(encoding="utf-8")
     # 必須含「funding_rate」+ 「open_interest」+ 「ob_imbalance」+ 強制字眼
     assert "funding_rate" in src and "open_interest" in src, (
         "function_defs 必須要求引用 funding_rate + open_interest"
@@ -143,10 +144,11 @@ def test_v119_2_function_defs_requires_external_citation():
 
 def test_v119_3_stop_loss_risk_rule_in_prompt():
     """function_defs 必須含止損位風險評估規則（含『流動性獵取』警告）。"""
-    fd = (
-        pathlib.Path(__file__).resolve().parent.parent / "app" / "core" / "llm" / "function_defs.py"
-    )
-    src = fd.read_text(encoding="utf-8")
+    _llm_dir = pathlib.Path(__file__).resolve().parent.parent / "app" / "core" / "llm"
+    # prompt 規則內容已抽至 prompt_modules.py，兩檔串接檢查
+    src = (_llm_dir / "function_defs.py").read_text(encoding="utf-8") + (
+        _llm_dir / "prompt_modules.py"
+    ).read_text(encoding="utf-8")
     assert "流動性獵取" in src or "liquidity sweep" in src.lower(), (
         "function_defs 必須含『流動性獵取 / liquidity sweep』警告"
     )

@@ -106,11 +106,17 @@ def test_chat_py_injects_direction_balance():
 FUNC_DEFS_PY = (
     pathlib.Path(__file__).resolve().parent.parent / "app" / "core" / "llm" / "function_defs.py"
 )
+# prompt 規則內容已抽至 prompt_modules.py（repo health 行數護欄），兩檔串接檢查
+PROMPT_MODULES_PY = FUNC_DEFS_PY.parent / "prompt_modules.py"
+
+
+def _prompt_source() -> str:
+    return FUNC_DEFS_PY.read_text(encoding="utf-8") + PROMPT_MODULES_PY.read_text(encoding="utf-8")
 
 
 def test_function_defs_has_regime_warning_rule():
     """function_defs 必須含 regime_warning 強規則（防線 1）。"""
-    src = FUNC_DEFS_PY.read_text(encoding="utf-8")
+    src = _prompt_source()
     assert 'regime_warning' in src, "function_defs 必須含 regime_warning 規則"
     assert 'contrarian' in src.lower() or '逆向' in src or '逆勢' in src, (
         "regime_warning 規則必須提到 contrarian / 逆向視角"
@@ -119,7 +125,7 @@ def test_function_defs_has_regime_warning_rule():
 
 def test_function_defs_has_high_confidence_threshold():
     """function_defs 必須含信心 high 樣本門檻規則（防線 2）。"""
-    src = FUNC_DEFS_PY.read_text(encoding="utf-8")
+    src = _prompt_source()
     # 應該有「禁止 high」+ 樣本相關門檻
     has_block_high = any(
         kw in src for kw in ['禁止」使用「高」', '禁止使用「高」', '禁止給「高」', '禁止**使用「高」']
@@ -131,7 +137,7 @@ def test_function_defs_has_high_confidence_threshold():
 
 def test_function_defs_has_direction_balance_rule():
     """function_defs 必須含 direction_balance 規則（防線 3）。"""
-    src = FUNC_DEFS_PY.read_text(encoding="utf-8")
+    src = _prompt_source()
     assert 'direction_balance' in src, "function_defs 必須含 direction_balance 規則"
     assert 'biased_long' in src or '看多' in src and 'biased' in src.lower(), (
         "direction_balance 規則必須提到 biased_long / 連續看多"

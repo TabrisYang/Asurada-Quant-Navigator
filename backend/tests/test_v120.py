@@ -259,10 +259,11 @@ def test_v120_5_chat_py_injects_signal_history():
 
 def test_v120_6_function_defs_has_combo_stats_rule():
     """function_defs 必須含 combo_stats < 50% 強制警告規則。"""
-    fd = (
-        pathlib.Path(__file__).resolve().parent.parent / "app" / "core" / "llm" / "function_defs.py"
-    )
-    src = fd.read_text(encoding="utf-8")
+    _llm_dir = pathlib.Path(__file__).resolve().parent.parent / "app" / "core" / "llm"
+    # prompt 規則內容已抽至 prompt_modules.py，兩檔串接檢查
+    src = (_llm_dir / "function_defs.py").read_text(encoding="utf-8") + (
+        _llm_dir / "prompt_modules.py"
+    ).read_text(encoding="utf-8")
     assert "combo_stats" in src, "function_defs 必須含 combo_stats 規則"
     assert "signal_history" in src, "function_defs 必須提及 signal_history 結構"
     # 必須要有「< 50%」之類的閾值
@@ -273,19 +274,21 @@ def test_v120_6_function_defs_has_combo_stats_rule():
 
 def test_v120_6_function_defs_has_single_signal_rule():
     """function_defs 必須含 single_signal_stats 多訊號不利警告規則。"""
-    fd = (
-        pathlib.Path(__file__).resolve().parent.parent / "app" / "core" / "llm" / "function_defs.py"
-    )
-    src = fd.read_text(encoding="utf-8")
+    _llm_dir = pathlib.Path(__file__).resolve().parent.parent / "app" / "core" / "llm"
+    # prompt 規則內容已抽至 prompt_modules.py，兩檔串接檢查
+    src = (_llm_dir / "function_defs.py").read_text(encoding="utf-8") + (
+        _llm_dir / "prompt_modules.py"
+    ).read_text(encoding="utf-8")
     assert "single_signal_stats" in src, "function_defs 必須含 single_signal_stats 規則"
 
 
 def test_v120_6_function_defs_has_sample_threshold_rule():
     """function_defs 必須含 samples < 5 樣本不足提示規則。"""
-    fd = (
-        pathlib.Path(__file__).resolve().parent.parent / "app" / "core" / "llm" / "function_defs.py"
-    )
-    src = fd.read_text(encoding="utf-8")
+    _llm_dir = pathlib.Path(__file__).resolve().parent.parent / "app" / "core" / "llm"
+    # prompt 規則內容已抽至 prompt_modules.py，兩檔串接檢查
+    src = (_llm_dir / "function_defs.py").read_text(encoding="utf-8") + (
+        _llm_dir / "prompt_modules.py"
+    ).read_text(encoding="utf-8")
     assert "樣本不足" in src or "samples < 5" in src, (
         "v120 規則必須含「樣本不足提示」"
     )

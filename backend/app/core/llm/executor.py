@@ -70,45 +70,20 @@ from app.data.fetchers.crypto_engine import crypto_engine
 from app.data.fetchers.tw_stock_engine import tw_stock_engine
 from app.utils.symbol import is_tw_stock
 
-
-def _load_local_data(symbol: str, timeframe: str, start: str = None, end: str = None):
-    """根據 symbol 類型選擇正確的數據引擎載入本地資料"""
-    engine = tw_stock_engine if is_tw_stock(symbol) else crypto_engine
-    return engine.load_local_data(symbol, timeframe, start, end)
-
-
-def _describe_range(df, timeframe: str) -> dict:
-    """回報 df 實際涵蓋的時間範圍與根數（供回測範圍確認 / 結果透明化）。"""
-    if df is None or df.empty or "timestamp" not in df.columns:
-        return {"start": None, "end": None, "bars": 0, "timeframe": timeframe}
-    ts = pd.to_datetime(df["timestamp"])
-    return {
-        "start": ts.min().strftime("%Y-%m-%d"),
-        "end": ts.max().strftime("%Y-%m-%d"),
-        "bars": int(len(df)),
-        "timeframe": timeframe,
-    }
+# 資料載入 helpers 已抽至 data_access.py；import 回原名稱（含測試 monkeypatch 相容）
+from app.core.llm import data_access as _data_access
+from app.core.llm.data_access import (  # noqa: F401
+    _describe_range,
+    _load_local_data,
+)
 
 
-def _needs_range_confirmation(symbol: str, timeframe: str, tool_label: str) -> Optional[dict]:
-    """回測家族工具的兩段式確認：未確認前先回報本地可用範圍，不執行。
-
-    回傳 needs_confirmation dict（呼叫端應直接 return）；若找不到資料回傳 error dict；
-    資料存在且應繼續執行則回傳 None。
-    """
-    df_all = _load_local_data(symbol, timeframe)
-    if df_all is None or df_all.empty:
-        return {"status": "error", "message": f"找不到 {symbol} {timeframe} 的本地數據，請先同步。"}
-    rng = _describe_range(df_all, timeframe)
-    return {
-        "status": "needs_confirmation",
-        "available_range": rng,
-        "message": (
-            f"本地 {symbol} {timeframe} 資料範圍 {rng['start']} ~ {rng['end']}，共 {rng['bars']} 根。"
-            f"要用「全部歷史」{tool_label}，還是指定區間？請確認後我再執行。"
-        ),
-    }
-
+def _needs_range_confirmation(symbol: str, timeframe: str, tool_label: str):
+    """薄 wrapper：呼叫時傳入本模組的 _load_local_data 綁定，
+    讓既有測試 monkeypatch ex._load_local_data 的縫隙維持有效。"""
+    return _data_access._needs_range_confirmation(
+        symbol, timeframe, tool_label, loader=_load_local_data,
+    )
 
 # ========== 安全過濾 ==========
 
@@ -563,76 +538,6 @@ def _exec_manage_indicator(args: dict) -> dict:
     }
 
 
-async def _exec_find_conditions(args: dict, default_symbol: str, default_tf: str) -> dict:
-    """執行 find_conditions"""
-    symbol = args.get("symbol", default_symbol)
-    timeframe = args.get("timeframe", default_tf)
-    conditions = args.get("conditions", [])
-    start = args.get("start_date")
-    end = args.get("end_date")
-
-    df = _load_local_data(symbol, timeframe, start, end)
-    if df.empty:
-        return {"matched_periods": [], "summary": "找不到數據", "annotations": []}
-
-    import pandas as pd
-    condition_masks = []
-    for cond in conditions:
-        indicator_id = cond.get("indicator", "").lower()
-        calc_result = registry.calculate(indicator_id, df, cond.get("parameters"))
-        if not calc_result:
-            continue
-
-        series_name = list(calc_result.keys())[0]
-        values = pd.Series(calc_result[series_name])
-        op = cond.get("operator", ">")
-        val = cond.get("value", 0)
-
-        if op == ">":
-            mask = values > val
-        elif op == "<":
-            mask = values < val
-        elif op == ">=":
-            mask = values >= val
-        elif op == "<=":
-            mask = values <= val
-        elif op == "==":
-            mask = values == val
-        elif op == "cross_above":
-            mask = (values > val) & (values.shift(1) <= val)
-        elif op == "cross_below":
-            mask = (values < val) & (values.shift(1) >= val)
-        elif op == "between":
-            mask = (values >= val) & (values <= cond.get("value2", val))
-        else:
-            continue
-        condition_masks.append(mask)
-
-    if not condition_masks:
-        return {"matched_periods": [], "summary": "無有效條件", "annotations": []}
-
-    logical = args.get("logical_operator", "AND")
-    combined = condition_masks[0]
-    for m in condition_masks[1:]:
-        combined = combined & m if logical == "AND" else combined | m
-
-    matched = df[combined]
-    annotations = []
-    if not matched.empty:
-        timestamps = matched["timestamp"].tolist()
-        for ts in timestamps:
-            annotations.append({
-                "type": "vertical_line",
-                "time": str(ts),
-                "color": "#f85149",
-            })
-
-    return {
-        "matched_periods": len(matched),
-        "summary": f"找到 {len(matched)} 個匹配點",
-        "annotations": annotations,
-    }
-
 
 from app.core.llm.annotation_tools import (
     _calc_dynamic_threshold,
@@ -642,9 +547,8 @@ from app.core.llm.annotation_tools import (
     _exec_draw_pattern,
     _get_current_price_from_chart_state,
     _snap_annotations,
+    _exec_find_conditions,
 )
-
-
 
 
 def _exec_suggest_indicators(args: dict) -> dict:

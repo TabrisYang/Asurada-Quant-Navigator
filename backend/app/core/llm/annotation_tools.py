@@ -13,6 +13,9 @@ from typing import Optional
 import pandas as pd
 from loguru import logger
 
+from app.core.indicators import registry
+from app.core.llm.data_access import _load_local_data
+
 _ANNOTATE_ALLOWED_TYPES = {"horizontal_line", "text_label"}
 
 
@@ -381,3 +384,74 @@ def _exec_draw_pattern(args: dict) -> list[dict]:
         })
 
     return annotations
+
+
+async def _exec_find_conditions(args: dict, default_symbol: str, default_tf: str) -> dict:
+    """執行 find_conditions"""
+    symbol = args.get("symbol", default_symbol)
+    timeframe = args.get("timeframe", default_tf)
+    conditions = args.get("conditions", [])
+    start = args.get("start_date")
+    end = args.get("end_date")
+
+    df = _load_local_data(symbol, timeframe, start, end)
+    if df.empty:
+        return {"matched_periods": [], "summary": "找不到數據", "annotations": []}
+
+    import pandas as pd
+    condition_masks = []
+    for cond in conditions:
+        indicator_id = cond.get("indicator", "").lower()
+        calc_result = registry.calculate(indicator_id, df, cond.get("parameters"))
+        if not calc_result:
+            continue
+
+        series_name = list(calc_result.keys())[0]
+        values = pd.Series(calc_result[series_name])
+        op = cond.get("operator", ">")
+        val = cond.get("value", 0)
+
+        if op == ">":
+            mask = values > val
+        elif op == "<":
+            mask = values < val
+        elif op == ">=":
+            mask = values >= val
+        elif op == "<=":
+            mask = values <= val
+        elif op == "==":
+            mask = values == val
+        elif op == "cross_above":
+            mask = (values > val) & (values.shift(1) <= val)
+        elif op == "cross_below":
+            mask = (values < val) & (values.shift(1) >= val)
+        elif op == "between":
+            mask = (values >= val) & (values <= cond.get("value2", val))
+        else:
+            continue
+        condition_masks.append(mask)
+
+    if not condition_masks:
+        return {"matched_periods": [], "summary": "無有效條件", "annotations": []}
+
+    logical = args.get("logical_operator", "AND")
+    combined = condition_masks[0]
+    for m in condition_masks[1:]:
+        combined = combined & m if logical == "AND" else combined | m
+
+    matched = df[combined]
+    annotations = []
+    if not matched.empty:
+        timestamps = matched["timestamp"].tolist()
+        for ts in timestamps:
+            annotations.append({
+                "type": "vertical_line",
+                "time": str(ts),
+                "color": "#f85149",
+            })
+
+    return {
+        "matched_periods": len(matched),
+        "summary": f"找到 {len(matched)} 個匹配點",
+        "annotations": annotations,
+    }

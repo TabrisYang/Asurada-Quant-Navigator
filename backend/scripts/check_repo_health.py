@@ -31,6 +31,7 @@ LINE_LIMITS: dict[str, tuple[int, int]] = {
     # 檔案路徑（相對 repo root）: (warning 行數, block 行數)
     "backend/app/api/routes/chat.py": (3700, 4500),
     "backend/app/core/llm/function_defs.py": (3000, 3500),
+    "backend/app/core/llm/prompt_modules.py": (2600, 3200),
     "backend/app/core/llm/executor.py": (2600, 3000),
     "backend/app/core/llm/adapter.py": (2000, 2500),
     "backend/app/core/prediction_tracker.py": (1900, 2300),
@@ -112,23 +113,31 @@ def check_chart_state_inject(soft: bool) -> tuple[list[str], list[str]]:
 
 
 def check_prompt_modules(soft: bool) -> tuple[list[str], list[str]]:
-    """檢查 function_defs.py 中 _PROMPT_MODULES 數量。"""
+    """檢查 _PROMPT_MODULES 數量。
+
+    內容主體已抽至 prompt_modules.py，跨兩檔統計以防有人繞回
+    function_defs.py 直接加模組。
+    """
     warnings: list[str] = []
     blocks: list[str] = []
-    fdef = _REPO_ROOT / "backend/app/core/llm/function_defs.py"
-    if not fdef.exists():
+    text = ""
+    for rel in ("backend/app/core/llm/prompt_modules.py",
+                "backend/app/core/llm/function_defs.py"):
+        path = _REPO_ROOT / rel
+        if path.exists():
+            text += path.read_text(encoding="utf-8", errors="ignore")
+    if not text:
         return warnings, blocks
-    text = fdef.read_text(encoding="utf-8", errors="ignore")
     matches = PROMPT_MODULE_PATTERN.findall(text)
     n = len(matches)
     if n >= PROMPT_MODULE_BLOCK and not soft:
         blocks.append(
-            f"❌ function_defs.py 中 _PROMPT_MODULES 數量 {n} ≥ block {PROMPT_MODULE_BLOCK}。"
+            f"❌ prompt_modules.py/function_defs.py 中 _PROMPT_MODULES 數量 {n} ≥ block {PROMPT_MODULE_BLOCK}。"
             f"prompt module 過多。新增前評估能否合併現有 module。"
         )
     elif n >= PROMPT_MODULE_MAX:
         warnings.append(
-            f"⚠️  function_defs.py 中 _PROMPT_MODULES 數量 {n} ≥ warning {PROMPT_MODULE_MAX}（block 在 {PROMPT_MODULE_BLOCK}）。"
+            f"⚠️  prompt_modules.py/function_defs.py 中 _PROMPT_MODULES 數量 {n} ≥ warning {PROMPT_MODULE_MAX}（block 在 {PROMPT_MODULE_BLOCK}）。"
         )
     return warnings, blocks
 
