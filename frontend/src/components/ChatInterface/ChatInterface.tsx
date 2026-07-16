@@ -837,6 +837,38 @@ export default function ChatInterface() {
           updateMessage(assistantMsgId, { content: String(currentMsg.content || '') + note });
         },
 
+        // AI 覆核：回答完成後低一階模型交叉檢查（issues 明細由後端以 token 串流附加）
+        onVerify: (data) => {
+          const seg = activeSegment;
+          const msgId = seg === 1 ? assistantMsgId : segBubbles.get(seg);
+          if (!msgId) return;
+          if (data.status === 'checking') {
+            updateMessage(msgId, { statusText: '🔎 AI 覆核中（低一階模型交叉檢查數據/邏輯）...' });
+            return;
+          }
+          if (data.status === 'pass') {
+            const marker = '🔎 **AI 覆核**';
+            const note = `\n\n---\n${marker}：✅ 通過（${data.model ?? '低階模型'} 交叉檢查，未發現數據/邏輯錯誤）`;
+            if (seg === 1) {
+              if (!accumulatedText.includes(marker)) {
+                accumulatedText += note;
+                updateMessage(msgId, { content: accumulatedText, statusText: undefined });
+                return;
+              }
+            } else {
+              const cur = segTexts.get(seg) ?? '';
+              if (!cur.includes(marker)) {
+                const next = cur + note;
+                segTexts.set(seg, next);
+                updateMessage(msgId, { content: next, statusText: undefined });
+                return;
+              }
+            }
+          }
+          // issues / skipped / 已附加過 → 只清 statusText
+          updateMessage(msgId, { statusText: undefined });
+        },
+
         // v125-A → v132：某段完成 → 結束該段 bubble、新建下一段 bubble
         // 舊 monolith：seg1 → seg2 兩段。新編排管線：seg1 → 5 維度 → synthesis 共 7 段。
         // 每段獨立 message，後段 streaming 中斷不污染前段。
@@ -878,6 +910,9 @@ export default function ChatInterface() {
         // v125-B → v132：後端 warning event（維度不完整 / synthesis 不完整 / 字數不足等）
         // 一律附加到當前 active 段的 bubble；標記 warnedSegIncomplete 讓 onDone 不重複偵測
         onWarning: (data) => {
+          // AI 覆核的問題明細已由後端 token 串流附加到內容，不再疊 warning 橫幅、
+          // 也不該把該段標成 incomplete（覆核有問題 ≠ 生成不完整）
+          if (data.type === 'verify_issues') return;
           warnedSegIncomplete = true;
           const seg = activeSegment;
           const msgId = seg === 1 ? assistantMsgId : segBubbles.get(seg);

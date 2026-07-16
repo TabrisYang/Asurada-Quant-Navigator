@@ -179,6 +179,18 @@ export interface StreamCallbacks {
   }) => void;
   // v125-B: 後端 warning event（seg2 字數不足等不致命提醒）
   onWarning?: (data: { message: string; type: string }) => void;
+  // AI 覆核：回答完成後低一階模型交叉檢查數據/邏輯
+  onVerify?: (data: {
+    status: 'checking' | 'pass' | 'issues' | 'skipped';
+    model?: string;
+    issues?: Array<{
+      type: string;
+      severity: string;
+      quote: string;
+      why: string;
+      correction: string;
+    }>;
+  }) => void;
 }
 
 /** SSE 串流回傳值：promise 等待完成，abort 可主動斷開連線 */
@@ -449,6 +461,9 @@ function _handleSSEEvent(
     case 'segment_complete':
       callbacks.onSegmentComplete?.(data as unknown as Parameters<NonNullable<StreamCallbacks['onSegmentComplete']>>[0]);
       break;
+    case 'verify':
+      callbacks.onVerify?.(data as unknown as Parameters<NonNullable<StreamCallbacks['onVerify']>>[0]);
+      break;
     case 'warning':
       // v125-B: 後端 seg2 字數不足等不致命提醒
       callbacks.onWarning?.(data as unknown as Parameters<NonNullable<StreamCallbacks['onWarning']>>[0]);
@@ -690,9 +705,27 @@ export async function revisitTwScan(scanId: string): Promise<{
 export interface TwDailyFeatures {
   close: number | null;
   bb_pctile: number | null;
+  bb_width?: number | null;  // 帶寬絕對值 %（(2*std/SMA)*100）
   change_20d: number | null;
   vol_5d: number | null;
   matched: boolean;
+  /** 壓縮後突破：範圍內先出現過符合日，當日收盤首次穿越上/下軌 */
+  breakout?: 'up' | 'down' | null;
+}
+
+/** 跨日追蹤的篩選參數（除 pctile 外 0 = 不過濾） */
+export interface TwTrackFilterParams {
+  pctile_threshold?: number;
+  max_abs_bb_width?: number;
+  max_close?: number;
+  min_vol_5d?: number;
+}
+
+function _appendTrackFilterParams(qs: URLSearchParams, params: TwTrackFilterParams): void {
+  qs.set('pctile_threshold', String(params.pctile_threshold ?? 20.0));
+  if (params.max_abs_bb_width && params.max_abs_bb_width > 0) qs.set('max_abs_bb_width', String(params.max_abs_bb_width));
+  if (params.max_close && params.max_close > 0) qs.set('max_close', String(params.max_close));
+  if (params.min_vol_5d && params.min_vol_5d > 0) qs.set('min_vol_5d', String(params.min_vol_5d));
 }
 
 export interface TwTrackSymbol {
@@ -703,7 +736,18 @@ export interface TwTrackSymbol {
   first_match_date: string;
   last_match_date: string;
   match_count: number;
+  /** 範圍內最後一個有收盤的日 K 收盤價與其日期（盤中通常是前一交易日） */
+  latest_close?: number | null;
+  latest_close_date?: string | null;
   daily_features: Record<string, TwDailyFeatures | null>;
+}
+
+/** 追蹤結果的零成本機械檢核（範圍合理性 / 漲跌停跳動 / 缺漏 / 過舊） */
+export interface TwTrackDataCheck {
+  passed: boolean;
+  n_checks: number;
+  n_issues: number;
+  issues: string[];
 }
 
 export interface TwTrackRangeResult {
@@ -715,6 +759,9 @@ export interface TwTrackRangeResult {
   scope: 'recent_scan' | 'full_market';
   source_scan_id: string | null;
   pctile_threshold: number;
+  /** 追蹤執行的日期時間（資料抓取時點） */
+  generated_at?: string;
+  data_check?: TwTrackDataCheck | null;
 }
 
 export interface TwTrackProgress {
@@ -736,18 +783,18 @@ export function streamTwScanRange(
     start_date: string;
     end_date: string;
     scope?: 'recent_scan' | 'full_market';
-    pctile_threshold?: number;
-  },
+  } & TwTrackFilterParams,
   callbacks: TwTrackCallbacks,
 ): StreamHandle {
   const controller = new AbortController();
 
-  const qs = new URLSearchParams({
+  const qsParams = new URLSearchParams({
     start_date: params.start_date,
     end_date: params.end_date,
     scope: params.scope ?? 'recent_scan',
-    pctile_threshold: String(params.pctile_threshold ?? 20.0),
-  }).toString();
+  });
+  _appendTrackFilterParams(qsParams, params);
+  const qs = qsParams.toString();
 
   const promise = (async () => {
     try {
@@ -810,14 +857,14 @@ export async function downloadTwScanRangeCSV(params: {
   start_date: string;
   end_date: string;
   scope?: 'recent_scan' | 'full_market';
-  pctile_threshold?: number;
-}): Promise<void> {
-  const qs = new URLSearchParams({
+} & TwTrackFilterParams): Promise<void> {
+  const qsParams = new URLSearchParams({
     start_date: params.start_date,
     end_date: params.end_date,
     scope: params.scope ?? 'recent_scan',
-    pctile_threshold: String(params.pctile_threshold ?? 20.0),
-  }).toString();
+  });
+  _appendTrackFilterParams(qsParams, params);
+  const qs = qsParams.toString();
 
   const response = await fetch(`/api/scanner/tw-bb-width/range/export?${qs}`, {
     method: 'GET',
@@ -835,6 +882,50 @@ export async function downloadTwScanRangeCSV(params: {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+
+// ===== Google Sheet 匯出（Apps Script Webhook，跨日追蹤「匯出 Google Sheet」）=====
+
+export interface TwSheetExportResult {
+  sheet_url: string;
+  sheet_title: string;
+  updated_cells: number;
+}
+
+/** 是否已完成一次性設定（部署網址）+ 密碼是否已在後端記憶體 */
+export async function getGoogleSheetsSetup(): Promise<{ configured: boolean; password_loaded: boolean }> {
+  const res = await api.get('/google-sheets/setup');
+  return res.data as { configured: boolean; password_loaded: boolean };
+}
+
+/** 後端重啟後重新輸入匯出密碼（後端會 ping 腳本驗證相符才收） */
+export async function unlockGoogleSheets(password: string): Promise<void> {
+  await api.post('/google-sheets/password', { password });
+}
+
+/** 精靈第一步：設定匯出密碼，取得嵌入密碼的 Apps Script 腳本 */
+export async function submitGoogleSheetsPassword(password: string): Promise<{ script_code: string }> {
+  const res = await api.post('/google-sheets/setup', { password });
+  return res.data as { script_code: string };
+}
+
+/** 精靈最後一步：驗證並儲存 Web App 部署網址（後端會 ping 驗證密碼） */
+export async function saveGoogleSheetsConfig(webhookUrl: string): Promise<void> {
+  await api.post('/google-sheets/config', { webhook_url: webhookUrl });
+}
+
+/** 匯出表格到指定試算表的新分頁。
+ *  未設定 → 409 {code:'gsheet_not_configured'}；後端重啟未解鎖 → 401 {code:'gsheet_password_required'}。 */
+export async function exportTrackToGoogleSheet(payload: {
+  spreadsheet_url: string;
+  sheet_title?: string;
+  headers: string[];
+  rows: (string | number | null)[][];
+  /** 與 rows 同形狀的字體色 hex（null = 預設色） */
+  colors?: (string | null)[][];
+}): Promise<TwSheetExportResult> {
+  const res = await api.post('/google-sheets/export', payload);
+  return res.data as TwSheetExportResult;
 }
 
 // ===== 台股 EPS 批次查詢（跨日追蹤表格的「上年度 / 最新季 EPS」欄位）=====

@@ -141,9 +141,9 @@ async def get_full_market_symbols() -> list[dict]:
 # ──────────────────────────────────────────────
 
 def _compute_features_on_df(df: pd.DataFrame, target_date: pd.Timestamp) -> Optional[dict]:
-    """在 df 上找到 target_date 對應的那一根 K 線，重算 4 個指標。
+    """在 df 上找到 target_date 對應的那一根 K 線，重算 5 個指標。
 
-    回傳：{"close", "bb_pctile", "change_20d", "vol_5d"} 或 None（資料不足）。
+    回傳：{"close", "bb_pctile", "bb_width", "change_20d", "vol_5d"} 或 None（資料不足）。
     """
     if df is None or df.empty:
         return None
@@ -163,8 +163,11 @@ def _compute_features_on_df(df: pd.DataFrame, target_date: pd.Timestamp) -> Opti
     # 收盤價
     close = float(df.iloc[last_idx]["close"])
 
-    # BB Width 百分位（_BB_PERIOD=20, _BB_LOOKBACK=120）
+    # BB Width 百分位（_BB_PERIOD=20, _BB_LOOKBACK=120）+ 帶寬絕對值 % + 突破上/下軌事件
     bb_pctile: Optional[float] = None
+    bb_width_abs: Optional[float] = None  # (2*std/sma)*100，與掃描端定義一致
+    break_up = False    # 當日收盤首次站上上軌（昨日仍在軌內）
+    break_down = False  # 當日收盤首次跌破下軌
     if last_idx >= _BB_PERIOD - 1:
         # 取截至 target_date 的所有 close（含 target_date）
         close_series = df.iloc[: last_idx + 1]["close"]
@@ -173,10 +176,24 @@ def _compute_features_on_df(df: pd.DataFrame, target_date: pd.Timestamp) -> Opti
         safe_sma = sma.replace(0, np.nan)
         bb_width = (2 * std / safe_sma) * 100
 
+        current = bb_width.iloc[-1]
+        if pd.notna(current):
+            bb_width_abs = float(current)
+
+        # 突破偵測：今昨兩日都要有完整 band
+        if last_idx >= _BB_PERIOD:
+            upper = sma + 2 * std
+            lower = sma - 2 * std
+            c_now, c_prev = float(close_series.iloc[-1]), float(close_series.iloc[-2])
+            u_now, u_prev = upper.iloc[-1], upper.iloc[-2]
+            l_now, l_prev = lower.iloc[-1], lower.iloc[-2]
+            if pd.notna(u_now) and pd.notna(u_prev):
+                break_up = bool(c_now > float(u_now) and c_prev <= float(u_prev))
+                break_down = bool(c_now < float(l_now) and c_prev >= float(l_prev))
+
         # 滾動 lookback 百分位（最後一根）
         if len(bb_width.dropna()) >= _BB_LOOKBACK:
             recent = bb_width.tail(_BB_LOOKBACK)
-            current = bb_width.iloc[-1]
             if pd.notna(current):
                 rank = (recent < current).sum() + (recent == current).sum() / 2
                 bb_pctile = float(rank / len(recent) * 100)
@@ -198,9 +215,98 @@ def _compute_features_on_df(df: pd.DataFrame, target_date: pd.Timestamp) -> Opti
     return {
         "close": round(close, 2),
         "bb_pctile": round(bb_pctile, 2) if bb_pctile is not None else None,
+        "bb_width": round(bb_width_abs, 2) if bb_width_abs is not None else None,
         "change_20d": round(change_20d, 2) if change_20d is not None else None,
         "vol_5d": vol_5d,
+        "break_up": break_up,
+        "break_down": break_down,
     }
+
+
+# ──────────────────────────────────────────────
+# 數據機械檢核（純程式、零成本；仿 mechanical_audit 哲學：只標記不阻擋）
+# ──────────────────────────────────────────────
+
+# 台股現股漲跌停 ±10%；加 0.5% 容差。超過幾乎必為除權息未還原或資料錯誤。
+_MAX_DAILY_JUMP_PCT = 10.5
+_MAX_MISSING_RATIO = 0.4   # 非週末日缺漏比例上限
+_MAX_STALE_DAYS = 5        # 最新收盤落後 end_date 的日曆日上限
+_MAX_ISSUES = 20
+
+
+def run_data_checks(scan_dates: list[str], symbols: list[dict], end_date: str) -> dict:
+    """對追蹤結果做合理性檢核，回傳 {passed, n_checks, n_issues, issues}。"""
+    issues: list[str] = []
+    n_checks = 0
+
+    def _add(msg: str):
+        if len(issues) < _MAX_ISSUES:
+            issues.append(msg)
+
+    weekdays = [d for d in scan_dates if pd.Timestamp(d).dayofweek < 5]
+
+    for s in symbols:
+        label = f"{s.get('code', '?')} {s.get('name', '')}"
+        feats_map = s.get("daily_features") or {}
+
+        prev_close: Optional[float] = None
+        prev_date = ""
+        n_missing_weekday = 0
+        for d in scan_dates:
+            f = feats_map.get(d)
+            if f is None:
+                if pd.Timestamp(d).dayofweek < 5:
+                    n_missing_weekday += 1
+                continue
+            n_checks += 1
+            bb_pctile = f.get("bb_pctile")
+            if bb_pctile is not None and not (0 <= bb_pctile <= 100):
+                _add(f"{label} {d[5:]}: BB% 超出 0-100 範圍（{bb_pctile}）")
+            bb_width = f.get("bb_width")
+            if bb_width is not None and not (0 < bb_width < 100):
+                _add(f"{label} {d[5:]}: 帶寬異常（{bb_width}%）")
+            close = f.get("close")
+            if close is not None and close <= 0:
+                _add(f"{label} {d[5:]}: 收盤價異常（{close}）")
+            vol = f.get("vol_5d")
+            if vol is not None and vol < 0:
+                _add(f"{label} {d[5:]}: 均量為負（{vol}）")
+            # 單日跳動 > 漲跌停限制 → 疑似除權息未還原 / 資料錯誤
+            if close is not None and close > 0 and prev_close:
+                jump = (close - prev_close) / prev_close * 100
+                if abs(jump) > _MAX_DAILY_JUMP_PCT:
+                    _add(
+                        f"{label} {prev_date[5:]}→{d[5:]}: 單日跳動 {jump:+.1f}% "
+                        f"超過台股 ±10% 漲跌停，疑似除權息未還原或資料異常"
+                    )
+            if close is not None and close > 0:
+                prev_close, prev_date = close, d
+
+        if weekdays and n_missing_weekday / len(weekdays) > _MAX_MISSING_RATIO:
+            _add(f"{label}: 區間內 {n_missing_weekday}/{len(weekdays)} 個交易日無資料，缺漏率偏高")
+
+        lcd = s.get("latest_close_date")
+        if lcd:
+            n_checks += 1
+            stale = (pd.Timestamp(end_date) - pd.Timestamp(lcd)).days
+            if stale > _MAX_STALE_DAYS:
+                _add(f"{label}: 最新收盤停在 {lcd}，落後區間終點 {stale} 天，資料可能未更新")
+
+    return {
+        "passed": len(issues) == 0,
+        "n_checks": n_checks,
+        "n_issues": len(issues),
+        "issues": issues,
+    }
+
+
+def _safe_data_check(scan_dates: list[str], symbols: list[dict], end_date: str) -> Optional[dict]:
+    """檢核失敗不影響主流程（graceful）"""
+    try:
+        return run_data_checks(scan_dates, symbols, end_date)
+    except Exception as e:
+        logger.debug(f"run_data_checks 失敗（不影響主流程）: {e}")
+        return None
 
 
 # ──────────────────────────────────────────────
@@ -220,6 +326,9 @@ class TwTrackRange:
         scope: str = "recent_scan",
         concurrency: int = _DEFAULT_CONCURRENCY,
         pctile_threshold: float = _DEFAULT_PCTILE_THRESHOLD,
+        max_abs_bb_width: float = 0.0,  # 帶寬絕對值上限 %（AND 進每日 matched）；0 = 不過濾
+        max_close: float = 0.0,         # 最新收盤價上限（標的級剔除）；0 = 不過濾
+        min_vol_5d: float = 0.0,        # 最新 5 日均量下限（張，標的級剔除）；0 = 不過濾
     ) -> AsyncIterator[dict]:
         """執行跨日追蹤，以 async iterator 產出事件：
 
@@ -303,6 +412,9 @@ class TwTrackRange:
 
                 daily_features: dict[str, Optional[dict]] = {}
                 matched_dates: list[str] = []
+                latest_close: Optional[float] = None
+                latest_close_date: Optional[str] = None
+                latest_vol: Optional[int] = None
                 for date_str, ts in zip(scan_dates_str, date_range):
                     feats = _compute_features_on_df(df, ts)
                     if feats is None:
@@ -311,13 +423,37 @@ class TwTrackRange:
                     matched = (
                         feats["bb_pctile"] is not None
                         and feats["bb_pctile"] < pctile_threshold
+                        and (
+                            max_abs_bb_width <= 0
+                            or (feats["bb_width"] is not None and feats["bb_width"] < max_abs_bb_width)
+                        )
                     )
-                    daily_features[date_str] = {**feats, "matched": matched}
+                    # 壓縮後突破：範圍內先出現過符合日（或當日仍符合），才把突破事件標出來
+                    break_up = feats.pop("break_up", False)
+                    break_down = feats.pop("break_down", False)
+                    breakout: Optional[str] = None
+                    if matched_dates or matched:
+                        if break_up:
+                            breakout = "up"
+                        elif break_down:
+                            breakout = "down"
+                    daily_features[date_str] = {**feats, "matched": matched, "breakout": breakout}
                     if matched:
                         matched_dates.append(date_str)
+                    if feats["close"] is not None:
+                        latest_close = feats["close"]
+                        latest_close_date = date_str
+                    if feats["vol_5d"] is not None:
+                        latest_vol = feats["vol_5d"]
 
                 if not matched_dates:
                     # 此標的範圍內全未符合 → 不納入結果（避免表格塞爆）
+                    return None
+
+                # 標的級篩選：用範圍內最新一日的值（排除高價股 / 流動性不足）
+                if max_close > 0 and latest_close is not None and latest_close > max_close:
+                    return None
+                if min_vol_5d > 0 and latest_vol is not None and latest_vol < min_vol_5d:
                     return None
 
                 return {
@@ -328,6 +464,8 @@ class TwTrackRange:
                     "first_match_date": matched_dates[0],
                     "last_match_date": matched_dates[-1],
                     "match_count": len(matched_dates),
+                    "latest_close": latest_close,
+                    "latest_close_date": latest_close_date,
                     "daily_features": daily_features,
                 }
             except Exception as e:
@@ -397,6 +535,8 @@ class TwTrackRange:
             "scope": scope,
             "source_scan_id": source_scan_id,
             "pctile_threshold": pctile_threshold,
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "data_check": _safe_data_check(scan_dates_str, symbols_out, end_date),
         }
 
 
@@ -404,8 +544,8 @@ class TwTrackRange:
 # CSV 匯出
 # ──────────────────────────────────────────────
 
-def export_to_csv(result: dict) -> str:
-    """將跨日追蹤結果組成 CSV 文字（4 指標 × N 天）。"""
+def export_to_csv(result: dict, filter_note: str = "") -> str:
+    """將跨日追蹤結果組成 CSV 文字（5 指標＋突破 × N 天；filter_note 附加為最後一列）。"""
     scan_dates: list[str] = result.get("scan_dates", [])
     symbols: list[dict] = result.get("symbols", [])
 
@@ -415,9 +555,9 @@ def export_to_csv(result: dict) -> str:
 
     writer = csv.writer(buf)
 
-    header = ["代號", "名稱", "市場", "產業", "首次符合", "符合天數"]
+    header = ["代號", "名稱", "市場", "產業", "首次符合", "符合天數", "最新價", "最新價日期"]
     for d in scan_dates:
-        header.extend([f"{d}_BB%", f"{d}_收盤", f"{d}_20日漲跌%", f"{d}_5日均量"])
+        header.extend([f"{d}_BB%", f"{d}_帶寬%", f"{d}_收盤", f"{d}_20日漲跌%", f"{d}_5日均量", f"{d}_突破"])
     writer.writerow(header)
 
     for s in symbols:
@@ -428,17 +568,25 @@ def export_to_csv(result: dict) -> str:
             s.get("industry", ""),
             s.get("first_match_date", ""),
             s.get("match_count", 0),
+            s.get("latest_close", "") if s.get("latest_close") is not None else "",
+            s.get("latest_close_date", "") or "",
         ]
         feats_map = s.get("daily_features", {})
         for d in scan_dates:
             feats = feats_map.get(d) or {}
             row.extend([
                 feats.get("bb_pctile", "") if feats.get("bb_pctile") is not None else "",
+                feats.get("bb_width", "") if feats.get("bb_width") is not None else "",
                 feats.get("close", "") if feats.get("close") is not None else "",
                 feats.get("change_20d", "") if feats.get("change_20d") is not None else "",
                 feats.get("vol_5d", "") if feats.get("vol_5d") is not None else "",
+                {"up": "↑", "down": "↓"}.get(feats.get("breakout") or "", ""),
             ])
         writer.writerow(row)
+
+    if filter_note:
+        writer.writerow([])
+        writer.writerow(["篩選條件", filter_note])
 
     return buf.getvalue()
 

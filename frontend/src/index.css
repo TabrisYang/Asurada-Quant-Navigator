@@ -25,6 +25,14 @@
   box-sizing: border-box;
 }
 
+/* 跨日追蹤表格：局部補回被上方星號 reset 蓋掉的儲存格間距。
+   上方 reset 未包 @layer，會壓過 Tailwind v4 的 padding 工具類（layer 內樣式輸給未分層樣式）；
+   此規則同樣未分層且 specificity 較高，僅作用於這張表格，不影響其他畫面。 */
+.tw-track-table th,
+.tw-track-table td {
+  padding: 6px 8px;
+}
+
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC',
     Roboto, Oxygen, Ubuntu, sans-serif;

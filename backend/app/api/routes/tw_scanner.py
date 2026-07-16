@@ -192,11 +192,15 @@ async def stream_tw_bb_range(
     end_date: str,
     scope: str = "recent_scan",
     pctile_threshold: float = 20.0,
+    max_abs_bb_width: float = 0.0,
+    max_close: float = 0.0,
+    min_vol_5d: float = 0.0,
 ):
     """跨日追蹤：對「最近一次掃描標的池」或「全市場」執行：
     - 撈 OHLCV
-    - 逐日重算 4 個指標（close / bb_pctile / change_20d / vol_5d）
-    - 標出該日是否符合 BB% < pctile_threshold
+    - 逐日重算 5 個指標（close / bb_pctile / bb_width / change_20d / vol_5d）
+    - 標出該日是否符合 BB% < pctile_threshold（且帶寬 < max_abs_bb_width，若有設）
+    - max_close / min_vol_5d 用最新一日的值做標的級剔除（0 = 不過濾）
 
     SSE 流：progress / result / error
     """
@@ -211,6 +215,9 @@ async def stream_tw_bb_range(
                 end_date=end_date,
                 scope=scope,
                 pctile_threshold=pctile_threshold,
+                max_abs_bb_width=max_abs_bb_width,
+                max_close=max_close,
+                min_vol_5d=min_vol_5d,
             ):
                 evt_type = evt.pop("type")
                 if evt_type == "result":
@@ -232,6 +239,9 @@ async def export_tw_bb_range(
     end_date: str,
     scope: str = "recent_scan",
     pctile_threshold: float = 20.0,
+    max_abs_bb_width: float = 0.0,
+    max_close: float = 0.0,
+    min_vol_5d: float = 0.0,
 ):
     """跨日追蹤結果 CSV 匯出。
 
@@ -247,6 +257,9 @@ async def export_tw_bb_range(
         end_date=end_date,
         scope=scope,
         pctile_threshold=pctile_threshold,
+        max_abs_bb_width=max_abs_bb_width,
+        max_close=max_close,
+        min_vol_5d=min_vol_5d,
     ):
         if evt.get("type") == "result":
             final_result = evt
@@ -255,7 +268,16 @@ async def export_tw_bb_range(
     if final_result is None:
         raise HTTPException(status_code=500, detail="追蹤未產生結果")
 
-    csv_text = export_to_csv(final_result)
+    note_parts = [f"BB% < {pctile_threshold}%"]
+    if max_abs_bb_width > 0:
+        note_parts.append(f"帶寬 < {max_abs_bb_width}%")
+    if max_close > 0:
+        note_parts.append(f"收盤價 ≤ {max_close}")
+    if min_vol_5d > 0:
+        note_parts.append(f"5日均量 ≥ {min_vol_5d}張")
+    note_parts.append(f"區間 {start_date}~{end_date}")
+    note_parts.append("標的池：全市場" if scope == "full_market" else "標的池：最近30天掃描聯集")
+    csv_text = export_to_csv(final_result, filter_note="；".join(note_parts))
     filename = f"tw_bb_track_{start_date}_to_{end_date}_{scope}.csv"
     return Response(
         content=csv_text,
@@ -268,21 +290,25 @@ async def export_tw_bb_range(
 
 # ─── EPS 批次查詢（跨日追蹤表格的「上年度 / 最新季 EPS」欄位）────
 
-# In-memory cache：code → (timestamp, eps_dict)。TTL 1 天。
-_EPS_CACHE: dict[str, tuple[float, dict]] = {}
-_EPS_TTL_SECONDS = 24 * 3600
+# In-memory cache：code → (timestamp, ttl, eps_dict)。
+# 成功（quality=ok）快取 24h；失敗只快取 10 分鐘 — 否則 FinMind 額度用盡等暫時性失敗
+# 會讓 EPS 欄整天空白（v152 修復：失敗不再佔用 24h cache）。
+_EPS_CACHE: dict[str, tuple[float, float, dict]] = {}
+_EPS_TTL_OK = 24 * 3600
+_EPS_TTL_MISS = 600
 _EPS_BATCH_CONCURRENCY = 8  # 並行抓 yfinance 上限，避免被 rate limit
 
 
 async def _get_eps_with_cache(code: str) -> dict:
-    """單檔 EPS 抓取 + cache。"""
+    """單檔 EPS 抓取 + cache（成功 24h、失敗 10 分鐘後自動重試）。"""
     import time
     now = time.time()
     cached = _EPS_CACHE.get(code)
-    if cached and now - cached[0] < _EPS_TTL_SECONDS:
-        return cached[1]
+    if cached and now - cached[0] < cached[1]:
+        return cached[2]
     eps = await tw_fundamental.fetch_eps_breakdown(code)
-    _EPS_CACHE[code] = (now, eps)
+    ttl = _EPS_TTL_OK if (eps or {}).get("quality") == "ok" else _EPS_TTL_MISS
+    _EPS_CACHE[code] = (now, ttl, eps)
     return eps
 
 
