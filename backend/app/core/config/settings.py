@@ -131,6 +131,12 @@ class Settings(BaseSettings):
     # 預設 False（灰度）；確認 shadow mode 不劣化後再切 True。
     comprehensive_pipeline_enabled: bool = False
 
+    # ── LLM 覆核層：回答完成後用低一階模型交叉檢查數據/邏輯（core/llm/verifier.py）──
+    verify_enabled: bool = True
+    verify_model_override: str = ""  # 空 = 自動降家族（Opus→Sonnet→Haiku）；填模型 ID 覆寫
+    verify_timeout_sec: int = 120    # subscription CLI 首 token 內建 120s fail-fast，外層不能更短
+    verify_min_text_len: int = 500   # 短於此的回答不覆核
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",

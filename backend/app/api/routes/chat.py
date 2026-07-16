@@ -3612,6 +3612,52 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
         except Exception as _audit_err:
             logger.debug(f"mechanical_audit 失敗（不影響主流程）: {_audit_err}")
 
+        # 4d-2. LLM 覆核：低一階模型交叉檢查數據/邏輯（core/llm/verifier.py）
+        # 事後、graceful、不阻擋 — 抓 fact_check 規則層抓不到的方向矛盾/編造/推理錯誤
+        try:
+            from app.core.llm.verifier import should_verify, verify_answer, format_verify_block
+            if settings.verify_enabled and should_verify(final_text, _intents):
+                yield _sse_event("verify", {"status": "checking"})
+                _v = await verify_answer(
+                    final_text, request.chart_state, locals().get("exec_result"),
+                    provider, api_key, base_url, model_name or "",
+                    override=settings.verify_model_override,
+                    timeout_sec=settings.verify_timeout_sec,
+                )
+                if _v:
+                    yield _sse_event("verify", {
+                        "status": _v["status"], "model": _v["model"], "issues": _v["issues"],
+                    })
+                    if _v["issues"]:
+                        yield _sse_event("warning", {
+                            "message": f"⚠️ AI 覆核發現 {len(_v['issues'])} 個可疑問題，請複核",
+                            "type": "verify_issues",
+                            "count": len(_v["issues"]),
+                        })
+                        _v_block = format_verify_block(_v)
+                        for chunk in _split_text_for_streaming(_v_block):
+                            yield _sse_event("token", {"content": chunk})
+                            await asyncio.sleep(0.02)
+                        final_text += _v_block  # 併入 final_text → post-process 存 DB
+                    _v_usage = _v.get("usage")
+                    if api_key and _v_usage:
+                        _v_usage_dict = _v_usage.to_dict()
+                        usage_tracker.record_usage(
+                            api_key=api_key,
+                            provider=provider,
+                            model=_v["model"],
+                            prompt_tokens=_v_usage.prompt_tokens,
+                            completion_tokens=_v_usage.completion_tokens,
+                            total_tokens=_v_usage.total_tokens,
+                            estimated_cost_usd=_v_usage_dict.get("estimated_cost_usd", 0.0),
+                            conversation_id=conversation_id,
+                            request_type="verify",
+                        )
+                else:
+                    yield _sse_event("verify", {"status": "skipped"})
+        except Exception as _v_err:
+            logger.debug(f"verify 失敗（不影響主流程）: {_v_err}")
+
         # 5. 立刻發 done event，post-processing 改在背景跑（避免 SSE 沉默觸發前端 timeout）
         done_data: dict = {"conversation_id": conversation_id}
         try:
