@@ -314,6 +314,11 @@ def format_function_results(function_calls: list[dict], exec_result: dict) -> st
             elif fname == "scan_conditional_probability":
                 parts.append(f"目標: {r.get('target', '?')}")
                 parts.append(f"數據範圍: {r.get('data_range', '?')}，共 {r.get('total_bars', 0)} 根 K 線")
+                if r.get("range_notice"):
+                    parts.append(f"⚠️ {r['range_notice']}")
+                if r.get("status") == "error" and r.get("suggestion"):
+                    parts.append(f"執行失敗：{r.get('message', '?')}")
+                    parts.append(f"💡 修正建議（必須轉告使用者或修正參數重試）: {r['suggestion']}")
                 ob = r.get("overall_best", {})
                 if ob:
                     parts.append(f"★ 最佳區間: {ob.get('indicator', '?')} = {ob.get('range', '?')} → "

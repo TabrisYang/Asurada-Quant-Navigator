@@ -111,6 +111,7 @@ ALLOWED_FUNCTIONS = {
     "run_backtest",
     "compare_strategies",
     "analyze_event_patterns",
+    "analyze_squeeze_breakout",
     "run_quant_research",
     "optimize_indicator_params",
     "scan_conditional_probability",
@@ -198,6 +199,7 @@ async def execute_function_calls(
     # 可並行執行的重量級非同步函式
     _PARALLEL_FUNCS = {
         "run_backtest", "compare_strategies", "analyze_event_patterns",
+        "analyze_squeeze_breakout",
         "run_quant_research", "optimize_indicator_params",
         "scan_conditional_probability", "generate_scenarios",
         "detect_smc_structure", "compute_laddered_entries",
@@ -316,6 +318,9 @@ async def execute_function_calls(
                     return {"function": name, "result": result}
                 elif name == "analyze_event_patterns":
                     result = await _exec_analyze_event_patterns(args, default_symbol, default_timeframe)
+                    return {"function": name, "result": result}
+                elif name == "analyze_squeeze_breakout":
+                    result = await _exec_squeeze_breakout_timing(args, default_symbol, default_timeframe)
                     return {"function": name, "result": result}
                 elif name == "run_quant_research":
                     result = await _exec_quant_research(args, default_symbol, default_timeframe, progress)
@@ -704,6 +709,25 @@ async def _exec_compare_strategies(args: dict, default_symbol: str, default_tf: 
         for rank, item in enumerate(valid, 1):
             item["rank"] = rank
 
+    # v153 防呆：全部策略都無有效結果時不再回「成功但空」（LLM 會誤引用空結果或白跑）
+    if not valid:
+        per_errors = [
+            f"{c.get('name', '?')}: {c.get('message', '未知原因')}"
+            for c in comparison if c.get("status") != "success"
+        ]
+        return {
+            "status": "error",
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "total_strategies": len(strategies),
+            "message": f"{len(strategies)} 個策略全部無有效回測結果",
+            "per_strategy_errors": per_errors[:5],
+            "suggestion": (
+                "檢查每個策略是否都帶了 entry_conditions 與 exit_conditions；"
+                "可先用 run_backtest 單策略驗證條件格式後再比較"
+            ),
+        }
+
     return {
         "status": "success",
         "symbol": symbol,
@@ -928,6 +952,28 @@ async def _exec_analyze_event_patterns(args: dict, default_symbol: str, default_
 
     event_dates = [str(timestamps[i])[:10] for i in event_indices]
 
+    # ── 5. 事件本身的漲跌幅聚合（v153：使用者最常問「通常漲/跌多少」，原本只在
+    #      annotation 逐筆算過從未聚合，逼使用者再跑一輪）──
+    event_magnitude_stats = None
+    if event_type in ("price_surge", "price_drop"):
+        mags = [
+            (closes[i] - closes[i - n_bars]) / closes[i - n_bars] * 100
+            for i in event_indices
+        ]
+        if mags:
+            arr_m = np.array(mags)
+            event_magnitude_stats = {
+                "description": f"事件當根（{n_bars} 根）漲跌幅 % 的分布",
+                "mean": round(float(np.mean(arr_m)), 2),
+                "median": round(float(np.median(arr_m)), 2),
+                "std": round(float(np.std(arr_m)), 2),
+                "min": round(float(np.min(arr_m)), 2),
+                "max": round(float(np.max(arr_m)), 2),
+                "p25": round(float(np.percentile(arr_m, 25)), 2),
+                "p75": round(float(np.percentile(arr_m, 75)), 2),
+                "samples": len(mags),
+            }
+
     return {
         "status": "success",
         "symbol": symbol,
@@ -937,11 +983,142 @@ async def _exec_analyze_event_patterns(args: dict, default_symbol: str, default_
         "lookback_bars": lookback,
         "events_found": len(event_indices),
         "event_dates": event_dates[:30],
+        "event_magnitude_stats": event_magnitude_stats,
         "common_patterns": common_patterns,
         "data_range": f"{str(timestamps[0])[:10]} ~ {str(timestamps[-1])[:10]}",
         "total_bars": len(df),
         "annotations": annotations,
         "warning": "統計共通性不代表因果關係，僅供參考。樣本數越多結論越可靠。" if len(event_indices) < 10 else None,
+    }
+
+
+async def _exec_squeeze_breakout_timing(args: dict, default_symbol: str, default_tf: str) -> dict:
+    """布林壓縮進入 → 首次穿越上/下軌的 time-to-event 統計（v153）。
+
+    回答「進入 %B<x 且帶寬百分位<y 後，通常幾根 K 線內突破/跌破布林帶」。
+    口徑：BB(20, ±2σ)；帶寬百分位 = 帶寬的 rolling 120 根排名（與 vol_squeeze / 跨日追蹤一致）。
+    進入事件 = 前一根不在狀態、當根在狀態（避免連續在狀態的日子重複計數）。
+    """
+    import numpy as np
+
+    symbol = args.get("symbol", default_symbol)
+    timeframe = args.get("timeframe", default_tf)
+    pctb_max = float(args.get("pctb_max", 10.0))
+    width_pctile_max = float(args.get("width_pctile_max", 10.0))
+    horizon = max(1, int(args.get("horizon_bars", 20)))
+    start = args.get("start_date")
+    end = args.get("end_date")
+
+    _BB_P, _BB_LB = 20, 120
+    _min_bars = _BB_P + _BB_LB + horizon + 10
+    df = _load_local_data(symbol, timeframe, start, end)
+    if len(df) < _min_bars and (start or end):
+        df_full = _load_local_data(symbol, timeframe)
+        if len(df_full) >= _min_bars:
+            logger.info(f"壓縮突破統計 [{symbol}]: 指定範圍不足，擴大至全部本地數據（{len(df_full)} 根）")
+            df = df_full
+    if df.empty or len(df) < _min_bars:
+        return {
+            "status": "error",
+            "message": f"數據不足（{len(df)} 根 K 線，需至少 {_min_bars} 根）。",
+            "suggestion": "先用 sync_symbol_data 同步更多歷史數據，或移除日期範圍讓系統用全量數據。",
+        }
+
+    df = df.sort_values("timestamp").reset_index(drop=True)
+    close = df["close"].astype(float)
+    sma = close.rolling(_BB_P).mean()
+    std = close.rolling(_BB_P).std()
+    upper = (sma + 2 * std).values
+    lower = (sma - 2 * std).values
+    band = pd.Series(upper - lower)
+    width = (2 * std / sma.replace(0, np.nan)) * 100
+    width_pctile = (width.rolling(_BB_LB).rank(pct=True) * 100).values
+    pctb = ((close.values - lower) / band.replace(0, np.nan).values) * 100
+
+    n = len(df)
+    in_state = np.zeros(n, dtype=bool)
+    for i in range(n):
+        if not (np.isnan(pctb[i]) or np.isnan(width_pctile[i])):
+            in_state[i] = pctb[i] < pctb_max and width_pctile[i] < width_pctile_max
+
+    entries = [i for i in range(1, n) if in_state[i] and not in_state[i - 1]]
+    if not entries:
+        return {
+            "status": "no_events",
+            "message": f"{symbol} {timeframe} 歷史上找不到「%B < {pctb_max} 且帶寬百分位 < {width_pctile_max}」的進入事件",
+            "suggestion": "嘗試放寬 pctb_max 或 width_pctile_max（例如 15 / 20）",
+        }
+
+    closes = close.values
+    up_bars: list[int] = []
+    down_bars: list[int] = []
+    no_cross = 0
+    for e in entries:
+        first = None
+        for j in range(e + 1, min(e + 1 + horizon, n)):
+            if not np.isnan(upper[j]) and closes[j] > upper[j]:
+                first = ("up", j - e)
+                break
+            if not np.isnan(lower[j]) and closes[j] < lower[j]:
+                first = ("down", j - e)
+                break
+        if first is None:
+            no_cross += 1
+        elif first[0] == "up":
+            up_bars.append(first[1])
+        else:
+            down_bars.append(first[1])
+
+    def _bars_stats(arr: list[int]) -> Optional[dict]:
+        if not arr:
+            return None
+        a = np.array(arr)
+        return {
+            "median": round(float(np.median(a)), 1),
+            "mean": round(float(np.mean(a)), 1),
+            "p25": round(float(np.percentile(a, 25)), 1),
+            "p75": round(float(np.percentile(a, 75)), 1),
+            "min": int(a.min()),
+            "max": int(a.max()),
+        }
+
+    n_entries = len(entries)
+    resolved = len(up_bars) + len(down_bars)
+    timestamps = df["timestamp"].astype(str).tolist()
+    return {
+        "status": "success",
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "condition": (
+            f"%B < {pctb_max} 且 BB帶寬百分位 < {width_pctile_max}"
+            f"（BB {_BB_P}±2σ，百分位回看 {_BB_LB} 根）"
+        ),
+        "horizon_bars": horizon,
+        "data_range": f"{timestamps[0][:10]} ~ {timestamps[-1][:10]}",
+        "total_bars": n,
+        "n_entries": n_entries,
+        "up_first": {
+            "count": len(up_bars),
+            "pct": round(len(up_bars) / n_entries * 100, 1),
+            "bars_to_cross": _bars_stats(up_bars),
+        },
+        "down_first": {
+            "count": len(down_bars),
+            "pct": round(len(down_bars) / n_entries * 100, 1),
+            "bars_to_cross": _bars_stats(down_bars),
+        },
+        "no_cross_within_horizon": {
+            "count": no_cross,
+            "pct": round(no_cross / n_entries * 100, 1),
+        },
+        "bars_to_cross_all": _bars_stats(up_bars + down_bars),
+        "recent_entry_dates": [timestamps[e][:10] for e in entries[-15:]],
+        "warning": (
+            f"樣本僅 {n_entries} 次，統計不穩定，僅供參考"
+            if n_entries < 15 else
+            "首次穿越方向不代表最終行情方向；假突破未在此統計中排除"
+        ),
+        "resolved_pct": round(resolved / n_entries * 100, 1),
     }
 
 
@@ -1591,14 +1768,35 @@ async def _exec_conditional_prob_scan(args: dict, default_symbol: str, default_t
 
     df = _load_local_data(symbol, timeframe, start, end)
 
+    # v153 防呆：指定日期範圍載不到足夠數據時，自動退回全量本地數據（仿事件分析的
+    # fallback）。原本直接硬失敗回「0 根 K 線」，昂貴呼叫白跑且 LLM 只能叫使用者重問。
+    _min_bars_cp = forward_bars + 50
+    range_fallback_notice = None
+    if len(df) < _min_bars_cp and (start or end):
+        df_full = _load_local_data(symbol, timeframe)
+        if len(df_full) >= _min_bars_cp:
+            range_fallback_notice = (
+                f"指定日期範圍（{start or '?'} ~ {end or '?'}）僅載到 {len(df)} 根，"
+                f"已自動改用全部本地數據（{len(df_full)} 根）"
+            )
+            logger.info(f"條件機率掃描 [{symbol}]: {range_fallback_notice}")
+            df = df_full
+
     # 使用全量歷史數據以提升統計顯著性；另外保留近期 15% 子集做對比
     df_recent = None
     if df is not None and len(df) > forward_bars + 60:
         recent_bars = max(60, len(df) // 7)  # 約 15% 的數據，最少 60 根
         df_recent = df.tail(recent_bars).copy()
 
-    if df.empty or len(df) < forward_bars + 50:
-        return {"status": "error", "message": f"數據不足（{len(df)} 根 K 線），至少需要 {forward_bars + 50} 根。"}
+    if df.empty or len(df) < _min_bars_cp:
+        return {
+            "status": "error",
+            "message": f"數據不足（{len(df)} 根 K 線），至少需要 {_min_bars_cp} 根。",
+            "suggestion": (
+                f"本地找不到 {symbol} {timeframe} 的足夠數據：請確認標的代碼與週期正確，"
+                "或先用 sync_symbol_data 同步歷史數據後重試；若有指定日期範圍，可移除讓系統用全量數據。"
+            ),
+        }
 
     closes = df["close"].values.astype(float)
     highs = df["high"].values.astype(float)
@@ -1788,6 +1986,8 @@ async def _exec_conditional_prob_scan(args: dict, default_symbol: str, default_t
         },
         "warning": "條件機率不代表因果關係，高機率區間可能樣本較少。建議搭配其他分析交叉驗證。",
     }
+    if range_fallback_notice:
+        result["range_notice"] = range_fallback_notice
     if recent_comparison:
         result["recent_comparison"] = recent_comparison
 

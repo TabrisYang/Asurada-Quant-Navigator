@@ -861,6 +861,45 @@ FUNCTION_DEFINITIONS = [
             },
         },
     },
+    # ── 布林壓縮 → 首次穿越軌道 time-to-event 統計（v153）──
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_squeeze_breakout",
+            "description": (
+                "布林壓縮 time-to-event 統計：找出歷史上「進入壓縮狀態」（%B < pctb_max 且 "
+                "BB 帶寬百分位 < width_pctile_max）的每一次事件，統計進入後第幾根 K 線首次收盤"
+                "突破上軌 / 跌破下軌，回傳方向占比與天數分布（median/p25/p75）。"
+                "適用場景：「進入 %B<10 且帶寬百分位<10 後，通常幾天會突破或跌破布林帶」。"
+                "口徑：BB(20, ±2σ)，帶寬百分位 = 帶寬的 rolling 120 根排名，與跨日追蹤/vol_squeeze 一致。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pctb_max": {
+                        "type": "number",
+                        "description": "%B 上限（%）。%B = (close-下軌)/(上軌-下軌)×100，<10 代表貼近/跌破下軌",
+                        "default": 10,
+                    },
+                    "width_pctile_max": {
+                        "type": "number",
+                        "description": "BB 帶寬百分位上限（%），<10 代表處於歷史最壓縮的 10% 區間",
+                        "default": 10,
+                    },
+                    "horizon_bars": {
+                        "type": "integer",
+                        "description": "進入後最多往前看幾根 K 線等待穿越（超過視為「未表態」）",
+                        "default": 20,
+                    },
+                    "symbol": {"type": "string", "description": "交易對，留空使用當前"},
+                    "timeframe": {"type": "string", "description": "時間級別，留空使用當前"},
+                    "start_date": {"type": "string", "description": "開始日期 YYYY-MM-DD"},
+                    "end_date": {"type": "string", "description": "結束日期 YYYY-MM-DD"},
+                },
+                "required": [],
+            },
+        },
+    },
     # ── 完整量化研究 ──
     {
         "type": "function",
