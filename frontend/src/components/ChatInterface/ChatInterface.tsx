@@ -4,6 +4,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { useChartStore } from '../../stores/chartStore';
 import { streamChatMessage, fetchUsageSummary, fetchChatHistory, fetchConversationMessages, fetchDistillStatus, streamDistillPreview, confirmDistill, fetchFragments, deleteFragment, addUserNote } from '../../services/api';
 import { toast } from '../Toast';
+import { MessageMarkdown } from './MessageMarkdown';
 import type { FragmentItem } from '../../services/api';
 import type { ChatMessage, TokenUsage, LLMProvider, Timeframe, Annotation } from '../../types';
 
@@ -1382,8 +1383,11 @@ export default function ChatInterface() {
                   </span>
                 )}
 
-                {/* 訊息內容 */}
-                {msg.content}
+                {/* 訊息內容：AI 訊息完成後用 markdown 渲染（表格/粗體/標題），
+                    串流中維持純文字避免逐 token 重新解析 */}
+                {msg.role === 'assistant' && !msg.isStreaming && msg.content
+                  ? <MessageMarkdown content={String(msg.content)} />
+                  : msg.content}
 
                 {/* 串流中的游標（正在輸出文字時） */}
                 {msg.isStreaming && msg.content && !msg.statusText && (
