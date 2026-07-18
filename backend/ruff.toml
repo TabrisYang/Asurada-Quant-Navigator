@@ -1,0 +1,55 @@
+# Ruff lint 設定（v154 — CI 基線鎖定）
+#
+# 背景：feature 分支長期沒跑 CI（原本只在 main 觸發），累積了 118 個 lint 債，
+# 其中散布在 pre-flight 紅線檔（regime_subtype、prediction_tracker 等 — 見 CLAUDE.md，
+# 動它們前必須跑 shadow mode）。本設定「鎖住現況」讓 CI 可以立即開到所有分支：
+# - 全域 ignore：既有代碼風格慣例（不是錯誤）
+# - per-file-ignores：逐檔鎖定既有的 F 類債 — 新檔案與未列出的檔案仍受完整檢查
+# 清理這些債請另開專門 PR（紅線檔需先 pre-flight），清一檔就從清單移除一檔。
+
+[lint]
+ignore = [
+    "E402",  # module import 不在檔案頂部（既有 lazy import 慣例）
+    "E701",  # 單行多語句（冒號）
+    "E702",  # 單行多語句（分號）
+    "E731",  # lambda 賦值
+    "E741",  # 模糊變數名（l/I/O）
+    "F541",  # 無佔位符的 f-string
+]
+
+[lint.per-file-ignores]
+"app/api/routes/observability.py" = ["F401"]
+"app/api/routes/predictions.py" = ["F401"]
+"app/api/routes/tw_scanner.py" = ["F841"]
+"app/core/auto_scanner.py" = ["F841"]
+"app/core/backtest/engine.py" = ["F841"]
+"app/core/champion_challenger.py" = ["F401"]
+"app/core/cross_stock_signals.py" = ["F841"]
+"app/core/drift_monitor.py" = ["F401", "F841"]
+"app/core/event_calendar_sync.py" = ["F401"]
+"app/core/fundamental_analyzer.py" = ["F401"]
+"app/core/imitation_predictor.py" = ["F401"]
+"app/core/imitation_trainer.py" = ["F401"]
+"app/core/llm/executor.py" = ["F401", "F811", "F841"]
+"app/core/ml_client.py" = ["F401"]
+"app/core/position_tracker.py" = ["F401"]
+"app/core/prediction_tracker.py" = ["F841"]
+"app/core/probability_baseline.py" = ["F401"]
+"app/core/regime_subtype.py" = ["F401", "F841"]
+"app/core/sector_analyzer.py" = ["F401"]
+"app/core/strategy_insights.py" = ["F401"]
+"app/core/timeseries_decomposition.py" = ["F401"]
+"app/core/watcher.py" = ["F401"]
+"app/data/fetchers/tw_fundamental.py" = ["F401"]
+"research/lstm_sca_arima_garch/arima_trend.py" = ["F401"]
+"research/lstm_sca_arima_garch/hybrid_pipeline.py" = ["F401"]
+"research/lstm_sca_arima_garch/run_experiment.py" = ["F401"]
+"scripts/audit_ml_predictions.py" = ["F401"]
+"scripts/check_p3_ready.py" = ["F401"]
+"scripts/daily_drift_check.py" = ["F401"]
+"scripts/retrain_imitation.py" = ["F401"]
+"tests/test_v100_regression.py" = ["F401"]
+"tests/test_v106.py" = ["F401"]
+"tests/test_v124_probability_triplet.py" = ["F401"]
+"tests/test_v136_bollinger_signals.py" = ["F401"]
+"tests/test_v138_segment_detection.py" = ["F401"]

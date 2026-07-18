@@ -1,8 +1,9 @@
 name: CI
 
+# push 對所有分支觸發（feature 分支平常也有保護）；PR 到 main 會多跑一次，可接受
 on:
   push:
-    branches: [main]
+    branches: ["**"]
   pull_request:
     branches: [main]
 
@@ -19,6 +20,9 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r backend/requirements.txt
+
+      - name: Repo health check
+        run: python backend/scripts/check_repo_health.py
 
       - name: Lint
         run: |
@@ -43,8 +47,13 @@ jobs:
           cache: "npm"
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Install & Build
-        run: |
-          cd frontend
-          npm ci
-          npm run build
+      - name: Install
+        run: cd frontend && npm ci
+
+      # 注意：根 tsconfig 是 project references（files: []），必須用 tsc -b；
+      # 裸 tsc --noEmit 會 "no inputs" 直接失敗
+      - name: Typecheck
+        run: cd frontend && npx tsc -b
+
+      - name: Build
+        run: cd frontend && npm run build

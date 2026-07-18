@@ -33,10 +33,19 @@ LINE_LIMITS: dict[str, tuple[int, int]] = {
     "backend/app/core/llm/function_defs.py": (3000, 3500),
     "backend/app/core/llm/prompt_modules.py": (2600, 3200),
     "backend/app/core/llm/executor.py": (2600, 3000),
-    "backend/app/core/llm/adapter.py": (2000, 2500),
+    # v154：adapter.py 拆為 adapters/ package（façade ~40 行）；護欄跟著搬
+    "backend/app/core/llm/adapter.py": (100, 200),
+    "backend/app/core/llm/adapters/base.py": (600, 800),
+    "backend/app/core/llm/adapters/claude_subscription.py": (900, 1100),
+    "backend/app/core/llm/adapters/gemini_adapter.py": (500, 700),
+    "backend/app/core/llm/adapters/claude_adapter.py": (450, 600),
+    "backend/app/core/llm/adapters/openai_adapter.py": (450, 600),
     "backend/app/core/prediction_tracker.py": (1900, 2300),
     "frontend/src/components/ChatInterface/ChatInterface.tsx": (2400, 2900),
     "frontend/src/stores/chartStore.ts": (700, 900),
+    # v154：TwBBScanPanel 拆分後的護欄
+    "frontend/src/components/TwBBScanPanel/TwBBScanPanel.tsx": (1000, 1300),
+    "frontend/src/components/TwBBScanPanel/TrackView.tsx": (1100, 1400),
 }
 
 # 規則 2：chat.py 中 chart_state[X] = ... 的賦值次數限制
