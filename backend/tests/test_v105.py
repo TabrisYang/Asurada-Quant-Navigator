@@ -67,7 +67,13 @@ def test_quality_gate_rejects_low_auc(tmp_path, monkeypatch):
     monkeypatch.setattr(factor_weight_learner, "_WEIGHTS_PATH", weights_path)
 
     # 直接呼叫，預期因樣本/AUC 問題被 reject
-    result = factor_weight_learner.fit_bias_weights(min_samples=50)
+    # 資料依賴：需要本地 predictions.db 有 verified samples；CI / 新環境沒有 → skip
+    try:
+        result = factor_weight_learner.fit_bias_weights(min_samples=50)
+    except RuntimeError as e:
+        if "verified samples" in str(e):
+            pytest.skip("無 verified samples（predictions.db 空）— 資料依賴測試跳過")
+        raise
     # 若 lockbox AUC < 0.55 status="rejected_low_auc"，weights 檔不存在
     if result.get("status") == "rejected_low_auc":
         assert not weights_path.exists(), "rejected 不該存到 production path"
