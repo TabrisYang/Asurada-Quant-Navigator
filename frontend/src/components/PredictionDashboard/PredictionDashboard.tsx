@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useChartStore } from '../../stores/chartStore';
 import {
+  apiFetch,
   fetchPredictionStats, fetchActivePredictions, fetchPredictionHistory,
   updatePredictionNote, generateReview, clearPredictions,
   fetchScenarios, fetchAdjustments, recalculateAdjustments,
@@ -169,7 +170,7 @@ export default function PredictionDashboard() {
     setCalibrationLoading(true);
     try {
       const params = chartSymbol ? `?symbol=${encodeURIComponent(chartSymbol)}&days=90` : '?days=90';
-      const res = await fetch(`/api/predictions/calibration${params}`);
+      const res = await apiFetch(`/api/predictions/calibration${params}`);
       const data = await res.json();
       setCalibrationData(data);
     } catch { setCalibrationData(null); }
@@ -180,7 +181,7 @@ export default function PredictionDashboard() {
   const loadImitation = useCallback(async () => {
     setImitationLoading(true);
     try {
-      const res = await fetch('/api/predictions/imitation/status');
+      const res = await apiFetch('/api/predictions/imitation/status');
       const data = await res.json();
       setImitationStatus(data);
     } catch { setImitationStatus(null); }
@@ -192,8 +193,8 @@ export default function PredictionDashboard() {
     setStrategyLoading(true);
     try {
       const [perfRes, rsRes] = await Promise.all([
-        fetch('/api/predictions/strategy_performance?days=90'),
-        fetch('/api/predictions/cross_symbol_rs?timeframe=4h&days=30'),
+        apiFetch('/api/predictions/strategy_performance?days=90'),
+        apiFetch('/api/predictions/cross_symbol_rs?timeframe=4h&days=30'),
       ]);
       setStrategyPerf(await perfRes.json());
       setCrossSymbolRS(await rsRes.json());
@@ -209,9 +210,9 @@ export default function PredictionDashboard() {
   const loadImitationObservatory = useCallback(async () => {
     try {
       const [aucRes, shapRes, divRes] = await Promise.all([
-        fetch('/api/predictions/imitation/auc_history?limit=12'),
-        fetch('/api/predictions/imitation/shap_top_features?days=30'),
-        fetch('/api/predictions/imitation/divergence_stats'),
+        apiFetch('/api/predictions/imitation/auc_history?limit=12'),
+        apiFetch('/api/predictions/imitation/shap_top_features?days=30'),
+        apiFetch('/api/predictions/imitation/divergence_stats'),
       ]);
       const aucData = await aucRes.json();
       const shapData = await shapRes.json();
@@ -991,7 +992,7 @@ export default function PredictionDashboard() {
                     '⚠️ 跳過 Quality Gate 檢查（樣本量 / AUC / Brier 不再強制）\n\n' +
                     '若要退出：按下方「停用 v101」即可'
                   )) return;
-                  const res = await fetch('/api/predictions/imitation/force_enable', { method: 'POST' });
+                  const res = await apiFetch('/api/predictions/imitation/force_enable', { method: 'POST' });
                   const data = await res.json();
                   alert(`✅ ${data.message}`);
                   loadImitation();
@@ -1005,7 +1006,7 @@ export default function PredictionDashboard() {
                 <button
                   onClick={async () => {
                     if (!confirm('立即重訓？需 30-60 秒。')) return;
-                    const res = await fetch('/api/predictions/imitation/retrain', { method: 'POST' });
+                    const res = await apiFetch('/api/predictions/imitation/retrain', { method: 'POST' });
                     const data = await res.json();
                     alert(`結果：${data.status}\n${JSON.stringify(data, null, 2).slice(0, 500)}`);
                     loadImitation();
@@ -1016,7 +1017,7 @@ export default function PredictionDashboard() {
                 <button
                   onClick={async () => {
                     if (!confirm('回到 stable_fallback 模型？')) return;
-                    await fetch('/api/predictions/imitation/rollback', { method: 'POST' });
+                    await apiFetch('/api/predictions/imitation/rollback', { method: 'POST' });
                     loadImitation();
                   }}
                   className="flex-1 py-1.5 rounded text-xs cursor-pointer"
@@ -1025,7 +1026,7 @@ export default function PredictionDashboard() {
                 <button
                   onClick={async () => {
                     if (!confirm('停用 v101？所有使用者立刻退回 v100。')) return;
-                    await fetch('/api/predictions/imitation/disable', { method: 'POST' });
+                    await apiFetch('/api/predictions/imitation/disable', { method: 'POST' });
                     loadImitation();
                   }}
                   className="flex-1 py-1.5 rounded text-xs cursor-pointer"

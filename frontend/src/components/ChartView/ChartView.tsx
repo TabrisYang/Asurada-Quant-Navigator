@@ -8,6 +8,7 @@
  */
 
 import { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react';
+import { apiFetch } from '../../services/api';
 import {
   createChart,
   ColorType,
@@ -538,7 +539,7 @@ export default function ChartView() {
       return;
     }
     let cancelled = false;
-    fetch('/api/chart/available/list')
+    apiFetch('/api/chart/available/list')
       .then(r => r.ok ? r.json() : { data: [] })
       .then((res: { data: Array<{ symbol: string; timeframe: string }> }) => {
         if (cancelled) return;
@@ -576,7 +577,7 @@ export default function ChartView() {
         if (timeframe) {
           // 不限制 timeframe，讓所有 timeframe 的預測都顯示在當前圖上
         }
-        const res = await fetch(`/api/predictions/by_symbol${params}`);
+        const res = await apiFetch(`/api/predictions/by_symbol${params}`);
         const data = await res.json();
         if (cancelled || !data.predictions) return;
         for (const p of data.predictions) {

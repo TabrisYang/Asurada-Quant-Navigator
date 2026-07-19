@@ -11,9 +11,15 @@ class Settings(BaseSettings):
     """應用程式全域設定，支援 .env 檔案覆蓋"""
 
     # 伺服器
-    host: str = "0.0.0.0"
+    # v155 安全預設：只綁本機（原 0.0.0.0 讓區網任何裝置可打無認證的 API）。
+    # 刻意要區網存取時在 .env 設 HOST=0.0.0.0，並強烈建議同時設 API_TOKEN。
+    host: str = "127.0.0.1"
     port: int = 8000
     debug: bool = False
+
+    # v155 選配 API 認證：非空時所有 API（除 /api/health 與 CORS preflight）
+    # 需帶 X-API-Token header。前端在設定面板輸入同一組 token 即自動附帶。
+    api_token: str = ""
 
     # 資料路徑
     data_dir: str = "./data"

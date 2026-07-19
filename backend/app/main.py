@@ -316,6 +316,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# v155 選配 API 認證：settings.api_token 非空時，所有請求需帶 X-API-Token。
+# 豁免：CORS preflight（OPTIONS）與 /api/health（run.py 啟動檢測依賴）。
+# CORS 只擋瀏覽器同源、擋不住 curl — 此 middleware 是給刻意開放區網
+#（HOST=0.0.0.0）時的第二道防線；api_token 空時零行為改變。
+@app.middleware("http")
+async def _api_token_guard(request, call_next):
+    token = settings.api_token
+    if token and request.method != "OPTIONS" and request.url.path != "/api/health":
+        if request.headers.get("X-API-Token") != token:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=401, content={"detail": "無效或缺少 API Token"})
+    return await call_next(request)
+
+
 # 註冊路由
 app.include_router(chat.router, prefix="/api/chat", tags=["對話"])
 app.include_router(chart.router, prefix="/api/chart", tags=["圖表"])

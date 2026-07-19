@@ -36,6 +36,28 @@ class TestGoogleSheetsEndpoints:
         assert r.status_code == 400
 
 
+class TestApiTokenGuard:
+    """v155 選配認證：api_token 非空時除 /api/health 外都要 X-API-Token"""
+
+    def test_missing_token_401(self, monkeypatch):
+        from app.core.config.settings import settings
+        monkeypatch.setattr(settings, "api_token", "secret-token-123")
+        r = client.get("/api/google-sheets/setup")
+        assert r.status_code == 401
+
+    def test_correct_token_passes(self, monkeypatch):
+        from app.core.config.settings import settings
+        monkeypatch.setattr(settings, "api_token", "secret-token-123")
+        r = client.get("/api/google-sheets/setup", headers={"X-API-Token": "secret-token-123"})
+        assert r.status_code == 200
+
+    def test_health_exempt(self, monkeypatch):
+        from app.core.config.settings import settings
+        monkeypatch.setattr(settings, "api_token", "secret-token-123")
+        r = client.get("/api/health")
+        assert r.status_code == 200
+
+
 class TestScannerRangeValidation:
     def test_bad_scope_rejected(self):
         r = client.get(
