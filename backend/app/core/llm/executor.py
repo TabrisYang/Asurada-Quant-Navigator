@@ -685,11 +685,13 @@ async def _exec_compare_strategies(args: dict, default_symbol: str, default_tf: 
             df=df,
             entry_conditions=entry_conds, exit_conditions=exit_conds,
             direction=direction, stop_loss_pct=sl, take_profit_pct=tp,
+            symbol=symbol,
         )
         result_recent = run_backtest(
             df=df_recent,
             entry_conditions=entry_conds, exit_conditions=exit_conds,
             direction=direction, stop_loss_pct=sl, take_profit_pct=tp,
+            symbol=symbol,
         ) if len(df_recent) >= _MIN_BARS else None
 
         comparison.append({
@@ -786,6 +788,7 @@ async def _exec_backtest(args: dict, default_symbol: str, default_tf: str) -> di
         take_profit_pct=take_profit,
         initial_capital=capital,
         leverage=leverage,
+        symbol=symbol,
     )
     d = result.to_dict()
     d["data_range"] = _describe_range(df, timeframe)  # 軌道C：透明化實際測試範圍
@@ -1336,7 +1339,7 @@ async def _exec_quant_research(args: dict, default_symbol: str, default_tf: str,
             bt_result = run_backtest(
                 df, entry_conditions, exit_conditions,
                 direction=direction, stop_loss_pct=stop_loss, take_profit_pct=take_profit,
-                leverage=leverage,
+                leverage=leverage, symbol=symbol,
             )
             metrics = bt_result.metrics
             report["backtest"] = metrics
@@ -1367,7 +1370,7 @@ async def _exec_quant_research(args: dict, default_symbol: str, default_tf: str,
                     df, entry_conditions, exit_conditions,
                     direction=direction, stop_loss_pct=stop_loss, take_profit_pct=take_profit,
                     n_windows=5, leverage=leverage,
-                    optimize_sl_tp=True,
+                    optimize_sl_tp=True, symbol=symbol,
                 )
                 if wf.get("status") == "success":
                     report["walk_forward"] = {
@@ -1401,7 +1404,7 @@ async def _exec_quant_research(args: dict, default_symbol: str, default_tf: str,
                     df, entry_conditions, exit_conditions,
                     n_groups=5, direction=direction,
                     stop_loss_pct=stop_loss, take_profit_pct=take_profit,
-                    leverage=leverage, optimize_sl_tp=True,
+                    leverage=leverage, optimize_sl_tp=True, symbol=symbol,
                 )
                 if cpcv.get("status") == "success":
                     report["cpcv"] = {

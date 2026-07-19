@@ -40,6 +40,7 @@ def run_walk_forward(
     optimize_sl_tp: bool = True,
     embargo: int = 5,
     ladder_config: Optional[dict] = None,
+    symbol: str = "",
 ) -> dict:
     """執行 Walk Forward Analysis（優化版）。
 
@@ -99,6 +100,7 @@ def run_walk_forward(
             best_sl, best_tp, best_sharpe = _optimize_on_train(
                 train_df, entry_conditions, exit_conditions,
                 direction, leverage, stop_loss_pct, take_profit_pct,
+                symbol=symbol,
             )
         else:
             best_sl = stop_loss_pct
@@ -110,7 +112,7 @@ def run_walk_forward(
             train_df, entry_conditions, exit_conditions,
             direction=direction, stop_loss_pct=best_sl,
             take_profit_pct=best_tp, initial_capital=initial_capital,
-            leverage=leverage, ladder_config=ladder_config,
+            leverage=leverage, ladder_config=ladder_config, symbol=symbol,
         )
 
         # ── 測試集回測（用訓練集優化的參數）──
@@ -118,7 +120,7 @@ def run_walk_forward(
             test_df, entry_conditions, exit_conditions,
             direction=direction, stop_loss_pct=best_sl,
             take_profit_pct=best_tp, initial_capital=initial_capital,
-            leverage=leverage, ladder_config=ladder_config,
+            leverage=leverage, ladder_config=ladder_config, symbol=symbol,
         )
 
         train_m = train_result.metrics
@@ -229,6 +231,7 @@ def _optimize_on_train(
     leverage: float,
     default_sl: Optional[float],
     default_tp: Optional[float],
+    symbol: str = "",
 ) -> tuple[Optional[float], Optional[float], float]:
     """在訓練集上 grid search 最佳 SL/TP，回傳 (best_sl, best_tp, best_sharpe)。"""
     best_sharpe = -999.0
@@ -240,7 +243,7 @@ def _optimize_on_train(
         baseline = run_backtest(
             train_df, entry_conditions, exit_conditions,
             direction=direction, stop_loss_pct=default_sl,
-            take_profit_pct=default_tp, leverage=leverage,
+            take_profit_pct=default_tp, leverage=leverage, symbol=symbol,
         )
         best_sharpe = baseline.metrics.get("sharpe_ratio", -999)
     except Exception:
@@ -254,7 +257,7 @@ def _optimize_on_train(
                 result = run_backtest(
                     train_df, entry_conditions, exit_conditions,
                     direction=direction, stop_loss_pct=sl,
-                    take_profit_pct=tp, leverage=leverage,
+                    take_profit_pct=tp, leverage=leverage, symbol=symbol,
                 )
                 sharpe = result.metrics.get("sharpe_ratio", -999)
                 n_trades = result.metrics.get("total_trades", 0)

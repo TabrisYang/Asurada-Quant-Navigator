@@ -28,6 +28,7 @@ def run_cpcv(
     stop_loss_pct: Optional[float] = None,
     take_profit_pct: Optional[float] = None,
     leverage: float = 1.0,
+    symbol: str = "",
 ) -> dict:
     """Combinatorial Purged Cross-Validation.
 
@@ -85,6 +86,7 @@ def run_cpcv(
             best_sl, best_tp = _optimize_params(
                 train_df, entry_conditions, exit_conditions,
                 direction, leverage, stop_loss_pct, take_profit_pct,
+                symbol=symbol,
             )
 
         # 測試集回測
@@ -92,7 +94,7 @@ def run_cpcv(
             test_result = run_backtest(
                 test_df, entry_conditions, exit_conditions,
                 direction=direction, stop_loss_pct=best_sl,
-                take_profit_pct=best_tp, leverage=leverage,
+                take_profit_pct=best_tp, leverage=leverage, symbol=symbol,
             )
             metrics = test_result.metrics
             combo_results.append({
@@ -189,7 +191,7 @@ def _get_test_indices(groups, test_ids):
     return sorted(indices)
 
 
-def _optimize_params(train_df, entry_cond, exit_cond, direction, leverage, default_sl, default_tp):
+def _optimize_params(train_df, entry_cond, exit_cond, direction, leverage, default_sl, default_tp, symbol=""):
     """在 train 上 grid search 最佳 SL/TP。"""
     best_sharpe = -999.0
     best_sl = default_sl
@@ -203,7 +205,7 @@ def _optimize_params(train_df, entry_cond, exit_cond, direction, leverage, defau
                 result = run_backtest(
                     train_df, entry_cond, exit_cond,
                     direction=direction, stop_loss_pct=sl,
-                    take_profit_pct=tp, leverage=leverage,
+                    take_profit_pct=tp, leverage=leverage, symbol=symbol,
                 )
                 sharpe = result.metrics.get("sharpe_ratio", -999)
                 n_trades = result.metrics.get("total_trades", 0)

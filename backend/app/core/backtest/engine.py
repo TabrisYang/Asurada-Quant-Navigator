@@ -23,6 +23,7 @@ from app.core.indicators import registry
 DEFAULT_SLIPPAGE_PCT = 0.0005   # 0.05% 保守滑點（靜態回退值）
 DEFAULT_FEE_PCT = 0.001         # 0.1% 手續費（單邊，靜態回退值）
 DEFAULT_FUNDING_RATE = 0.0001   # 0.01% 每 8 小時（永續合約資金費率）
+TW_SELL_TAX_PCT = 0.003         # 台股現股證交稅 0.3%（賣出端；當沖 0.15% 不採、維持保守）
 DEFAULT_CAPITAL = 10000.0       # 預設初始資金 (USDT)
 MIN_DATA_POINTS = 60            # 最低數據量需求
 OOS_RATIO = 0.3                 # out-of-sample 佔比
@@ -510,6 +511,7 @@ def run_backtest(
     timeframe: str = "4h",
     funding_rate: float = DEFAULT_FUNDING_RATE,
     ladder_config: Optional[dict] = None,
+    symbol: str = "",
 ) -> BacktestResult:
     """
     執行向量化回測
@@ -556,6 +558,15 @@ def run_backtest(
     static_cost_rate = slippage_pct + fee_pct
     capital = initial_capital
 
+    # v155：台股現股證交稅（賣出端 0.3%）。僅 /TWD 標的且 settings 開啟時觸發；
+    # symbol 為空或加密標的時 entry_tax/exit_tax 均為 0 → 加密路徑 bit-identical。
+    from app.core.config.settings import settings as _settings
+    sell_tax = TW_SELL_TAX_PCT if (symbol.endswith("/TWD") and _settings.tw_tax_enabled) else 0.0
+    entry_tax = sell_tax if direction == "short" else 0.0   # 做空進場＝賣出
+    exit_tax = sell_tax if direction == "long" else 0.0     # 做多出場＝賣出
+    if sell_tax > 0:
+        result.warnings.append("台股回測：賣出端已含 0.3% 證交稅（現股稅率，非當沖）")
+
     # 資金費率：每 bar 的費率（永續合約槓桿 > 1 時生效）
     bars_per_funding = _BARS_PER_FUNDING_PERIOD.get(timeframe, 2.0)
     funding_per_bar = funding_rate / bars_per_funding if leverage > 1 and bars_per_funding > 0 else 0.0
@@ -593,6 +604,7 @@ def run_backtest(
             stop_loss_pct=stop_loss_pct, take_profit_pct=take_profit_pct,
             initial_capital=initial_capital, leverage=leverage,
             funding_per_bar=funding_per_bar, cost_fn=_cost_at,
+            entry_tax=entry_tax, exit_tax=exit_tax,
             timestamps=timestamps, ladder_config=ladder_config,
             close=close, high=high, low=low, open_prices=open_prices,
             atr_arr=atr_arr, result=result,
@@ -613,7 +625,7 @@ def run_backtest(
         if not in_position:
             if entry_mask[i]:
                 raw_entry = open_prices[i] if i < len(open_prices) else close[i]
-                entry_price = raw_entry * (1 + cost_rate if direction == "long" else 1 - cost_rate)
+                entry_price = raw_entry * (1 + cost_rate + entry_tax if direction == "long" else 1 - cost_rate - entry_tax)
                 entry_idx = i
                 entry_capital = capital
                 in_position = True
@@ -655,7 +667,7 @@ def run_backtest(
                 sl_target_short = entry_price * (1 + stop_loss_pct)
 
                 if direction == "long" and low[i] <= sl_target_long:
-                    exit_price = min(sl_target_long, open_prices[i]) * (1 - cost_rate)
+                    exit_price = min(sl_target_long, open_prices[i]) * (1 - cost_rate - exit_tax)
                     trades.append(_make_trade(
                         entry_idx, i, timestamps, entry_price, exit_price,
                         direction, entry_capital, cost_rate, "stop_loss", leverage,
@@ -666,7 +678,7 @@ def run_backtest(
                     equity_arr.append(capital)
                     continue
                 elif direction == "short" and high[i] >= sl_target_short:
-                    exit_price = max(sl_target_short, open_prices[i]) * (1 + cost_rate)
+                    exit_price = max(sl_target_short, open_prices[i]) * (1 + cost_rate + exit_tax)
                     trades.append(_make_trade(
                         entry_idx, i, timestamps, entry_price, exit_price,
                         direction, entry_capital, cost_rate, "stop_loss", leverage,
@@ -683,7 +695,7 @@ def run_backtest(
                 tp_target_short = entry_price * (1 - take_profit_pct)
 
                 if direction == "long" and high[i] >= tp_target_long:
-                    exit_price = max(tp_target_long, open_prices[i]) * (1 - cost_rate)
+                    exit_price = max(tp_target_long, open_prices[i]) * (1 - cost_rate - exit_tax)
                     trades.append(_make_trade(
                         entry_idx, i, timestamps, entry_price, exit_price,
                         direction, entry_capital, cost_rate, "take_profit", leverage,
@@ -694,7 +706,7 @@ def run_backtest(
                     equity_arr.append(capital)
                     continue
                 elif direction == "short" and low[i] <= tp_target_short:
-                    exit_price = min(tp_target_short, open_prices[i]) * (1 + cost_rate)
+                    exit_price = min(tp_target_short, open_prices[i]) * (1 + cost_rate + exit_tax)
                     trades.append(_make_trade(
                         entry_idx, i, timestamps, entry_price, exit_price,
                         direction, entry_capital, cost_rate, "take_profit", leverage,
@@ -707,7 +719,7 @@ def run_backtest(
 
             # 檢查出場信號
             if exit_mask[i]:
-                exit_price = close[i] * (1 - cost_rate if direction == "long" else 1 + cost_rate)
+                exit_price = close[i] * (1 - cost_rate - exit_tax if direction == "long" else 1 + cost_rate + exit_tax)
                 trades.append(_make_trade(
                     entry_idx, i, timestamps, entry_price, exit_price,
                     direction, entry_capital, cost_rate, "signal", leverage,
@@ -720,7 +732,7 @@ def run_backtest(
 
     # 強制平倉
     if in_position:
-        exit_price = close[-1] * (1 - cost_rate if direction == "long" else 1 + cost_rate)
+        exit_price = close[-1] * (1 - cost_rate - exit_tax if direction == "long" else 1 + cost_rate + exit_tax)
         trades.append(_make_trade(
             entry_idx, len(close) - 1, timestamps, entry_price, exit_price,
             direction, entry_capital, cost_rate, "end_of_data", leverage,
@@ -786,7 +798,7 @@ def run_backtest(
     result.metrics = metrics
     result.equity_curve = [{"bar": i, "equity": round(float(v), 2)} for i, v in enumerate(equity)]
     result.trade_annotations = annotations
-    result.warnings = warnings
+    result.warnings = result.warnings + warnings  # 保留稅務等前置註記
     result.oos_metrics = oos_metrics
 
     # ★ Phase 2.2：per-regime 績效拆解（給 LLM 看「策略在哪個 regime 才有效」）
@@ -876,6 +888,8 @@ def _run_ladder_loop(
     leverage: float,
     funding_per_bar: float,
     cost_fn,
+    entry_tax: float = 0.0,
+    exit_tax: float = 0.0,
     timestamps: np.ndarray,
     ladder_config: dict,
     close: np.ndarray,
@@ -939,9 +953,9 @@ def _run_ladder_loop(
         weighted_entry = sum(leg["price"] * leg["capital_used"] for leg in filled_legs) / total_capital_used
         # 出場價含成本（同既有單進場處理）
         if direction == "long":
-            exit_price = exit_price_raw * (1 - cost_rate)
+            exit_price = exit_price_raw * (1 - cost_rate - exit_tax)
         else:
-            exit_price = exit_price_raw * (1 + cost_rate)
+            exit_price = exit_price_raw * (1 + cost_rate + exit_tax)
         bars_held = max(1, exit_idx - signal_idx)
         funding_cost = funding_per_bar * bars_held
         legs_meta = [
@@ -980,7 +994,7 @@ def _run_ladder_loop(
             signal_capital = capital
             # 首檔市價成交（含成本）
             raw_first = open_prices[i] if i < len(open_prices) else close[i]
-            first_fill = raw_first * (1 + cost_rate if direction == "long" else 1 - cost_rate)
+            first_fill = raw_first * (1 + cost_rate + entry_tax if direction == "long" else 1 - cost_rate - entry_tax)
             filled_legs.append({
                 "idx": i, "price": first_fill,
                 "ratio_pct": ratios[0],
@@ -1011,7 +1025,7 @@ def _run_ladder_loop(
                 )
                 if hit:
                     fill_p = order["target_price"]
-                    fill_p = fill_p * (1 + cost_rate if direction == "long" else 1 - cost_rate)
+                    fill_p = fill_p * (1 + cost_rate + entry_tax if direction == "long" else 1 - cost_rate - entry_tax)
                     filled_legs.append({
                         "idx": i, "price": fill_p,
                         "ratio_pct": order["ratio_pct"],
@@ -1151,7 +1165,7 @@ def _run_ladder_loop(
     result.metrics = metrics
     result.equity_curve = [{"bar": i, "equity": round(float(v), 2)} for i, v in enumerate(equity)]
     result.trade_annotations = annotations
-    result.warnings = warnings
+    result.warnings = result.warnings + warnings  # 保留稅務等前置註記
     result.oos_metrics = oos_metrics
 
     logger.info(

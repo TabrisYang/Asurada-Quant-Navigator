@@ -131,6 +131,9 @@ class Settings(BaseSettings):
     # 預設 False（灰度）；確認 shadow mode 不劣化後再切 True。
     comprehensive_pipeline_enabled: bool = False
 
+    # ── 回測：台股現股賣出證交稅 0.3%（backtest/engine.py，僅 /TWD 標的觸發）──
+    tw_tax_enabled: bool = True
+
     # ── LLM 覆核層：回答完成後用低一階模型交叉檢查數據/邏輯（core/llm/verifier.py）──
     verify_enabled: bool = True
     verify_model_override: str = ""  # 空 = 自動降家族（Opus→Sonnet→Haiku）；填模型 ID 覆寫
