@@ -14,6 +14,7 @@ from app.core.llm.adapters.base import (
 )
 from app.core.llm.adapters.claude_adapter import ClaudeAdapter
 from app.core.llm.adapters.claude_subscription import ClaudeSubscriptionAdapter
+from app.core.llm.adapters.codex_subscription import CodexSubscriptionAdapter
 from app.core.llm.adapters.factory import create_adapter
 from app.core.llm.adapters.gemini_adapter import GeminiAdapter
 from app.core.llm.adapters.ollama_adapter import OllamaAdapter
@@ -22,7 +23,7 @@ from app.core.llm.adapters.openai_adapter import OpenAIAdapter
 __all__ = [
     "BaseLLMAdapter", "LLMResponse", "StreamEvent", "TokenUsage",
     "OpenAIAdapter", "GeminiAdapter", "ClaudeAdapter",
-    "ClaudeSubscriptionAdapter", "OllamaAdapter",
+    "ClaudeSubscriptionAdapter", "CodexSubscriptionAdapter", "OllamaAdapter",
     "create_adapter", "estimate_cost",
     "_looks_rate_limited", "_minimal_r2_chart_state",
 ]

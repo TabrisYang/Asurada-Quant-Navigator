@@ -48,6 +48,12 @@ class TestPickVerifierModel:
         assert pick_verifier_model("gemini", "gemini-2.0-flash") == "gemini-2.0-flash-lite"
         assert pick_verifier_model("gemini", "gemini-2.0-flash-lite") == "gemini-2.0-flash-lite"
 
+    def test_codex_subscription_down(self):
+        assert pick_verifier_model("codex_subscription", "gpt-5.6-terra") == "gpt-5.6-luna"
+        assert pick_verifier_model("codex_subscription", "gpt-5.6-luna") == "gpt-5.6-luna"
+        assert pick_verifier_model("codex_subscription", "gpt-5.4-mini") == "gpt-5.4-mini"
+        assert pick_verifier_model("codex_subscription", "gpt-5.5") == "gpt-5.6-luna"
+
     def test_ollama_same_model(self):
         assert pick_verifier_model("ollama", "llama3") == "llama3"
 

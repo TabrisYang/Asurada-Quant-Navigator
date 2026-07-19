@@ -385,8 +385,19 @@ def _auto_calc_indicator_values(
     existing_keys = set((chart_state.get("indicatorValues") or {}).keys())
     need_calc: list[str] = []
 
-    is_deep = bool(_intents & {"backtest", "quant_research", "event_analysis", "calibrate"})
-    is_analysis = "analysis" in _intents
+    # v156.2：補全觸發清單 — 原本 conditional_prob/scenario/smc 等分析型意圖不在
+    # 清單內 → 後端不補算指標 → AI 只能回「未啟用 RSI/EMA/ATR」或靠自覺開指標
+    #（機率性，Codex 等模型服從度不一）。改為所有分析型意圖都確定性補算。
+    is_deep = bool(_intents & {
+        "backtest", "quant_research", "event_analysis", "calibrate",
+        "deep_analysis", "deep_phase1", "deep_phase2", "deep_phase3",
+        "comprehensive_analysis",
+    })
+    is_analysis = bool(_intents & {
+        "analysis", "conditional_prob", "scenario", "smc",
+        "momentum_analysis", "factor_validation", "strategy_backtest",
+        "regime_analysis",
+    })
 
     # ── 核心修復：分析意圖時「強制重算」所有核心指標 ──
     # 前端傳來的 indicatorValues 可能是舊幣種/舊時間框架的殘留值，
@@ -2013,7 +2024,7 @@ async def chat(request: ChatRequest):
 
     provider, api_key, base_url, model_name = _resolve_api_key(request)
 
-    if not api_key and provider not in ("ollama", "claude_subscription"):
+    if not api_key and provider not in ("ollama", "claude_subscription", "codex_subscription"):
         msg = (
             "Session 已過期，請重新在設定中輸入 API Key。"
             if request.session_id
@@ -2134,7 +2145,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
     # ★ 輕量前置處理（< 50ms）：API key 解析 + adapter 建立
     provider, api_key, base_url, model_name = _resolve_api_key(request)
 
-    if not api_key and provider not in ("ollama", "claude_subscription"):
+    if not api_key and provider not in ("ollama", "claude_subscription", "codex_subscription"):
         async def no_key_gen():
             msg = "Session 已過期，請重新在設定中輸入 API Key。" if request.session_id \
                 else f"請先在設定中輸入 {provider.upper()} 的 API Key。點擊右上角「設定」進行配置。"
@@ -3744,7 +3755,7 @@ async def preview_distill(request: ChatRequest):
 
     async def event_gen():
         provider, api_key, base_url, model_name = _resolve_api_key(request)
-        if not api_key and provider not in ("ollama", "claude_subscription"):
+        if not api_key and provider not in ("ollama", "claude_subscription", "codex_subscription"):
             yield _sse_event("error", {"message": "需要有效的 LLM session 才能執行蒸餾"})
             yield _sse_event("done", {})
             return

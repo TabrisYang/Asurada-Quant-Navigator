@@ -30,6 +30,8 @@ async def discover_models(
     elif provider == "claude_subscription":
         # api_key 在訂閱模式承載「選填」的 per-user OAuth token；無則走本機登入
         return await _discover_claude_subscription(oauth_token=api_key or None)
+    elif provider == "codex_subscription":
+        return await _discover_codex_subscription()
     elif provider == "ollama":
         return await _discover_ollama(base_url or "http://localhost:11434")
     else:
@@ -338,3 +340,58 @@ async def _discover_ollama(base_url: str) -> list[dict]:
     except Exception as e:
         logger.error(f"Ollama 模型列表取得失敗: {e}")
         raise
+
+
+# ─── Codex（ChatGPT 訂閱制）──────────────────────────
+
+# 靜態 fallback（cache 不存在時用；名單會過時，僅保底）
+_CODEX_STATIC = [
+    {"id": "gpt-5.6-terra", "name": "GPT-5.6-Terra", "description": "均衡主力模型"},
+    {"id": "gpt-5.6-luna", "name": "GPT-5.6-Luna", "description": "快速省額度"},
+    {"id": "gpt-5.5", "name": "GPT-5.5", "description": "前沿推理模型"},
+    {"id": "gpt-5.4-mini", "name": "GPT-5.4-Mini", "description": "輕量低耗"},
+]
+
+# 不適合對話用途的內部模型（不列給使用者）
+_CODEX_SKIP_SLUGS = ("auto-review",)
+
+
+def _codex_models_cache_path():
+    """Codex app/CLI 會把帳號可用模型清單同步到本機 cache。"""
+    from pathlib import Path as _P
+    import os
+    codex_home = os.environ.get("CODEX_HOME") or str(_P.home() / ".codex")
+    return _P(codex_home) / "models_cache.json"
+
+
+async def _discover_codex_subscription() -> list[dict]:
+    """列出 ChatGPT 訂閱制（Codex）可用模型。
+
+    首選：讀本機 ~/.codex/models_cache.json — 這是 Codex app/CLI 向帳號
+    同步下來的「此帳號實際可用」最新清單（含 GPT-5.6 等新版），零額度成本、
+    永遠跟上 OpenAI 發版。cache 不存在（從未跑過 codex）→ 靜態保底清單。
+    """
+    import json
+
+    cache_path = _codex_models_cache_path()
+    try:
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
+        models = []
+        for m in data.get("models", []):
+            slug = m.get("slug") or ""
+            if not slug or any(skip in slug for skip in _CODEX_SKIP_SLUGS):
+                continue
+            models.append({
+                "id": slug,
+                "name": m.get("display_name") or slug,
+                "description": (m.get("description") or "")[:80],
+            })
+        if models:
+            fetched = str(data.get("fetched_at", ""))[:10]
+            logger.info(f"Codex 模型清單：讀取帳號快取 {len(models)} 個（同步於 {fetched}）")
+            return models
+    except FileNotFoundError:
+        logger.info("Codex models_cache.json 不存在（未跑過 codex），回靜態清單")
+    except Exception as e:
+        logger.warning(f"Codex 模型快取讀取失敗，回靜態清單: {e}")
+    return list(_CODEX_STATIC)

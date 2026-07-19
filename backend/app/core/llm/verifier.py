@@ -70,6 +70,14 @@ def pick_verifier_model(provider: str, main_model: str, override: str = "") -> s
         m = _CLAUDE_FAMILY_RE.search(mid)
         return _CLAUDE_API_DOWN.get(m.group(1), "claude-3-5-haiku-20241022") if m else "claude-3-5-haiku-20241022"
 
+    if provider == "codex_subscription":
+        # 已是輕量款（mini/luna 命名慣例）→ 同模型；terra → 同版 luna；其餘退 luna
+        if "mini" in mid or "luna" in mid:
+            return main_model
+        if "terra" in mid:
+            return mid.replace("terra", "luna")
+        return "gpt-5.6-luna"
+
     if provider == "openai":
         if "mini" in mid or "nano" in mid:
             return main_model

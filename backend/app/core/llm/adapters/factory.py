@@ -5,6 +5,7 @@ from typing import Optional
 from app.core.llm.adapters.base import BaseLLMAdapter
 from app.core.llm.adapters.claude_adapter import ClaudeAdapter
 from app.core.llm.adapters.claude_subscription import ClaudeSubscriptionAdapter
+from app.core.llm.adapters.codex_subscription import CodexSubscriptionAdapter, check_codex_cli_available
 from app.core.llm.adapters.gemini_adapter import GeminiAdapter
 from app.core.llm.adapters.ollama_adapter import OllamaAdapter
 from app.core.llm.adapters.openai_adapter import OpenAIAdapter
@@ -49,6 +50,14 @@ def create_adapter(
         if not status["available"]:
             raise ValueError(status["error"] or "Claude CLI 不可用")
         return ClaudeSubscriptionAdapter(model=model_name, oauth_token=oauth_token)
+
+    elif provider == "codex_subscription":
+        # ChatGPT 訂閱制（Codex CLI「Sign in with ChatGPT」）：無需 API key，
+        # 額度計入使用者 ChatGPT Plus/Pro 訂閱。僅支援本機登入（~/.codex/auth.json）。
+        status = check_codex_cli_available()
+        if not status["available"]:
+            raise ValueError(status["error"] or "Codex CLI 不可用")
+        return CodexSubscriptionAdapter(model=model_name)
 
     elif provider == "ollama":
         return OllamaAdapter(

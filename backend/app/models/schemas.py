@@ -33,6 +33,7 @@ class LLMProvider(str, Enum):
     GEMINI = "gemini"
     CLAUDE = "claude"
     CLAUDE_SUBSCRIPTION = "claude_subscription"
+    CODEX_SUBSCRIPTION = "codex_subscription"
     OLLAMA = "ollama"
 
 

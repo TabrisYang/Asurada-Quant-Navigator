@@ -6,7 +6,7 @@ export type Timeframe = '15m' | '1h' | '4h' | '1d' | '1w';
 
 export type DisplayMode = 'overlay' | 'sub_chart' | 'info_panel';
 
-export type LLMProvider = 'openai' | 'gemini' | 'claude' | 'claude_subscription' | 'ollama';
+export type LLMProvider = 'openai' | 'gemini' | 'claude' | 'claude_subscription' | 'codex_subscription' | 'ollama';
 
 export type IndicatorAction = 'add' | 'remove' | 'update';
 

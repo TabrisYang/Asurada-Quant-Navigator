@@ -68,6 +68,20 @@ async def configure_llm(request: LLMConfigRequest):
             "message": f"已設定 LLM 供應商為 {provider}（無需 API Key）",
         }
 
+    if provider == "codex_subscription":
+        # ChatGPT 訂閱制（Codex CLI）：無需 API key，走本機 codex login 憑證
+        session_id = key_manager.store_key(
+            api_key="",
+            provider=provider,
+            model_name=request.model_name,
+        )
+        return {
+            "status": "ok",
+            "provider": provider,
+            "session_id": session_id,
+            "message": "已設定為 ChatGPT 訂閱制（使用本機 Codex CLI 登入憑證）",
+        }
+
     if provider == "claude_subscription":
         # api_key 在此「選填」：使用者各自貼上自己的 OAuth token（claude setup-token 產生），
         # 則計入該使用者自己的訂閱；留空則用本機 Claude Code 登入憑證（站長本機模式）。
@@ -128,7 +142,7 @@ async def test_llm_connection(request: LLMConfigRequest):
     if not api_key and request.api_key:
         api_key = request.api_key
 
-    if not api_key and provider not in ("ollama", "claude_subscription"):
+    if not api_key and provider not in ("ollama", "claude_subscription", "codex_subscription"):
         if session_expired:
             raise HTTPException(
                 status_code=401,
@@ -253,6 +267,15 @@ async def list_llm_providers():
                 ),
             },
             {
+                "id": "codex_subscription",
+                "name": "ChatGPT 訂閱制（Codex）",
+                "requires_key": False,
+                "description": (
+                    "用 ChatGPT Plus/Pro 訂閱額度（OpenAI Codex CLI）。需先安裝並登入："
+                    "npm install -g @openai/codex && codex login。模型為 Codex 系列；回應為整段送出（非逐字串流）。"
+                ),
+            },
+            {
                 "id": "ollama",
                 "name": "本地 Ollama",
                 "requires_key": False,
@@ -281,7 +304,7 @@ async def list_available_models(request: LLMConfigRequest):
     if not api_key and request.api_key:
         api_key = request.api_key
 
-    if not api_key and provider not in ("ollama", "claude_subscription"):
+    if not api_key and provider not in ("ollama", "claude_subscription", "codex_subscription"):
         if session_expired:
             raise HTTPException(
                 status_code=401,

@@ -10,6 +10,7 @@ from app.core.llm.adapters import (
     BaseLLMAdapter,
     ClaudeAdapter,
     ClaudeSubscriptionAdapter,
+    CodexSubscriptionAdapter,
     GeminiAdapter,
     LLMResponse,
     OllamaAdapter,
@@ -25,7 +26,7 @@ from app.core.llm.adapters import (
 __all__ = [
     "BaseLLMAdapter", "LLMResponse", "StreamEvent", "TokenUsage",
     "OpenAIAdapter", "GeminiAdapter", "ClaudeAdapter",
-    "ClaudeSubscriptionAdapter", "OllamaAdapter",
+    "ClaudeSubscriptionAdapter", "CodexSubscriptionAdapter", "OllamaAdapter",
     "create_adapter", "estimate_cost",
     "_looks_rate_limited", "_minimal_r2_chart_state",
 ]

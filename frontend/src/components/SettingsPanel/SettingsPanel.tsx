@@ -26,6 +26,7 @@ const LLM_PROVIDERS: { id: LLMProvider; name: string; requiresKey: boolean; desc
   { id: 'gemini', name: 'Google Gemini', requiresKey: true, desc: '免費額度較高（僅 API Key，無訂閱串接）' },
   { id: 'claude', name: 'Anthropic Claude (API Key)', requiresKey: true, desc: '推理能力強，按 token 計費' },
   { id: 'claude_subscription', name: 'Claude 訂閱制', requiresKey: false, desc: '用 Claude 訂閱額度（本機登入，或各自帶 setup-token）' },
+  { id: 'codex_subscription', name: 'ChatGPT 訂閱制（Codex）', requiresKey: false, desc: '用 ChatGPT Plus/Pro 訂閱額度（本機 codex login，Codex 系列模型）' },
   { id: 'ollama', name: '本地 Ollama', requiresKey: false, desc: '完全免費，無需 API Key' },
 ];
 
@@ -452,6 +453,33 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
           </div>
         )}
 
+        {/* ===== ChatGPT 訂閱制（Codex）：無需 Key，直接偵測 ===== */}
+        {llmConfig.provider === 'codex_subscription' && (
+          <div className="mb-6">
+            <StepLabel step={2} text="偵測可用模型" />
+            <p className="text-xs mb-2" style={{ color: 'var(--text-secondary)' }}>
+              使用本機 OpenAI Codex 的 ChatGPT 登入憑證，額度計入你的 ChatGPT 訂閱方案。<br />
+              已安裝 Codex 桌面版 / IDE 擴充者可直接偵測（系統會自動找到內建 CLI）；否則先執行：{' '}
+              <code style={{ background: 'var(--bg-tertiary)', padding: '0 4px', borderRadius: 3 }}>npm install -g @openai/codex</code>{' '}
+              →{' '}
+              <code style={{ background: 'var(--bg-tertiary)', padding: '0 4px', borderRadius: 3 }}>codex login</code>（選 Sign in with ChatGPT）。
+            </p>
+            <button
+              onClick={handleDiscoverModels}
+              disabled={!canDiscover}
+              className="px-4 py-2 rounded-lg text-sm cursor-pointer transition-opacity hover:opacity-80 whitespace-nowrap disabled:opacity-40"
+              style={{ background: 'var(--accent-blue)', color: '#fff' }}
+            >
+              {loadingModels ? '偵測中（逐一驗證模型，約 1-2 分鐘）...' : '偵測模型'}
+            </button>
+            <p className="text-xs mt-2" style={{ color: 'var(--text-secondary)' }}>
+              模型清單讀取你帳號同步的最新可用清單（零額度成本、自動跟上新版）。<br />
+              ⚠️ 限制：模型為 Codex 系列（非 ChatGPT 全部模型）；回應為整段送出（非逐字串流）；
+              Plus 方案額度窗口較緊，重度分析建議搭配 Claude 訂閱制輪替。
+            </p>
+          </div>
+        )}
+
         {/* ===== Ollama Base URL + 探測 ===== */}
         {llmConfig.provider === 'ollama' && (
           <div className="mb-6">
@@ -621,6 +649,28 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
               />
             </button>
           </div>
+        </div>
+
+        {/* ===== API Token（v155 選配認證，後端 .env 設 API_TOKEN 時才需要）===== */}
+        <div className="mt-4 pt-4" style={{ borderTop: '1px solid var(--border-primary)' }}>
+          <div className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
+            API Token（選配）
+          </div>
+          <div className="text-xs mt-0.5 mb-2" style={{ color: 'var(--text-secondary)' }}>
+            後端 .env 設定了 API_TOKEN 時（例如刻意開放區網存取），在此輸入同一組 token；未設定則留空
+          </div>
+          <input
+            type="password"
+            defaultValue={localStorage.getItem('asura_api_token') ?? ''}
+            onChange={(e) => {
+              const v = e.target.value.trim();
+              if (v) localStorage.setItem('asura_api_token', v);
+              else localStorage.removeItem('asura_api_token');
+            }}
+            placeholder="留空 = 不使用"
+            className="w-full px-3 py-2 rounded text-sm outline-none"
+            style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border-primary)' }}
+          />
         </div>
 
         {/* ===== 清除 Session 快取 ===== */}

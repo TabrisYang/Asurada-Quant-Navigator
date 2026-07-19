@@ -28,6 +28,8 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
         token 只存在記憶體+加密 store、只經 env 傳給子進程，永不寫 log / 不落地明文。
     """
 
+    _PROVIDER_NAME = "claude_subscription"  # 子類（codex_subscription）覆寫
+
     def __init__(self, model: str = "sonnet", oauth_token: Optional[str] = None):
         self.model = model
         self.oauth_token = oauth_token or None
@@ -180,7 +182,7 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
             completion_tokens=out,
             total_tokens=inp + out + cache_read + cache_create,
             model=model,
-            provider="claude_subscription",
+            provider="claude_subscription",  # staticmethod（claude stream-json 專用，codex 子類不經此路徑）
         )
 
     async def chat(
@@ -224,7 +226,7 @@ class ClaudeSubscriptionAdapter(BaseLLMAdapter):
                     if not usage:
                         usage = TokenUsage(
                             prompt_tokens=0, completion_tokens=0, total_tokens=0,
-                            model=self.model, provider="claude_subscription",
+                            model=self.model, provider=self._PROVIDER_NAME,
                         )
                     clean_text, function_calls = self._parse_tool_calls(full_text)
                     return LLMResponse(

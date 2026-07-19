@@ -209,6 +209,7 @@ _PRICING: dict[str, dict[str, tuple[float, float]]] = {
         "claude-3-opus": (15.00, 75.00),
     },
     "claude_subscription": {},  # 訂閱制，無額外費用
+    "codex_subscription": {},   # ChatGPT 訂閱制，無額外費用
     "ollama": {},  # 本地免費
 }
 

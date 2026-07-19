@@ -137,6 +137,9 @@ class Settings(BaseSettings):
     # 預設 False（灰度）；確認 shadow mode 不劣化後再切 True。
     comprehensive_pipeline_enabled: bool = False
 
+    # ── ChatGPT 訂閱制（Codex CLI）：執行檔路徑覆寫（空 = 自動尋找）──
+    codex_cli_path: str = ""
+
     # ── 回測：台股現股賣出證交稅 0.3%（backtest/engine.py，僅 /TWD 標的觸發）──
     tw_tax_enabled: bool = True
 
