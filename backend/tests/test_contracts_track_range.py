@@ -88,6 +88,27 @@ class TestTrackRangeResultContract:
         events = _collect("2026-05-01", "2026-05-15")
         assert any(e["type"] == "error" for e in events)
 
+    def test_track_history_roundtrip(self, monkeypatch, tmp_path):
+        # v155：追蹤落地 save→list→get，result 契約與 SSE result 一致
+        from app.core.tw_scan_history import TwScanHistory
+        self._patch(monkeypatch)
+        events = _collect("2026-05-01", "2026-05-15", pctile_threshold=101)
+        result = events[-1]
+
+        store = TwScanHistory(db_path=tmp_path / "t.db")
+        tid = store.save_track(params={"start_date": "2026-05-01"}, result=result)
+        items = store.list_track_recent()
+        assert items and items[0]["track_id"] == tid
+        assert items[0]["total_matched"] == result["total_matched"]
+        loaded = store.get_track(tid)
+        assert loaded is not None
+        r2 = loaded["result"]
+        assert set(r2["symbols"][0]["daily_features"][result["scan_dates"][0]] or
+                   next(f for f in r2["symbols"][0]["daily_features"].values() if f)) \
+            .issuperset({"close", "bb_pctile", "matched"})
+        assert r2["generated_at"] == result["generated_at"]
+        assert store.get_track("nonexistent") is None
+
     def test_export_csv_smoke(self, monkeypatch):
         self._patch(monkeypatch)
         events = _collect("2026-05-01", "2026-05-15", pctile_threshold=101)

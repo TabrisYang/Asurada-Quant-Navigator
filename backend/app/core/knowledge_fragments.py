@@ -209,6 +209,13 @@ class KnowledgeFragmentStore:
                 CREATE INDEX IF NOT EXISTS idx_frag_symbol
                 ON fragments (symbol)
             """)
+            # v155 migration：refuted_count — 碎片來源預測被驗證錯誤的次數
+            try:
+                self._conn.execute(
+                    "ALTER TABLE fragments ADD COLUMN refuted_count INTEGER NOT NULL DEFAULT 0"
+                )
+            except sqlite3.OperationalError:
+                pass  # 欄位已存在
             self._conn.commit()
 
             count = self._conn.execute("SELECT COUNT(*) FROM fragments").fetchone()[0]
@@ -361,7 +368,7 @@ class KnowledgeFragmentStore:
             params.extend([now, ttl_seconds])
 
             rows = self._conn.execute(
-                f"SELECT id, content, embedding, fragment_type, created_at, hit_count, symbol "
+                f"SELECT id, content, embedding, fragment_type, created_at, hit_count, symbol, refuted_count "
                 f"FROM fragments {where_clause}",
                 params,
             ).fetchall()
@@ -370,7 +377,7 @@ class KnowledgeFragmentStore:
                 return []
 
             results = []
-            for row_id, content, emb_blob, ftype, created_at, hit_count, frag_symbol in rows:
+            for row_id, content, emb_blob, ftype, created_at, hit_count, frag_symbol, refuted_count in rows:
                 cached_vec = np.frombuffer(emb_blob, dtype=np.float32)
                 if cached_vec.shape[0] != embedding_service.get_vector_dim():
                     continue
@@ -378,7 +385,7 @@ class KnowledgeFragmentStore:
                 if sim < min_similarity:
                     continue
 
-                quality = _compute_fragment_quality(ftype, hit_count)
+                quality = _compute_fragment_quality(ftype, hit_count) * (0.5 ** refuted_count)
                 days_old = (now - created_at) / 86400
                 time_freshness = float(np.exp(-0.023 * days_old))  # ~30-day half-life
 
@@ -456,6 +463,37 @@ class KnowledgeFragmentStore:
                 logger.debug(f"知識碎片修剪：{symbol} 刪除 {excess} 筆")
         except Exception as e:
             logger.warning(f"知識碎片修剪失敗: {e}")
+
+    def penalize_by_source(self, source_question: str, symbol: str) -> int:
+        """v155 證偽淘汰：來源預測被驗證錯誤 → 同源碎片 refuted_count+1，
+        累計 2 次直接刪除（不等 90 天 TTL）。種子碎片不受影響。
+
+        join key = source_question（predictions 存全文、fragments 截 200 字，
+        呼叫端需先截斷）。回傳受影響筆數。
+        """
+        if not self._conn or not source_question:
+            return 0
+        try:
+            cur = self._conn.execute(
+                "UPDATE fragments SET refuted_count = refuted_count + 1 "
+                "WHERE source_question = ? AND symbol = ? AND is_seed = 0",
+                (source_question, symbol),
+            )
+            n_penalized = cur.rowcount
+            cur2 = self._conn.execute(
+                "DELETE FROM fragments WHERE refuted_count >= 2 AND is_seed = 0",
+            )
+            n_deleted = cur2.rowcount
+            self._conn.commit()
+            if n_penalized:
+                logger.info(
+                    f"[fragment_refute] 降權 {n_penalized} 筆（symbol={symbol}）"
+                    + (f"，刪除 {n_deleted} 筆（refuted>=2）" if n_deleted else "")
+                )
+            return n_penalized
+        except Exception as e:
+            logger.warning(f"碎片證偽降權失敗: {e}")
+            return 0
 
     def cleanup_expired(self):
         """清理過期碎片（保留種子碎片）"""

@@ -9,6 +9,25 @@ const api = axios.create({
   headers: { 'Content-Type': 'application/json' },
 });
 
+// v155 選配 API 認證：後端設了 API_TOKEN 時，前端在設定面板輸入同一組 token
+// （存 localStorage），所有請求自動附帶。後端沒設 token 時此 header 被忽略。
+export const API_TOKEN_STORAGE_KEY = 'asura_api_token';
+
+api.interceptors.request.use((config) => {
+  const t = localStorage.getItem(API_TOKEN_STORAGE_KEY);
+  if (t) config.headers['X-API-Token'] = t;
+  return config;
+});
+
+/** 原生 fetch 的統一包裝（SSE / 下載用）：自動附 X-API-Token */
+export function apiFetch(input: string, init?: RequestInit): Promise<Response> {
+  const t = localStorage.getItem(API_TOKEN_STORAGE_KEY);
+  if (!t) return fetch(input, init);
+  const headers = new Headers(init?.headers);
+  headers.set('X-API-Token', t);
+  return fetch(input, { ...init, headers });
+}
+
 // 統一錯誤攔截：所有 API 錯誤不再拋出未處理異常
 api.interceptors.response.use(
   (response) => response,
@@ -254,7 +273,7 @@ export function streamChatMessage(
         controller.abort();
       }, HEADERS_TIMEOUT_MS);
       try {
-        const response = await fetch('/api/chat/stream', {
+        const response = await apiFetch('/api/chat/stream', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
@@ -563,7 +582,7 @@ export function streamTwScan(
 
   const promise = (async () => {
     try {
-      const response = await fetch('/api/scanner/tw-bb-width', {
+      const response = await apiFetch('/api/scanner/tw-bb-width', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(request),
@@ -798,7 +817,7 @@ export function streamTwScanRange(
 
   const promise = (async () => {
     try {
-      const response = await fetch(`/api/scanner/tw-bb-width/range?${qs}`, {
+      const response = await apiFetch(`/api/scanner/tw-bb-width/range?${qs}`, {
         method: 'GET',
         signal: controller.signal,
       });
@@ -866,7 +885,7 @@ export async function downloadTwScanRangeCSV(params: {
   _appendTrackFilterParams(qsParams, params);
   const qs = qsParams.toString();
 
-  const response = await fetch(`/api/scanner/tw-bb-width/range/export?${qs}`, {
+  const response = await apiFetch(`/api/scanner/tw-bb-width/range/export?${qs}`, {
     method: 'GET',
   });
   if (!response.ok) {
@@ -926,6 +945,26 @@ export async function exportTrackToGoogleSheet(payload: {
 }): Promise<TwSheetExportResult> {
   const res = await api.post('/google-sheets/export', payload);
   return res.data as TwSheetExportResult;
+}
+
+// ===== 跨日追蹤歷史（v155：結果落地，重開面板不用重跑）=====
+
+export interface TwTrackHistoryItem {
+  track_id: string;
+  generated_at: string;
+  params: { start_date: string; end_date: string; scope: string; pctile_threshold: number } & Record<string, unknown>;
+  total_matched: number;
+  duration_sec: number;
+}
+
+export async function fetchTwTrackHistory(limit = 10): Promise<{ items: TwTrackHistoryItem[] }> {
+  const res = await api.get('/scanner/tw-bb-width/range/history', { params: { limit } });
+  return res.data as { items: TwTrackHistoryItem[] };
+}
+
+export async function fetchTwTrackHistoryItem(trackId: string): Promise<{ track_id: string; params: Record<string, unknown>; result: TwTrackRangeResult }> {
+  const res = await api.get(`/scanner/tw-bb-width/range/history/${trackId}`);
+  return res.data as { track_id: string; params: Record<string, unknown>; result: TwTrackRangeResult };
 }
 
 // ===== 台股 EPS 批次查詢（跨日追蹤表格的「上年度 / 最新季 EPS」欄位）=====
@@ -1051,7 +1090,7 @@ export function streamDistillPreview(
 
   (async () => {
     try {
-      const response = await fetch('/api/chat/distill/preview', {
+      const response = await apiFetch('/api/chat/distill/preview', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1699,10 +1738,19 @@ export async function fetchLatestSMC(symbol: string, timeframe: string = '1d') {
   return res.data;
 }
 
-export function exportSMCCsv(symbol: string, timeframe: string = '1d') {
+export async function exportSMCCsv(symbol: string, timeframe: string = '1d') {
+  // v155：window.open 無法帶 X-API-Token header → 改 fetch+blob 下載
   const encodedSymbol = encodeURIComponent(symbol);
   const baseUrl = api.defaults.baseURL || '/api';
-  window.open(`${baseUrl}/smc/export-csv/${encodedSymbol}?timeframe=${timeframe}`, '_blank');
+  const response = await apiFetch(`${baseUrl}/smc/export-csv/${encodedSymbol}?timeframe=${timeframe}`);
+  if (!response.ok) throw new Error(`匯出失敗 (${response.status})`);
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `smc_${symbol.replace('/', '_')}_${timeframe}.csv`;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 // ===== 系統通用設定 =====

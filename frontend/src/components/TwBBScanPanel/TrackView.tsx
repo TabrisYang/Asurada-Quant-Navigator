@@ -9,6 +9,9 @@ import {
   exportTrackToGoogleSheet,
   unlockGoogleSheets,
   fetchTwEpsBatch,
+  fetchTwTrackHistory,
+  fetchTwTrackHistoryItem,
+  type TwTrackHistoryItem,
   type TwTrackRangeResult,
   type TwTrackProgress,
   type TwTrackSymbol,
@@ -310,6 +313,35 @@ export function TrackView({ pctileThreshold }: { pctileThreshold: number }) {
 
   const abortRef = useRef<(() => void) | null>(null);
 
+  // v155：追蹤歷史（結果落地）— 開面板自動載入上次結果、下拉可回顧
+  const [trackHistory, setTrackHistory] = useState<TwTrackHistoryItem[]>([]);
+  const [historicalAt, setHistoricalAt] = useState<string | null>(null);
+  const historyLoadedRef = useRef(false);
+
+  const loadHistoryItem = useCallback(async (trackId: string) => {
+    try {
+      const item = await fetchTwTrackHistoryItem(trackId);
+      setResult(item.result);
+      setHistoricalAt(item.result.generated_at || '（時間不明）');
+      setRemovedCodes(new Set());
+      setError(null);
+    } catch (e) {
+      toast(`載入歷史追蹤失敗：${(e as Error).message}`, 'error');
+    }
+  }, []);
+
+  useEffect(() => {
+    if (historyLoadedRef.current) return;
+    historyLoadedRef.current = true;
+    fetchTwTrackHistory(10)
+      .then((r) => {
+        setTrackHistory(r.items || []);
+        // 面板剛開（無結果）→ 自動載入最近一筆
+        if (r.items?.length) void loadHistoryItem(r.items[0].track_id);
+      })
+      .catch(() => { /* 無歷史或後端未升級，靜默 */ });
+  }, [loadHistoryItem]);
+
   // 點代號 → 切主圖表 + 送 AI 分析（同「本次掃描」分頁的分析按鈕行為）
   const setSymbol = useChartStore((s) => s.setSymbol);
   const setTimeframe = useChartStore((s) => s.setTimeframe);
@@ -445,6 +477,8 @@ export function TrackView({ pctileThreshold }: { pctileThreshold: number }) {
           setResult(r);
           setRunning(false);
           abortRef.current = null;
+          setHistoricalAt(null);  // 新追蹤 → 不再是歷史結果
+          fetchTwTrackHistory(10).then((h) => setTrackHistory(h.items || [])).catch(() => {});
           toast(`追蹤完成：${r.total_matched}/${r.total_scanned} 檔符合，耗時 ${r.duration_sec}s`, 'success');
         },
         onError: (e) => {
@@ -635,6 +669,24 @@ export function TrackView({ pctileThreshold }: { pctileThreshold: number }) {
             )}
           </button>
 
+          {trackHistory.length > 0 && (
+            <select
+              value=""
+              onChange={(e) => { if (e.target.value) void loadHistoryItem(e.target.value); }}
+              disabled={running}
+              className="px-2 py-1 rounded text-sm border-none outline-none cursor-pointer"
+              style={{ background: 'var(--bg-tertiary)', color: 'var(--text-secondary)' }}
+              title="回顧過去的追蹤結果（自動保留最近 30 筆）"
+            >
+              <option value="">📜 歷史結果</option>
+              {trackHistory.map((h) => (
+                <option key={h.track_id} value={h.track_id}>
+                  {h.generated_at}｜BB%&lt;{String(h.params.pctile_threshold)}｜符合 {h.total_matched} 檔
+                </option>
+              ))}
+            </select>
+          )}
+
           <div className="flex items-center gap-2">
             <label className="text-sm" style={{ color: 'var(--text-secondary)' }}>日期範圍</label>
             <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} disabled={running}
@@ -766,6 +818,13 @@ export function TrackView({ pctileThreshold }: { pctileThreshold: number }) {
 
         {result && !running && (
           <div className="text-sm flex items-center gap-2 flex-wrap" style={{ color: 'var(--text-secondary)' }}>
+            {historicalAt && (
+              <span className="px-2 py-0.5 rounded text-xs"
+                style={{ background: 'rgba(88,166,255,0.12)', color: 'var(--accent-blue)' }}
+                title="這是先前保存的追蹤結果；按「▶ 執行追蹤」以最新資料更新">
+                📜 上次結果 @{historicalAt}
+              </span>
+            )}
             <span>
               ✅ 追蹤完成：掃 <b style={{ color: 'var(--text-primary)' }}>{result.total_scanned}</b> 檔，
               符合 <b style={{ color: 'var(--accent-blue)' }}>{result.total_matched}</b> 檔，

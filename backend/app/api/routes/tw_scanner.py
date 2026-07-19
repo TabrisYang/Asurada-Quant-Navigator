@@ -227,10 +227,37 @@ async def stream_tw_bb_range(
             logger.exception("跨日追蹤過程發生未預期錯誤")
             yield _sse_event("error", {"error": f"追蹤錯誤: {e}"})
 
-        # 將 last_result 快取到記憶體，供 export 端點使用（用 query string params 重抓也可，但成本高）
-        # 註：目前不做快取，export 端點重新跑一次 stream 取結果。
+        # v155：追蹤結果落地（重開面板不用重跑、可回顧歷史）。export 端點不存避免重複。
+        if last_result is not None:
+            try:
+                tw_scan_history.save_track(
+                    params={
+                        "start_date": start_date, "end_date": end_date, "scope": scope,
+                        "pctile_threshold": pctile_threshold,
+                        "max_abs_bb_width": max_abs_bb_width,
+                        "max_close": max_close, "min_vol_5d": min_vol_5d,
+                    },
+                    result=last_result,
+                )
+            except Exception as e:
+                logger.warning(f"追蹤結果落地失敗（不影響回應）: {e}")
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@router.get("/tw-bb-width/range/history")
+async def list_track_history(limit: int = 10):
+    """最近 N 次跨日追蹤摘要（不含完整結果）"""
+    return {"items": tw_scan_history.list_track_recent(limit=min(limit, 30))}
+
+
+@router.get("/tw-bb-width/range/history/{track_id}")
+async def get_track_history(track_id: str):
+    """取特定一次跨日追蹤完整結果"""
+    item = tw_scan_history.get_track(track_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="找不到該次追蹤紀錄")
+    return item
 
 
 @router.get("/tw-bb-width/range/export")

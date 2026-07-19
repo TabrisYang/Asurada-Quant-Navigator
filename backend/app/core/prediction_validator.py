@@ -84,6 +84,26 @@ def validate_for_symbol(symbol: str) -> dict:
     return {"validated": count}
 
 
+def _refute_related_fragments(pred: dict, status: str, final_pct: float) -> None:
+    """v155 碎片證偽：預測被驗證錯誤（觸止損 / 到期虧損）時，
+    對同一來源問題產生的知識碎片降權（累計 2 次刪除）。
+
+    只讀 pred dict（來自 get_active），不動 prediction_tracker 程式。
+    validator 自產教訓碎片 source_question='auto_validation' 不在 join 範圍（predictions
+    端存的是使用者問題），無自噬風險。
+    """
+    if status != "hit_stop" and not (status == "expired" and final_pct < 0):
+        return
+    src = (pred.get("source_question") or "").strip()[:200]
+    if not src or src == "auto_validation":
+        return
+    try:
+        from app.core.knowledge_fragments import fragment_store
+        fragment_store.penalize_by_source(src, pred.get("symbol", ""))
+    except Exception as e:
+        logger.debug(f"碎片證偽降權失敗（不影響驗證流程）: {e}")
+
+
 def _validate_one(pred: dict, now: datetime) -> str:
     """驗證單一預測。返回 status 或 'still_active'/'no_data'。
 
@@ -209,6 +229,7 @@ def _validate_one(pred: dict, now: datetime) -> str:
         note=note,
         hit_at=hit_at,
     )
+    _refute_related_fragments(pred, status, final_pct)
 
     # 存儲里程碑數據
     if milestones_str:
@@ -436,6 +457,7 @@ def _validate_bilateral(pred: dict, now: datetime) -> str:
         note=note,
         hit_at=hit_at,
     )
+    _refute_related_fragments(winner, status, final_pct)
 
     logger.info(
         f"雙向預測 pair#{pair_id} 驗證: winner=#{winner['id']} {direction} {status} "

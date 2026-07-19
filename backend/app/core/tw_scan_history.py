@@ -60,6 +60,21 @@ class TwScanHistory:
             "CREATE INDEX IF NOT EXISTS idx_tw_bb_scans_at "
             "ON tw_bb_scans(scanned_at DESC)"
         )
+        # v155：跨日追蹤結果落地（重開面板不用重跑、可回顧歷史）
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS tw_track_runs (
+                track_id       TEXT PRIMARY KEY,
+                generated_at   TEXT NOT NULL,
+                params_json    TEXT NOT NULL,
+                result_json    TEXT NOT NULL,
+                total_matched  INTEGER NOT NULL,
+                duration_sec   REAL NOT NULL
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tw_track_runs_at "
+            "ON tw_track_runs(generated_at DESC)"
+        )
         conn.commit()
         conn.close()
         logger.info(f"TwScanHistory: 已初始化 {self._db_path}")
@@ -158,6 +173,73 @@ class TwScanHistory:
             "total_fail": row[7],
             "duration_sec": row[8],
             "failures": json.loads(failures_raw) if failures_raw else [],
+        }
+
+    # ─── v155：跨日追蹤落地 ────────────────────────
+
+    _MAX_TRACK_ROWS = 30
+
+    def save_track(self, *, params: dict, result: dict) -> str:
+        """保存一次跨日追蹤結果（result 為 SSE result 事件同形狀 dict），回傳 track_id。"""
+        track_id = uuid.uuid4().hex[:12]
+        conn = sqlite3.connect(self._db_path)
+        conn.execute(
+            "INSERT INTO tw_track_runs "
+            "(track_id, generated_at, params_json, result_json, total_matched, duration_sec) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                track_id,
+                result.get("generated_at") or datetime.now().isoformat(timespec="seconds"),
+                json.dumps(params, ensure_ascii=False),
+                json.dumps(result, ensure_ascii=False),
+                int(result.get("total_matched", 0)),
+                float(result.get("duration_sec", 0.0)),
+            ),
+        )
+        conn.execute(
+            "DELETE FROM tw_track_runs WHERE track_id NOT IN ("
+            "  SELECT track_id FROM tw_track_runs ORDER BY generated_at DESC LIMIT ?"
+            ")",
+            (self._MAX_TRACK_ROWS,),
+        )
+        conn.commit()
+        conn.close()
+        return track_id
+
+    def list_track_recent(self, limit: int = 10) -> list[dict]:
+        """最近 N 次追蹤摘要（不含 result_json，體積小）。"""
+        conn = sqlite3.connect(self._db_path)
+        rows = conn.execute(
+            "SELECT track_id, generated_at, params_json, total_matched, duration_sec "
+            "FROM tw_track_runs ORDER BY generated_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        conn.close()
+        return [
+            {
+                "track_id": r[0],
+                "generated_at": r[1],
+                "params": json.loads(r[2]),
+                "total_matched": r[3],
+                "duration_sec": r[4],
+            }
+            for r in rows
+        ]
+
+    def get_track(self, track_id: str) -> Optional[dict]:
+        """取特定一次完整追蹤結果（result 與 SSE result 事件同形狀）。"""
+        conn = sqlite3.connect(self._db_path)
+        row = conn.execute(
+            "SELECT track_id, params_json, result_json FROM tw_track_runs WHERE track_id = ?",
+            (track_id,),
+        ).fetchone()
+        conn.close()
+        if not row:
+            return None
+        return {
+            "track_id": row[0],
+            "params": json.loads(row[1]),
+            "result": json.loads(row[2]),
         }
 
     def delete(self, scan_id: str) -> bool:
