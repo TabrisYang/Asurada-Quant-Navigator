@@ -76,14 +76,20 @@ def test_get_regime_class_stats_long_pct_consistent():
 
 # ─── chat.py 注入邏輯 ──────────────────────────────────
 
-CHAT_PY = (
-    pathlib.Path(__file__).resolve().parent.parent / "app" / "api" / "routes" / "chat.py"
-)
+# v157：注入邏輯已從 chat.py 搬到 chat_context.py，改讀整個 chat*.py 家族的原始碼
+# （只掃 chat.py 會因為搬家而假性紅燈 / 未來假性綠燈）。
+_ROUTES = pathlib.Path(__file__).resolve().parent.parent / "app" / "api" / "routes"
+
+
+def _chat_family_src() -> str:
+    return "\n".join(
+        p.read_text(encoding="utf-8") for p in sorted(_ROUTES.glob("chat*.py"))
+    )
 
 
 def test_chat_py_injects_regime_warning():
     """chat.py 必須在 recent_accuracy 注入後加 regime_warning（防線 1）。"""
-    src = CHAT_PY.read_text(encoding="utf-8")
+    src = _chat_family_src()
     assert 'regime_warning' in src and 'get_regime_class_stats' in src, (
         "chat.py 必須注入 regime_warning（用 get_regime_class_stats 取資料）"
     )
@@ -94,7 +100,7 @@ def test_chat_py_injects_regime_warning():
 
 def test_chat_py_injects_direction_balance():
     """chat.py 必須注入 direction_balance（防線 3）。"""
-    src = CHAT_PY.read_text(encoding="utf-8")
+    src = _chat_family_src()
     assert 'direction_balance' in src, "chat.py 必須注入 direction_balance"
     assert 'biased_long' in src and 'biased_short' in src, (
         "direction_balance 必須含 biased_long / biased_short flag"

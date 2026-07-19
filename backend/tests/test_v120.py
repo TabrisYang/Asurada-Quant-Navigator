@@ -246,10 +246,9 @@ def test_v120_5_get_signal_combo_stats_empty_buckets():
 
 def test_v120_5_chat_py_injects_signal_history():
     """chat.py 必須在 recent_accuracy 注入後加 signal_history。"""
-    chat_py = (
-        pathlib.Path(__file__).resolve().parent.parent / "app" / "api" / "routes" / "chat.py"
-    )
-    src = chat_py.read_text(encoding="utf-8")
+    # v157：注入邏輯已搬到 chat_context.py，掃整個 chat*.py 家族
+    _routes = pathlib.Path(__file__).resolve().parent.parent / "app" / "api" / "routes"
+    src = "\n".join(p.read_text(encoding="utf-8") for p in sorted(_routes.glob("chat*.py")))
     assert "signal_history" in src, "chat.py 必須注入 signal_history（v120.5）"
     assert "get_signal_combo_stats" in src, "chat.py 必須呼叫 get_signal_combo_stats"
     assert "classify_all_signals" in src, "chat.py 必須呼叫 classify_all_signals"

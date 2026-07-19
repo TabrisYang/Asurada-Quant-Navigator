@@ -2,7 +2,7 @@
 
 檢查項目：
   1. 大型檔案行數限制（block 主要肥大檔案再膨脹）
-  2. chat.py 中 chart_state[X] 賦值次數限制（防 chart_state 再膨脹）
+  2. chat 路由家族中 chart_state[X] 賦值次數限制（防 chart_state 再膨脹）
   3. function_defs.py 中 _PROMPT_MODULES 數量限制
   4. CLAUDE.md / SHADOW_FEATURES.md / CHART_STATE_SCHEMA.md 是否仍存在
 
@@ -29,7 +29,13 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 # warning：黃線；block：紅線（超過會 fail commit）
 LINE_LIMITS: dict[str, tuple[int, int]] = {
     # 檔案路徑（相對 repo root）: (warning 行數, block 行數)
-    "backend/app/api/routes/chat.py": (3700, 4500),
+    # v157：chat.py 拆為 chat.py（路由＋stream 主迴圈）＋ 同層 4 個 helper 模組；
+    # 護欄跟著搬，避免「總量沒降只是換個檔案長」。
+    "backend/app/api/routes/chat.py": (2400, 2900),
+    "backend/app/api/routes/chat_context.py": (1600, 2000),
+    "backend/app/api/routes/chat_post.py": (500, 700),
+    "backend/app/api/routes/chat_text.py": (500, 700),
+    "backend/app/api/routes/chat_stream_utils.py": (300, 450),
     "backend/app/core/llm/function_defs.py": (3000, 3500),
     "backend/app/core/llm/prompt_modules.py": (2600, 3200),
     "backend/app/core/llm/executor.py": (2600, 3000),
@@ -98,24 +104,33 @@ def check_line_limits(soft: bool) -> tuple[list[str], list[str]]:
 
 
 def check_chart_state_inject(soft: bool) -> tuple[list[str], list[str]]:
-    """檢查 chat.py 中 chart_state 賦值次數。"""
+    """檢查 chat 路由家族中 chart_state 賦值次數。
+
+    v157：注入邏輯已搬到 chat_context.py，跨檔統計以防拆分後護欄變瞎
+    （也防有人把新欄位塞回 chat.py 繞過檢查）。
+    """
     warnings: list[str] = []
     blocks: list[str] = []
-    chat_py = _REPO_ROOT / "backend/app/api/routes/chat.py"
-    if not chat_py.exists():
+    text = ""
+    for rel in ("backend/app/api/routes/chat.py",
+                "backend/app/api/routes/chat_context.py",
+                "backend/app/api/routes/chat_post.py"):
+        path = _REPO_ROOT / rel
+        if path.exists():
+            text += path.read_text(encoding="utf-8", errors="ignore")
+    if not text:
         return warnings, blocks
-    text = chat_py.read_text(encoding="utf-8", errors="ignore")
     matches = CHAT_STATE_INJECT_PATTERN.findall(text)
     n = len(matches)
     if n >= CHAT_STATE_BLOCK and not soft:
         blocks.append(
-            f"❌ chat.py 中 chart_state[X]= 賦值 {n} 次 ≥ block {CHAT_STATE_BLOCK}。"
+            f"❌ chat 路由家族中 chart_state[X]= 賦值 {n} 次 ≥ block {CHAT_STATE_BLOCK}。"
             f"chart_state 已過度膨脹。新增前必讀 backend/docs/CHART_STATE_SCHEMA.md，"
             f"並評估能否合併現有欄位。"
         )
     elif n >= CHAT_STATE_MAX:
         warnings.append(
-            f"⚠️  chat.py 中 chart_state[X]= 賦值 {n} 次 ≥ warning {CHAT_STATE_MAX}（block 在 {CHAT_STATE_BLOCK}）。"
+            f"⚠️  chat 路由家族中 chart_state[X]= 賦值 {n} 次 ≥ warning {CHAT_STATE_MAX}（block 在 {CHAT_STATE_BLOCK}）。"
             f"請更新 backend/docs/CHART_STATE_SCHEMA.md。"
         )
     return warnings, blocks
